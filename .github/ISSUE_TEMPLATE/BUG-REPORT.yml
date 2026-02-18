@@ -1,0 +1,51 @@
+name: "Bug Report"
+description: Report a bug
+title: "[BUG] - <title>"
+labels: ["bug"]
+body:
+  - type: textarea
+    id: description
+    attributes:
+      label: "Description"
+      description: Describe the bug
+      placeholder: What happened? What did you expect?
+    validations:
+      required: true
+  - type: textarea
+    id: reprod
+    attributes:
+      label: "Steps to reproduce"
+      value: |
+        1. Configure forager with '...'
+        2. Run '...'
+        3. See error
+      render: bash
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: "Logs"
+      description: Relevant log output (journalctl -u nudgebee-forager -e)
+      render: bash
+    validations:
+      required: false
+  - type: dropdown
+    id: os
+    attributes:
+      label: "OS"
+      multiple: true
+      options:
+        - Ubuntu/Debian
+        - RHEL/CentOS
+        - Amazon Linux
+        - Other Linux
+    validations:
+      required: false
+  - type: input
+    id: version
+    attributes:
+      label: "Forager version"
+      placeholder: "e.g. 1.0.0 or latest"
+    validations:
+      required: false

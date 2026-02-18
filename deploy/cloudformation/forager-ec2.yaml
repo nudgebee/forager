@@ -1,0 +1,189 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Nudgebee Forager - Deploys a lightweight agent on an EC2 instance that
+  connects outbound to Nudgebee relay server and proxies requests to internal
+  datasources (databases, Prometheus, HTTP APIs).
+
+Parameters:
+  NudgebeeAccessKey:
+    Type: String
+    Description: Agent access key (from Nudgebee UI provisioning)
+    MinLength: 1
+
+  NudgebeeAccessSecret:
+    Type: String
+    Description: Agent access secret (from Nudgebee UI provisioning)
+    NoEcho: true
+    MinLength: 1
+
+  NudgebeeRelayURL:
+    Type: String
+    Description: Relay server WebSocket URL
+    Default: wss://relay.nudgebee.com/register
+
+  AgentVersion:
+    Type: String
+    Description: Forager version to install
+    Default: latest
+
+  InstanceType:
+    Type: String
+    Description: EC2 instance type
+    Default: t3.micro
+    AllowedValues:
+      - t3.micro
+      - t3.small
+      - t3.medium
+      - t4g.micro
+      - t4g.small
+      - t4g.medium
+
+  SubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet to launch the instance in (must have outbound internet access)
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC for the security group
+
+  KeyName:
+    Type: String
+    Description: (Optional) EC2 key pair for SSH access
+    Default: ''
+
+  EnableSecretsManagerAccess:
+    Type: String
+    Description: Grant the agent IAM permissions to read from AWS Secrets Manager (nudgebee/forager/* prefix)
+    Default: 'false'
+    AllowedValues:
+      - 'true'
+      - 'false'
+
+Conditions:
+  HasKeyName: !Not [!Equals [!Ref KeyName, '']]
+  HasSecretsManagerAccess: !Equals [!Ref EnableSecretsManagerAccess, 'true']
+  IsARM: !Or
+    - !Equals [!Ref InstanceType, t4g.micro]
+    - !Equals [!Ref InstanceType, t4g.small]
+    - !Equals [!Ref InstanceType, t4g.medium]
+
+Mappings:
+  # Amazon Linux 2023 AMIs (updated periodically)
+  RegionAMI:
+    us-east-1:
+      amd64: ami-0c02fb55956c7d316
+      arm64: ami-0b168c89474ef4301
+    us-west-2:
+      amd64: ami-0b20a6f09f8838d72
+      arm64: ami-09040d770ffe2224f
+    eu-west-1:
+      amd64: ami-0905a3c97561e0b69
+      arm64: ami-0589b554a2b6e6d72
+
+Resources:
+  ForagerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Nudgebee Forager - outbound only
+      VpcId: !Ref VpcId
+      SecurityGroupEgress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: HTTPS/WSS outbound to Nudgebee relay
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: HTTP outbound (package downloads)
+      Tags:
+        - Key: Name
+          Value: nudgebee-forager-sg
+
+  ForagerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub 'nudgebee-forager-${AWS::StackName}'
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - !If
+          - HasSecretsManagerAccess
+          - PolicyName: NudgebeeSecretsManagerRead
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - secretsmanager:GetSecretValue
+                    - secretsmanager:DescribeSecret
+                  Resource: !Sub 'arn:aws:secretsmanager:${AWS::Region}:${AWS::AccountId}:secret:nudgebee/forager/*'
+          - !Ref AWS::NoValue
+      Tags:
+        - Key: Name
+          Value: nudgebee-forager-role
+
+  ForagerInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref ForagerRole
+
+  ForagerInstance:
+    Type: AWS::EC2::Instance
+    CreationPolicy:
+      ResourceSignal:
+        Timeout: PT10M
+    Properties:
+      InstanceType: !Ref InstanceType
+      ImageId: !If
+        - IsARM
+        - !FindInMap [RegionAMI, !Ref 'AWS::Region', arm64]
+        - !FindInMap [RegionAMI, !Ref 'AWS::Region', amd64]
+      SubnetId: !Ref SubnetId
+      SecurityGroupIds:
+        - !Ref ForagerSecurityGroup
+      IamInstanceProfile: !Ref ForagerInstanceProfile
+      KeyName: !If [HasKeyName, !Ref KeyName, !Ref 'AWS::NoValue']
+      Tags:
+        - Key: Name
+          Value: nudgebee-forager
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash -xe
+          # Install Nudgebee Forager
+          export NB_ACCESS_KEY='${NudgebeeAccessKey}'
+          export NB_ACCESS_SECRET='${NudgebeeAccessSecret}'
+          export NB_RELAY_URL='${NudgebeeRelayURL}'
+          export NB_VERSION='${AgentVersion}'
+
+          curl -fsSL https://registry.nudgebee.com/downloads/forager/${AgentVersion}/install.sh | bash
+
+          # Signal CloudFormation
+          /opt/aws/bin/cfn-signal -e $? \
+            --stack ${AWS::StackName} \
+            --resource ForagerInstance \
+            --region ${AWS::Region}
+
+Outputs:
+  InstanceId:
+    Description: EC2 Instance ID
+    Value: !Ref ForagerInstance
+
+  PrivateIP:
+    Description: Private IP of the forager instance
+    Value: !GetAtt ForagerInstance.PrivateIp
+
+  SecurityGroupId:
+    Description: Security Group ID (add inbound rules if SSH access needed)
+    Value: !Ref ForagerSecurityGroup
+
+  IAMRoleArn:
+    Description: IAM Role ARN (for Secrets Manager access)
+    Value: !GetAtt ForagerRole.Arn

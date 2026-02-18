@@ -1,0 +1,10 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "forager.fullname" . }}-config
+  labels:
+    {{- include "forager.labels" . | nindent 4 }}
+data:
+  forager.yaml: |
+    relay_url: {{ .Values.forager.relayURL }}
+    data_dir: {{ .Values.forager.dataDir }}

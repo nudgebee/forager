@@ -1,0 +1,14 @@
+services:
+  forager:
+    build: .
+    environment:
+      - NB_RELAY_URL=wss://relay.nudgebee.com/register
+      - NB_ACCESS_KEY=${NB_ACCESS_KEY}
+      - NB_ACCESS_SECRET=${NB_ACCESS_SECRET}
+      - NB_DATA_DIR=/data
+    volumes:
+      - forager-data:/data
+    restart: unless-stopped
+
+volumes:
+  forager-data:

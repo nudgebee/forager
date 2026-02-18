@@ -1,0 +1,19 @@
+[Unit]
+Description=Nudgebee Forager
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=nudgebee
+Group=nudgebee
+ExecStart=/usr/local/bin/nudgebee-forager --config /etc/nudgebee/forager.yaml
+Restart=always
+RestartSec=5
+LimitNOFILE=65536
+StandardOutput=journal
+StandardError=journal
+WorkingDirectory=/var/lib/nudgebee
+
+[Install]
+WantedBy=multi-user.target

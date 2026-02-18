@@ -1,0 +1,37 @@
+replicaCount: 1
+
+image:
+  repository: 864186153326.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
+  pullPolicy: IfNotPresent
+  tag: 'latest'
+
+imagePullSecrets: []
+nameOverride: ''
+fullnameOverride: ''
+
+serviceAccount:
+  create: true
+  annotations: {}
+  name: ''
+
+podAnnotations: {}
+podSecurityContext: {}
+securityContext: {}
+
+forager:
+  relayURL: wss://relay.nudgebee.com/register
+  accessKey: ''
+  accessSecret: ''
+  dataDir: /data
+
+resources:
+  limits:
+    memory: 256Mi
+  requests:
+    cpu: 50m
+    memory: 128Mi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+annotations: {}

@@ -1,0 +1,28 @@
+name: "Feature Request"
+description: Suggest a new feature or datasource support
+title: "[REQUEST] - <title>"
+labels: ["enhancement"]
+body:
+  - type: textarea
+    id: summary
+    attributes:
+      label: "Summary"
+      description: Describe the feature or datasource you'd like supported
+      placeholder: Brief explanation of the feature
+    validations:
+      required: true
+  - type: textarea
+    id: use_case
+    attributes:
+      label: "Use case"
+      description: How would you use this feature?
+      placeholder: Describe your use case
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: "Alternatives considered"
+      description: Any workarounds or alternatives you've considered
+    validations:
+      required: false

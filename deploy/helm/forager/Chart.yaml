@@ -1,0 +1,6 @@
+apiVersion: v2
+name: forager
+description: Nudgebee Forager - lightweight agent for proxying requests to internal datasources
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
