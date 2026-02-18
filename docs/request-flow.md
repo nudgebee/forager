@@ -2,24 +2,16 @@
 
 ## Cloud → Agent → Datasource → Agent → Cloud
 
-```mermaid
-sequenceDiagram
-    participant Caller as Cloud API
-    participant Relay as Relay Server
-    participant RMQ as RabbitMQ
-    participant Agent as Forager Agent
-    participant DS as Datasource
-
-    Caller->>Relay: Request (e.g., run SQL query)
-    Relay->>RMQ: Publish to relay_requests_{account_id}_proxy
-    RMQ->>Relay: WS handler consumes from queue
-    Relay->>Agent: Send over WebSocket
-    Agent->>Agent: readLoop spawns handler goroutine
-    Agent->>Agent: Route to proxy by datasource_id
-    Agent->>DS: Execute against datasource
-    DS->>Agent: Result
-    Agent->>Relay: Response over WS (matching request_id)
-    Relay->>Caller: HTTP response (correlation ID match)
+```
+1. Cloud API receives request (e.g., run SQL query, call MCP tool)
+2. Relay server serializes request, publishes to RabbitMQ queue
+   Queue: relay_requests_{account_id}_proxy
+3. Relay's WebSocket handler consumes from queue, sends to agent over WS
+4. Agent's readLoop receives message, spawns goroutine for processing
+5. Handler routes to proxy module by datasource_id
+6. Proxy module executes against the datasource
+7. Response sent back over WS with matching request_id
+8. Relay matches response by correlation ID, returns to HTTP caller
 ```
 
 ## Message Routing
