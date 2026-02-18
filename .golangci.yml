@@ -2,8 +2,3 @@ version: "2"
 
 run:
   timeout: 10m
-
-issues:
-  exclude-dirs:
-    - bin
-    - deploy
