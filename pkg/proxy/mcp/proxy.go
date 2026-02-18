@@ -168,15 +168,9 @@ func (p *Proxy) handleSSE(ctx context.Context, req *proxy.ActionRequest) (*proxy
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	// Read entire body first to support fallback for non-SSE responses
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading MCP SSE response: %w", err)
-	}
-
 	// Parse SSE response — collect all "data:" lines into a single JSON-RPC response
 	var result strings.Builder
-	scanner := bufio.NewScanner(bytes.NewReader(respBody))
+	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
 		if strings.HasPrefix(line, "data: ") {
@@ -193,7 +187,11 @@ func (p *Proxy) handleSSE(ctx context.Context, req *proxy.ActionRequest) (*proxy
 
 	responseData := result.String()
 	if responseData == "" {
-		// Fallback: use entire response body if no SSE data lines were found
+		// Fallback: read entire response body if no SSE data lines found
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return nil, fmt.Errorf("reading MCP SSE fallback response: %w", err)
+		}
 		responseData = string(respBody)
 	}
 
