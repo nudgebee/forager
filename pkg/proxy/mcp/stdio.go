@@ -136,10 +136,11 @@ func (s *stdioProcess) close() error {
 		return err
 	case <-time.After(5 * time.Second):
 		// Force kill
+		pid := s.cmd.Process.Pid
+		s.logger.Warn("MCP stdio process force-killed", "pid", pid)
 		_ = s.cmd.Process.Kill()
-		<-done
-		s.logger.Warn("MCP stdio process force-killed", "pid", s.cmd.Process.Pid)
-		return nil
+		waitErr := <-done
+		return fmt.Errorf("process %d force-killed: %w", pid, waitErr)
 	}
 }
 
