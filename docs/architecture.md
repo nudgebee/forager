@@ -118,46 +118,45 @@ switch {
 case action == "datasource_config_sync":
     → handleConfigSync()        // Reconfigure all proxies
 
-case body.action_name != "":
-    → handleActionRequest()     // DB queries, MCP calls, SSH commands
-    → routes by datasource_id from params
+case datasource_id != "":
+    → handleRequest()           // Unified path: route by datasource_id
+    → works for all proxy types (DB, HTTP, MCP, etc.)
 
-case url != "":
-    → handleHTTPRequest()       // HTTP proxy (Grafana, Prometheus, etc.)
-    → routes to first http-proxy
+case datasource_id == "":
+    → handleLegacyRequest()     // Backward compat for old message formats
 }
 ```
 
-### Action Request Format
+### Unified Request Format
 
-Sent by cloud for DB queries, MCP tool calls, etc.:
+All requests use a single format with explicit datasource routing:
 
 ```json
 {
   "request_id": "abc-123",
-  "body": {
-    "action_name": "run_query",
-    "action_params": {
-      "datasource_id": "local:my-postgres",
-      "query": "SELECT version()"
-    }
+  "datasource_id": "local:my-postgres",
+  "action": "run_query",
+  "params": {
+    "query": "SELECT version()"
   }
 }
 ```
 
-### HTTP Proxy Request Format
-
-Sent by cloud for Grafana/Prometheus/custom HTTP APIs:
+For HTTP proxy requests (Grafana, Prometheus, custom APIs):
 
 ```json
 {
   "request_id": "abc-123",
+  "datasource_id": "local:my-grafana",
+  "action": "http_request",
   "method": "GET",
   "url": "/api/v1/query?query=up",
   "header": {"Authorization": ["Bearer token"]},
   "body": ""
 }
 ```
+
+The relay server wraps HTTP requests in unified format when the caller provides `X-NB-Datasource-ID` header. Legacy formats (without `datasource_id`) are still supported via fallback routing.
 
 ### Response Format
 

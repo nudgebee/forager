@@ -9,12 +9,14 @@ import (
 )
 
 // ActionRequest is an incoming request from the relay server.
+// All requests use a unified format with datasource_id for routing.
 type ActionRequest struct {
-	Action       string         `json:"action"`
+	RequestID    string         `json:"request_id"`
 	DatasourceID string         `json:"datasource_id"`
+	Action       string         `json:"action"`
 	Params       map[string]any `json:"params,omitempty"`
 
-	// For HTTP proxy requests
+	// HTTP fields (populated when action is "http_request")
 	Method string              `json:"method,omitempty"`
 	URL    string              `json:"url,omitempty"`
 	Header map[string][]string `json:"header,omitempty"`
