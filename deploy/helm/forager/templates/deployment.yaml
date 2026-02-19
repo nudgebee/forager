@@ -37,6 +37,8 @@ spec:
             {{- toYaml .Values.securityContext | nindent 12 }}
           image: {{ include "imageName" . }}
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          command:
+            - "./nudgebee-forager"
           args:
             - "--config"
             - "/etc/nudgebee/forager.yaml"
@@ -51,6 +53,10 @@ spec:
                 secretKeyRef:
                   name: {{ include "forager.fullname" . }}
                   key: access-secret
+            - name: NB_RELAY_URL
+              value: {{ .Values.forager.relayURL | quote }}
+            - name: NB_DATA_DIR
+              value: {{ .Values.forager.dataDir | quote }}
           volumeMounts:
             - name: config
               mountPath: /etc/nudgebee

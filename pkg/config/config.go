@@ -68,6 +68,14 @@ func Load(configPath string) (*Config, error) {
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
 	v.AutomaticEnv()
 
+	// Explicitly bind keys that may only come from env vars,
+	// since viper's AutomaticEnv + Unmarshal doesn't resolve
+	// env vars for keys absent from the config file.
+	_ = v.BindEnv("access_key")
+	_ = v.BindEnv("access_secret")
+	_ = v.BindEnv("relay_url")
+	_ = v.BindEnv("data_dir")
+
 	// Config file
 	if configPath != "" {
 		v.SetConfigFile(configPath)
