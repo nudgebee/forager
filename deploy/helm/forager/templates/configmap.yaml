@@ -10,3 +10,7 @@ data:
     data_dir: {{ .Values.forager.dataDir }}
     access_key: ""
     access_secret: ""
+    {{- if .Values.forager.datasources }}
+    datasources:
+      {{- toYaml .Values.forager.datasources | nindent 6 }}
+    {{- end }}
