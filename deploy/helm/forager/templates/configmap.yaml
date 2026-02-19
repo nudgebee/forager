@@ -8,3 +8,5 @@ data:
   forager.yaml: |
     relay_url: {{ .Values.forager.relayURL }}
     data_dir: {{ .Values.forager.dataDir }}
+    access_key: ""
+    access_secret: ""
