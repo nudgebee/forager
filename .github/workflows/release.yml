@@ -250,5 +250,5 @@ jobs:
           sed -i "s|864186153326.dkr.ecr.us-east-1.amazonaws.com|740395098545.dkr.ecr.us-east-1.amazonaws.com|" deploy/helm/forager/values.yaml
 
           helm package deploy/helm/forager/
-          helm push forager-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
-          echo "Pushed oci://${{ env.ECR_REGISTRY }}/forager:${VERSION}"
+          helm push nudgebee-forager-chart-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
+          echo "Pushed oci://${{ env.ECR_REGISTRY }}/nudgebee-forager-chart:${VERSION}"
