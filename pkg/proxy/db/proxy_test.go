@@ -337,6 +337,16 @@ func TestSanitizeQuery(t *testing.T) {
 			input: `psql -c "\copy (SELECT count(*) FROM (SELECT 1) sub) TO stdout WITH CSV HEADER"`,
 			want:  "SELECT count(*) FROM (SELECT 1) sub",
 		},
+		{
+			name:  "psql with flags after -c",
+			input: `psql -c "SELECT 1" --dbname mydb`,
+			want:  "SELECT 1",
+		},
+		{
+			name:  "mariadb with flags after -e",
+			input: `mariadb -e "SELECT 1" --database mydb`,
+			want:  "SELECT 1",
+		},
 	}
 
 	for _, tt := range tests {

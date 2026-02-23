@@ -271,12 +271,10 @@ func sanitizeQuery(query string) string {
 
 	// Detect psql wrapping
 	if strings.HasPrefix(lower, "psql") {
-		idx := strings.Index(lower, " -c ")
-		if idx < 0 {
+		arg := extractFlagArg(q, lower, " -c ")
+		if arg == "" {
 			return q
 		}
-		arg := strings.TrimSpace(q[idx+4:]) // everything after " -c "
-		arg = trimQuotes(arg)
 
 		// \copy (SQL) TO stdout ...
 		lowerArg := strings.ToLower(arg)
@@ -299,25 +297,51 @@ func sanitizeQuery(query string) string {
 
 	// Detect mariadb/mysql wrapping
 	if strings.HasPrefix(lower, "mariadb") || strings.HasPrefix(lower, "mysql") {
-		idx := strings.Index(lower, " -e ")
-		if idx < 0 {
+		arg := extractFlagArg(q, lower, " -e ")
+		if arg == "" {
 			return q
 		}
-		arg := strings.TrimSpace(q[idx+4:])
-		return trimQuotes(arg)
+		return arg
 	}
 
 	return q
 }
 
-// trimQuotes removes a matched pair of surrounding single or double quotes.
-func trimQuotes(s string) string {
-	if len(s) >= 2 {
-		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-			return s[1 : len(s)-1]
-		}
+// extractFlagArg extracts the quoted or unquoted argument following a CLI flag
+// (e.g. -c or -e). It properly handles single/double-quoted arguments without
+// greedily consuming subsequent flags. Returns "" if the flag is not found.
+func extractFlagArg(original, lowered, flag string) string {
+	idx := strings.Index(lowered, flag)
+	if idx < 0 {
+		return ""
 	}
-	return s
+	argPart := strings.TrimSpace(original[idx+len(flag):])
+	if len(argPart) == 0 {
+		return ""
+	}
+
+	// Quoted argument: find the matching closing quote
+	if argPart[0] == '"' {
+		end := strings.Index(argPart[1:], "\"")
+		if end < 0 {
+			return "" // unclosed quote
+		}
+		return argPart[1 : end+1]
+	}
+	if argPart[0] == '\'' {
+		end := strings.Index(argPart[1:], "'")
+		if end < 0 {
+			return "" // unclosed quote
+		}
+		return argPart[1 : end+1]
+	}
+
+	// Unquoted: take the first space-delimited token
+	fields := strings.Fields(argPart)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
 }
 
 func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
