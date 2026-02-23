@@ -281,6 +281,84 @@ func TestProxy_HandleMetadata_UnknownType(t *testing.T) {
 	}
 }
 
+func TestSanitizeQuery(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{
+			name:  "raw SQL passthrough",
+			input: "SELECT pid, datname FROM pg_stat_activity WHERE state = 'active'",
+			want:  "SELECT pid, datname FROM pg_stat_activity WHERE state = 'active'",
+		},
+		{
+			name:  "psql copy wrapper double quotes",
+			input: `psql -c "\copy (SELECT pid, datname FROM pg_stat_activity) TO stdout WITH CSV HEADER"`,
+			want:  "SELECT pid, datname FROM pg_stat_activity",
+		},
+		{
+			name:  "psql copy wrapper single quotes",
+			input: `psql -c '\copy (SELECT * FROM users WHERE name = $$John$$) TO stdout WITH CSV HEADER'`,
+			want:  `SELECT * FROM users WHERE name = $$John$$`,
+		},
+		{
+			name:  "psql with dbname flag",
+			input: `psql --dbname mydb -c "\copy (SELECT 1) TO stdout WITH CSV HEADER"`,
+			want:  "SELECT 1",
+		},
+		{
+			name:  "psql plain query",
+			input: `psql -c "EXPLAIN ANALYZE SELECT * FROM orders"`,
+			want:  "EXPLAIN ANALYZE SELECT * FROM orders",
+		},
+		{
+			name:  "mariadb wrapper",
+			input: `mariadb --user $MYSQL_USER --ssl=0 --password=$MYSQL_PASSWD --host $MYSQL_HOST --port $MYSQL_PORT --database $MYSQL_DATABASE -e "SELECT * FROM users"`,
+			want:  "SELECT * FROM users",
+		},
+		{
+			name:  "mysql wrapper",
+			input: `mysql --user root -e "SHOW TABLES"`,
+			want:  "SHOW TABLES",
+		},
+		{
+			name:  "psql without -c flag passthrough",
+			input: `psql mydb`,
+			want:  `psql mydb`,
+		},
+		{
+			name:  "empty string",
+			input: "",
+			want:  "",
+		},
+		{
+			name:  "nested parens in copy",
+			input: `psql -c "\copy (SELECT count(*) FROM (SELECT 1) sub) TO stdout WITH CSV HEADER"`,
+			want:  "SELECT count(*) FROM (SELECT 1) sub",
+		},
+		{
+			name:  "psql with flags after -c",
+			input: `psql -c "SELECT 1" --dbname mydb`,
+			want:  "SELECT 1",
+		},
+		{
+			name:  "mariadb with flags after -e",
+			input: `mariadb -e "SELECT 1" --database mydb`,
+			want:  "SELECT 1",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sanitizeQuery(tt.input)
+			if got != tt.want {
+				t.Errorf("sanitizeQuery(%q)\n  got:  %q\n  want: %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestProxy_HandleMetadata_UnsupportedDB(t *testing.T) {
 	p := New("mongodb", testLogger()) // mongodb is not a SQL db type
 	_, err := p.handleMetadata(context.Background(), nil, &proxy.ActionRequest{

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
@@ -257,6 +258,92 @@ func (p *Proxy) buildDSN() (string, string, error) {
 	}
 }
 
+// sanitizeQuery strips CLI tool wrapping that callers may send.
+// Known formats (produced by llm-server/runbook-server):
+//   - psql [flags] -c "\copy (SQL) TO stdout WITH CSV HEADER"
+//   - psql [flags] -c "SQL"
+//   - mariadb [flags] -e "SQL"
+//
+// If the query doesn't match these patterns it is returned unchanged.
+func sanitizeQuery(query string) string {
+	q := strings.TrimSpace(query)
+	lower := strings.ToLower(q)
+
+	// Detect psql wrapping
+	if strings.HasPrefix(lower, "psql") {
+		arg := extractFlagArg(q, lower, " -c ")
+		if arg == "" {
+			return q
+		}
+
+		// \copy (SQL) TO stdout ...
+		lowerArg := strings.ToLower(arg)
+		if strings.HasPrefix(lowerArg, "\\copy") {
+			open := strings.Index(arg, "(")
+			if open < 0 {
+				return q
+			}
+			// Find matching closing paren — scan from end for ") TO"
+			closeMark := strings.LastIndex(strings.ToUpper(arg), ") TO")
+			if closeMark <= open {
+				return q
+			}
+			return strings.TrimSpace(arg[open+1 : closeMark])
+		}
+
+		// Plain: psql -c "SELECT ..."
+		return arg
+	}
+
+	// Detect mariadb/mysql wrapping
+	if strings.HasPrefix(lower, "mariadb") || strings.HasPrefix(lower, "mysql") {
+		arg := extractFlagArg(q, lower, " -e ")
+		if arg == "" {
+			return q
+		}
+		return arg
+	}
+
+	return q
+}
+
+// extractFlagArg extracts the quoted or unquoted argument following a CLI flag
+// (e.g. -c or -e). It properly handles single/double-quoted arguments without
+// greedily consuming subsequent flags. Returns "" if the flag is not found.
+func extractFlagArg(original, lowered, flag string) string {
+	idx := strings.Index(lowered, flag)
+	if idx < 0 {
+		return ""
+	}
+	argPart := strings.TrimSpace(original[idx+len(flag):])
+	if len(argPart) == 0 {
+		return ""
+	}
+
+	// Quoted argument: find the matching closing quote
+	if argPart[0] == '"' {
+		end := strings.Index(argPart[1:], "\"")
+		if end < 0 {
+			return "" // unclosed quote
+		}
+		return argPart[1 : end+1]
+	}
+	if argPart[0] == '\'' {
+		end := strings.Index(argPart[1:], "'")
+		if end < 0 {
+			return "" // unclosed quote
+		}
+		return argPart[1 : end+1]
+	}
+
+	// Unquoted: take the first space-delimited token
+	fields := strings.Fields(argPart)
+	if len(fields) == 0 {
+		return ""
+	}
+	return fields[0]
+}
+
 func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
 	start := time.Now()
 
@@ -264,6 +351,8 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 	if query == "" {
 		return nil, fmt.Errorf("missing query parameter")
 	}
+
+	query = sanitizeQuery(query)
 
 	// Apply timeout
 	timeoutMs := 30000
