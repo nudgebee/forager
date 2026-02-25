@@ -47,7 +47,11 @@ func main() {
 	}
 
 	// Initialize secret providers
-	secretsMgr := secrets.NewManager(logger)
+	secretsMgr := secrets.NewManager(logger,
+		secrets.NewAWSSM(cfg.AWS.Region, logger),
+		secrets.NewGCPSM(cfg.GCP.ProjectID, cfg.GCP.CredentialsFile, logger),
+		secrets.NewAzureKV(cfg.Azure.VaultURL, cfg.Azure.TenantID, cfg.Azure.ClientID, logger),
+	)
 
 	// Initialize proxy registry
 	registry := proxy.NewRegistry()

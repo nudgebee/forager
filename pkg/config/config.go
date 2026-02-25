@@ -76,6 +76,14 @@ func Load(configPath string) (*Config, error) {
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
 
+	// Cloud secret provider env vars (nested keys need explicit binding)
+	_ = v.BindEnv("aws.region")
+	_ = v.BindEnv("gcp.project_id")
+	_ = v.BindEnv("gcp.credentials_file")
+	_ = v.BindEnv("azure.vault_url")
+	_ = v.BindEnv("azure.tenant_id")
+	_ = v.BindEnv("azure.client_id")
+
 	// Config file
 	if configPath != "" {
 		v.SetConfigFile(configPath)
