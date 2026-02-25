@@ -63,7 +63,10 @@ func (a *AzureKV) ensureClient() error {
 		// DefaultAzureCredential picks up AZURE_CLIENT_ID for user-assigned managed identity.
 		// Set it from config if provided and not already in the environment.
 		if a.clientID != "" && os.Getenv("AZURE_CLIENT_ID") == "" {
-			os.Setenv("AZURE_CLIENT_ID", a.clientID)
+			if err := os.Setenv("AZURE_CLIENT_ID", a.clientID); err != nil {
+				a.initErr = fmt.Errorf("azure_kv: set AZURE_CLIENT_ID: %w", err)
+				return
+			}
 		}
 
 		cred, err := azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
