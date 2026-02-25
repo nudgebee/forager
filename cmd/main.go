@@ -59,7 +59,7 @@ func main() {
 
 	// Configure datasources from config file
 	for _, ds := range cfg.Datasources {
-		configureLocalDatasource(logger, registry, secretsMgr, ds)
+		configureDatasource(logger, registry, secretsMgr, ds)
 	}
 
 	// Initialize message handler
@@ -120,7 +120,7 @@ func main() {
 	logger.Info("forager stopped")
 }
 
-func configureLocalDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, ds config.LocalDatasource) {
+func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, ds config.LocalDatasource) {
 	logger.Info("configuring datasource", "name", ds.Name, "type", ds.Type, "credential_source", ds.CredentialSource)
 
 	// Build config map from local datasource
@@ -180,7 +180,9 @@ func configureLocalDatasource(logger *slog.Logger, registry *proxy.Registry, sec
 		credSource = "local"
 	}
 	if credSource != "local" && credSource != "cloud_push" {
-		resolved, err := secretsMgr.Resolve(context.Background(), credSource, ds.CredentialRef)
+		resolveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resolved, err := secretsMgr.Resolve(resolveCtx, credSource, ds.CredentialRef)
 		if err != nil {
 			logger.Error("failed to resolve credentials from secret provider", "name", ds.Name, "source", credSource, "ref", ds.CredentialRef, "err", err)
 			return

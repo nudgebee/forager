@@ -5,9 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"os"
 	"sync"
 
+	"github.com/Azure/azure-sdk-for-go/sdk/azcore"
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
 )
@@ -16,7 +16,7 @@ import (
 type AzureKV struct {
 	vaultURL string
 	tenantID string
-	clientID string // used for user-assigned managed identity (sets AZURE_CLIENT_ID)
+	clientID string // user-assigned managed identity client ID
 	logger   *slog.Logger
 	client   *azsecrets.Client
 	initOnce sync.Once
@@ -38,7 +38,7 @@ func (a *AzureKV) Name() string    { return "azure_kv" }
 func (a *AzureKV) Available() bool { return a.vaultURL != "" }
 
 func (a *AzureKV) GetSecret(ctx context.Context, ref string) (map[string]string, error) {
-	if err := a.ensureClient(); err != nil {
+	if err := a.ensureClient(ctx); err != nil {
 		return nil, fmt.Errorf("azure_kv: init client: %w", err)
 	}
 
@@ -58,20 +58,22 @@ func (a *AzureKV) GetSecret(ctx context.Context, ref string) (map[string]string,
 	return result, nil
 }
 
-func (a *AzureKV) ensureClient() error {
+func (a *AzureKV) ensureClient(ctx context.Context) error {
 	a.initOnce.Do(func() {
-		// DefaultAzureCredential picks up AZURE_CLIENT_ID for user-assigned managed identity.
-		// Set it from config if provided and not already in the environment.
-		if a.clientID != "" && os.Getenv("AZURE_CLIENT_ID") == "" {
-			if err := os.Setenv("AZURE_CLIENT_ID", a.clientID); err != nil {
-				a.initErr = fmt.Errorf("azure_kv: set AZURE_CLIENT_ID: %w", err)
-				return
-			}
-		}
+		var cred azcore.TokenCredential
+		var err error
 
-		cred, err := azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
-			TenantID: a.tenantID,
-		})
+		if a.clientID != "" {
+			// Use ManagedIdentityCredential with explicit client ID for user-assigned identity.
+			// This avoids modifying process env vars (os.Setenv race condition).
+			cred, err = azidentity.NewManagedIdentityCredential(&azidentity.ManagedIdentityCredentialOptions{
+				ID: azidentity.ClientID(a.clientID),
+			})
+		} else {
+			cred, err = azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
+				TenantID: a.tenantID,
+			})
+		}
 		if err != nil {
 			a.initErr = fmt.Errorf("azure credential: %w", err)
 			return
