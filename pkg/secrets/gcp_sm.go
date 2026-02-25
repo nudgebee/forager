@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -17,6 +18,8 @@ type GCPSM struct {
 	credentialsFile string
 	logger          *slog.Logger
 	client          *secretmanager.Client
+	initOnce        sync.Once
+	initErr         error
 }
 
 // NewGCPSM creates a GCP Secret Manager provider.
@@ -52,17 +55,17 @@ func (g *GCPSM) GetSecret(ctx context.Context, ref string) (map[string]string, e
 }
 
 func (g *GCPSM) ensureClient(ctx context.Context) error {
-	if g.client != nil {
-		return nil
-	}
-	var opts []option.ClientOption
-	if g.credentialsFile != "" {
-		opts = append(opts, option.WithCredentialsFile(g.credentialsFile))
-	}
-	client, err := secretmanager.NewClient(ctx, opts...)
-	if err != nil {
-		return err
-	}
-	g.client = client
-	return nil
+	g.initOnce.Do(func() {
+		var opts []option.ClientOption
+		if g.credentialsFile != "" {
+			opts = append(opts, option.WithCredentialsFile(g.credentialsFile))
+		}
+		client, err := secretmanager.NewClient(ctx, opts...)
+		if err != nil {
+			g.initErr = err
+			return
+		}
+		g.client = client
+	})
+	return g.initErr
 }

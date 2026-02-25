@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"sync"
 
 	"github.com/Azure/azure-sdk-for-go/sdk/azidentity"
 	"github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets"
@@ -14,9 +16,11 @@ import (
 type AzureKV struct {
 	vaultURL string
 	tenantID string
-	clientID string
+	clientID string // used for user-assigned managed identity (sets AZURE_CLIENT_ID)
 	logger   *slog.Logger
 	client   *azsecrets.Client
+	initOnce sync.Once
+	initErr  error
 }
 
 // NewAzureKV creates an Azure Key Vault provider.
@@ -55,21 +59,27 @@ func (a *AzureKV) GetSecret(ctx context.Context, ref string) (map[string]string,
 }
 
 func (a *AzureKV) ensureClient() error {
-	if a.client != nil {
-		return nil
-	}
+	a.initOnce.Do(func() {
+		// DefaultAzureCredential picks up AZURE_CLIENT_ID for user-assigned managed identity.
+		// Set it from config if provided and not already in the environment.
+		if a.clientID != "" && os.Getenv("AZURE_CLIENT_ID") == "" {
+			os.Setenv("AZURE_CLIENT_ID", a.clientID)
+		}
 
-	cred, err := azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
-		TenantID: a.tenantID,
+		cred, err := azidentity.NewDefaultAzureCredential(&azidentity.DefaultAzureCredentialOptions{
+			TenantID: a.tenantID,
+		})
+		if err != nil {
+			a.initErr = fmt.Errorf("azure credential: %w", err)
+			return
+		}
+
+		client, err := azsecrets.NewClient(a.vaultURL, cred, nil)
+		if err != nil {
+			a.initErr = fmt.Errorf("azure kv client: %w", err)
+			return
+		}
+		a.client = client
 	})
-	if err != nil {
-		return fmt.Errorf("azure credential: %w", err)
-	}
-
-	client, err := azsecrets.NewClient(a.vaultURL, cred, nil)
-	if err != nil {
-		return fmt.Errorf("azure kv client: %w", err)
-	}
-	a.client = client
-	return nil
+	return a.initErr
 }

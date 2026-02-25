@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/secretsmanager"
@@ -12,9 +13,11 @@ import (
 
 // AWSSM fetches secrets from AWS Secrets Manager.
 type AWSSM struct {
-	region string
-	logger *slog.Logger
-	client *secretsmanager.Client
+	region   string
+	logger   *slog.Logger
+	client   *secretsmanager.Client
+	initOnce sync.Once
+	initErr  error
 }
 
 // NewAWSSM creates an AWS Secrets Manager provider.
@@ -50,13 +53,13 @@ func (a *AWSSM) GetSecret(ctx context.Context, ref string) (map[string]string, e
 }
 
 func (a *AWSSM) ensureClient(ctx context.Context) error {
-	if a.client != nil {
-		return nil
-	}
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.region))
-	if err != nil {
-		return err
-	}
-	a.client = secretsmanager.NewFromConfig(cfg)
-	return nil
+	a.initOnce.Do(func() {
+		cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(a.region))
+		if err != nil {
+			a.initErr = err
+			return
+		}
+		a.client = secretsmanager.NewFromConfig(cfg)
+	})
+	return a.initErr
 }
