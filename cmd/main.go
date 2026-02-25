@@ -57,9 +57,9 @@ func main() {
 	registry := proxy.NewRegistry()
 	defer registry.CloseAll()
 
-	// Configure local datasources from config file
+	// Configure datasources from config file
 	for _, ds := range cfg.Datasources {
-		configureLocalDatasource(logger, registry, ds)
+		configureDatasource(logger, registry, secretsMgr, ds)
 	}
 
 	// Initialize message handler
@@ -120,8 +120,8 @@ func main() {
 	logger.Info("forager stopped")
 }
 
-func configureLocalDatasource(logger *slog.Logger, registry *proxy.Registry, ds config.LocalDatasource) {
-	logger.Info("configuring local datasource", "name", ds.Name, "type", ds.Type)
+func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, ds config.LocalDatasource) {
+	logger.Info("configuring datasource", "name", ds.Name, "type", ds.Type, "credential_source", ds.CredentialSource)
 
 	// Build config map from local datasource
 	cfg := map[string]any{}
@@ -173,8 +173,26 @@ func configureLocalDatasource(logger *slog.Logger, registry *proxy.Registry, ds 
 		return
 	}
 
-	if err := p.Configure(cfg, ds.Credentials); err != nil {
-		logger.Error("failed to configure local datasource", "name", ds.Name, "err", err)
+	// Resolve credentials based on source
+	creds := ds.Credentials
+	credSource := ds.CredentialSource
+	if credSource == "" {
+		credSource = "local"
+	}
+	if credSource != "local" && credSource != "cloud_push" {
+		resolveCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		resolved, err := secretsMgr.Resolve(resolveCtx, credSource, ds.CredentialRef)
+		if err != nil {
+			logger.Error("failed to resolve credentials from secret provider", "name", ds.Name, "source", credSource, "ref", ds.CredentialRef, "err", err)
+			return
+		}
+		creds = resolved
+		logger.Info("credentials resolved from secret provider", "name", ds.Name, "source", credSource)
+	}
+
+	if err := p.Configure(cfg, creds); err != nil {
+		logger.Error("failed to configure datasource", "name", ds.Name, "err", err)
 		return
 	}
 
@@ -183,7 +201,7 @@ func configureLocalDatasource(logger *slog.Logger, registry *proxy.Registry, ds 
 		Type:             ds.Type,
 		ProxyType:        proxyType,
 		Name:             ds.Name,
-		CredentialSource: "local",
+		CredentialSource: credSource,
 	}
 	registry.Register(entry.ID, entry, p)
 }
