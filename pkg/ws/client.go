@@ -18,10 +18,10 @@ const (
 	pongWait   = 40 * time.Second
 	pingPeriod = 30 * time.Second
 
-	maxReconnectDelay      = 30 * time.Second
-	initialDelay           = 3 * time.Second
-	defaultHealthPeriod    = 10 * time.Minute
-	initialHealthDelay     = 10 * time.Second
+	maxReconnectDelay   = 30 * time.Second
+	initialDelay        = 3 * time.Second
+	defaultHealthPeriod = 10 * time.Minute
+	initialHealthDelay  = 10 * time.Second
 )
 
 // HealthReportFunc returns per-datasource health to be sent to the relay.
