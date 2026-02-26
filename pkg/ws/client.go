@@ -18,10 +18,10 @@ const (
 	pongWait   = 40 * time.Second
 	pingPeriod = 30 * time.Second
 
-	maxReconnectDelay  = 30 * time.Second
-	initialDelay       = 3 * time.Second
-	healthReportPeriod = 60 * time.Second
-	initialHealthDelay = 10 * time.Second
+	maxReconnectDelay   = 30 * time.Second
+	initialDelay        = 3 * time.Second
+	defaultHealthPeriod = 10 * time.Minute
+	initialHealthDelay  = 10 * time.Second
 )
 
 // HealthReportFunc returns per-datasource health to be sent to the relay.
@@ -49,6 +49,7 @@ type Client struct {
 	accessSecret string
 	handler      MessageHandler
 	healthFn     HealthReportFunc
+	healthPeriod time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
 
@@ -66,12 +67,18 @@ type MessageHandler interface {
 }
 
 // NewClient creates a new WebSocket client.
-func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler, logger *slog.Logger) *Client {
+// healthCheckIntervalMin sets the health report interval in minutes. If <= 0, defaults to 10 minutes.
+func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler, logger *slog.Logger, healthCheckIntervalMin int) *Client {
+	period := defaultHealthPeriod
+	if healthCheckIntervalMin > 0 {
+		period = time.Duration(healthCheckIntervalMin) * time.Minute
+	}
 	return &Client{
 		relayURL:     relayURL,
 		accessKey:    accessKey,
 		accessSecret: accessSecret,
 		handler:      handler,
+		healthPeriod: period,
 		sendCh:       make(chan []byte, 64),
 		logger:       logger,
 		done:         make(chan struct{}),
@@ -293,7 +300,7 @@ func (c *Client) healthReportLoop(ctx context.Context) {
 	case <-time.After(initialHealthDelay):
 	}
 
-	ticker := time.NewTicker(healthReportPeriod)
+	ticker := time.NewTicker(c.healthPeriod)
 	defer ticker.Stop()
 
 	for {

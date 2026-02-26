@@ -17,6 +17,9 @@ type Config struct {
 	// Local datasource overrides (credential_source: local)
 	Datasources []LocalDatasource `mapstructure:"datasources"`
 
+	// Health check interval in minutes (default: 10)
+	HealthCheckIntervalMin int `mapstructure:"health_check_interval_min"`
+
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
@@ -62,6 +65,7 @@ func Load(configPath string) (*Config, error) {
 	// Defaults
 	v.SetDefault("relay_url", "wss://relay.nudgebee.com/register")
 	v.SetDefault("data_dir", "/var/lib/nudgebee")
+	v.SetDefault("health_check_interval_min", 10)
 
 	// Environment variable overrides (NB_ prefix)
 	v.SetEnvPrefix("NB")
@@ -75,6 +79,7 @@ func Load(configPath string) (*Config, error) {
 	_ = v.BindEnv("access_secret")
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
+	_ = v.BindEnv("health_check_interval_min")
 
 	// Cloud secret provider env vars (nested keys need explicit binding)
 	_ = v.BindEnv("aws.region")

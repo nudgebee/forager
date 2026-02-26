@@ -66,7 +66,7 @@ func main() {
 	handler := ws.NewHandler(registry, credStore, secretsMgr, logger)
 
 	// Initialize WebSocket client
-	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger)
+	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
 
 	// Wire inventory reporter: sends local datasource list on connect for auto-registration
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
