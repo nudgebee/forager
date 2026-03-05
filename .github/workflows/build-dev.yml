@@ -114,6 +114,8 @@ jobs:
             rm -rf /tmp/awscliv2.zip /tmp/aws
           fi
 
+      - uses: docker/setup-buildx-action@v3
+
       - uses: aws-actions/configure-aws-credentials@v4
         with:
           aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
