@@ -4,6 +4,7 @@ go 1.25.1
 
 require (
 	cloud.google.com/go/secretmanager v1.16.0
+	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/azsecrets v1.4.0
 	github.com/ClickHouse/clickhouse-go/v2 v2.43.0
@@ -21,6 +22,7 @@ require (
 	github.com/xdg-go/scram v1.2.0
 	go.mongodb.org/mongo-driver/v2 v2.5.0
 	golang.org/x/crypto v0.48.0
+	golang.org/x/sys v0.41.0
 	google.golang.org/api v0.247.0
 )
 
@@ -31,7 +33,6 @@ require (
 	cloud.google.com/go/compute/metadata v0.8.0 // indirect
 	cloud.google.com/go/iam v1.5.2 // indirect
 	filippo.io/edwards25519 v1.1.0 // indirect
-	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.20.0 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/internal v1.11.2 // indirect
 	github.com/Azure/azure-sdk-for-go/sdk/security/keyvault/internal v1.2.0 // indirect
 	github.com/AzureAD/microsoft-authentication-library-for-go v1.6.0 // indirect
@@ -115,7 +116,6 @@ require (
 	golang.org/x/net v0.50.0 // indirect
 	golang.org/x/oauth2 v0.30.0 // indirect
 	golang.org/x/sync v0.19.0 // indirect
-	golang.org/x/sys v0.41.0 // indirect
 	golang.org/x/text v0.34.0 // indirect
 	golang.org/x/time v0.12.0 // indirect
 	google.golang.org/genproto v0.0.0-20250603155806-513f23925822 // indirect

@@ -64,7 +64,7 @@ func Load(configPath string) (*Config, error) {
 
 	// Defaults
 	v.SetDefault("relay_url", "wss://relay.nudgebee.com/register")
-	v.SetDefault("data_dir", "/var/lib/nudgebee")
+	v.SetDefault("data_dir", DefaultDataDir)
 	v.SetDefault("health_check_interval_min", 10)
 
 	// Environment variable overrides (NB_ prefix)
@@ -95,7 +95,7 @@ func Load(configPath string) (*Config, error) {
 	} else {
 		v.SetConfigName("forager")
 		v.SetConfigType("yaml")
-		v.AddConfigPath("/etc/nudgebee")
+		v.AddConfigPath(DefaultConfigDir)
 		v.AddConfigPath(".")
 	}
 
