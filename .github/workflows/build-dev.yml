@@ -100,10 +100,21 @@ jobs:
           echo "Uploaded to ${S3_PATH}/"
 
   build-docker:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, X64]
     needs: validate
     steps:
       - uses: actions/checkout@v4
+
+      - name: Install AWS CLI
+        run: |
+          if ! command -v aws &> /dev/null; then
+            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
+            unzip -qo /tmp/awscliv2.zip -d /tmp
+            sudo /tmp/aws/install --update
+            rm -rf /tmp/awscliv2.zip /tmp/aws
+          fi
+
+      - uses: docker/setup-buildx-action@v3
 
       - uses: aws-actions/configure-aws-credentials@v4
         with:
