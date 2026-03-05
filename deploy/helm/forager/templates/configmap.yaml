@@ -10,6 +10,33 @@ data:
     data_dir: {{ .Values.forager.dataDir }}
     access_key: ""
     access_secret: ""
+    {{- if .Values.forager.gcp }}
+    gcp:
+      {{- if .Values.forager.gcp.projectID }}
+      project_id: {{ .Values.forager.gcp.projectID }}
+      {{- end }}
+      {{- if .Values.forager.gcp.credentialsFile }}
+      credentials_file: {{ .Values.forager.gcp.credentialsFile }}
+      {{- end }}
+    {{- end }}
+    {{- if .Values.forager.aws }}
+    aws:
+      {{- if .Values.forager.aws.region }}
+      region: {{ .Values.forager.aws.region }}
+      {{- end }}
+    {{- end }}
+    {{- if .Values.forager.azure }}
+    azure:
+      {{- if .Values.forager.azure.vaultURL }}
+      vault_url: {{ .Values.forager.azure.vaultURL }}
+      {{- end }}
+      {{- if .Values.forager.azure.tenantID }}
+      tenant_id: {{ .Values.forager.azure.tenantID }}
+      {{- end }}
+      {{- if .Values.forager.azure.clientID }}
+      client_id: {{ .Values.forager.azure.clientID }}
+      {{- end }}
+    {{- end }}
     {{- if .Values.forager.datasources }}
     datasources:
       {{- toYaml .Values.forager.datasources | nindent 6 }}
