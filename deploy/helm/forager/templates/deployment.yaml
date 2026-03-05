@@ -57,12 +57,18 @@ spec:
               value: {{ .Values.forager.relayURL | quote }}
             - name: NB_DATA_DIR
               value: {{ .Values.forager.dataDir | quote }}
+          {{- with .Values.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
             - name: config
               mountPath: /etc/nudgebee
               readOnly: true
             - name: data
               mountPath: {{ .Values.forager.dataDir }}
+          {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
       volumes:
@@ -71,6 +77,9 @@ spec:
             name: {{ include "forager.fullname" . }}-config
         - name: data
           emptyDir: {}
+      {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
