@@ -46,7 +46,18 @@ jobs:
     needs: validate
     strategy:
       matrix:
-        goarch: [amd64, arm64]
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+            ext: .exe
     steps:
       - uses: actions/checkout@v4
 
@@ -57,18 +68,18 @@ jobs:
 
       - name: Build binary
         env:
-          GOOS: linux
+          GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          go build -o dist/nudgebee-forager-linux-${{ matrix.goarch }} ./cmd
+          go build -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: nudgebee-forager-linux-${{ matrix.goarch }}
-          path: dist/nudgebee-forager-linux-${{ matrix.goarch }}
+          name: nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
   upload-to-s3:
     runs-on: ubuntu-latest
@@ -96,19 +107,23 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Upload binaries and install script to S3
+      - name: Upload binaries and install scripts to S3
         run: |
           VERSION="${{ steps.version.outputs.version }}"
 
           for V in "${VERSION}" "latest"; do
             S3_PATH="s3://${S3_BUCKET}/forager/${V}"
 
-            aws s3 cp dist/nudgebee-forager-linux-amd64/nudgebee-forager-linux-amd64 \
-              "${S3_PATH}/nudgebee-forager-linux-amd64" --content-type application/octet-stream
-            aws s3 cp dist/nudgebee-forager-linux-arm64/nudgebee-forager-linux-arm64 \
-              "${S3_PATH}/nudgebee-forager-linux-arm64" --content-type application/octet-stream
-            aws s3 cp deploy/install.sh \
-              "${S3_PATH}/install.sh" --content-type text/plain
+            # Upload all binaries
+            for f in dist/*/nudgebee-forager-*; do
+              FILENAME=$(basename "$f")
+              aws s3 cp "$f" "${S3_PATH}/${FILENAME}" --content-type application/octet-stream
+            done
+
+            # Upload install scripts
+            aws s3 cp deploy/install.sh "${S3_PATH}/install.sh" --content-type text/plain
+            aws s3 cp deploy/install-macos.sh "${S3_PATH}/install-macos.sh" --content-type text/plain
+            aws s3 cp deploy/install.ps1 "${S3_PATH}/install.ps1" --content-type text/plain
 
             echo "Uploaded to ${S3_PATH}/"
           done
