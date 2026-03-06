@@ -303,6 +303,11 @@ func TestSanitizeQuery(t *testing.T) {
 			want:  `SELECT * FROM users WHERE name = $$John$$`,
 		},
 		{
+			name:  "psql copy wrapper shell-escaped single quotes",
+			input: `psql -c '\copy (SELECT tablename FROM pg_tables WHERE schemaname = '\''public'\'' AND tablename NOT LIKE '\''pg_%'\'') TO stdout WITH CSV HEADER'`,
+			want:  `SELECT tablename FROM pg_tables WHERE schemaname = 'public' AND tablename NOT LIKE 'pg_%'`,
+		},
+		{
 			name:  "psql with dbname flag",
 			input: `psql --dbname mydb -c "\copy (SELECT 1) TO stdout WITH CSV HEADER"`,
 			want:  "SELECT 1",

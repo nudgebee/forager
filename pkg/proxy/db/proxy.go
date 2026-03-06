@@ -329,11 +329,28 @@ func extractFlagArg(original, lowered, flag string) string {
 		return argPart[1 : end+1]
 	}
 	if argPart[0] == '\'' {
-		end := strings.Index(argPart[1:], "'")
-		if end < 0 {
-			return "" // unclosed quote
+		// Handle shell-escaped single quotes: 'arg with '\''embedded'\'' quotes'
+		// The pattern '\'' means: end quote, literal ', start new quote.
+		// We reassemble by joining segments split on '\'' until we find a
+		// closing single quote that isn't followed by \'.
+		inner := argPart[1:] // skip leading '
+		var result strings.Builder
+		for {
+			end := strings.Index(inner, "'")
+			if end < 0 {
+				return "" // unclosed quote
+			}
+			result.WriteString(inner[:end])
+			rest := inner[end+1:]
+			// Check if this is a shell-escaped quote: '\'' (the rest starts with \')
+			if strings.HasPrefix(rest, "\\''") {
+				result.WriteByte('\'')
+				inner = rest[3:] // skip \\'
+				continue
+			}
+			// Real closing quote
+			return result.String()
 		}
-		return argPart[1 : end+1]
 	}
 
 	// Unquoted: take the first space-delimited token
