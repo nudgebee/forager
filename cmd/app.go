@@ -102,6 +102,12 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 	if ds.Database != "" {
 		cfg["database"] = ds.Database
 	}
+	if ds.SSLMode != "" {
+		cfg["ssl_mode"] = ds.SSLMode
+	}
+	if ds.TLSEnabled {
+		cfg["tls_enabled"] = true
+	}
 
 	var p proxy.Proxy
 	var proxyType string

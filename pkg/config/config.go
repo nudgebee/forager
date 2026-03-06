@@ -34,7 +34,9 @@ type LocalDatasource struct {
 	Host             string            `mapstructure:"host"`
 	Port             int               `mapstructure:"port"`
 	Database         string            `mapstructure:"database"`
-	Brokers          string            `mapstructure:"brokers"` // Kafka: comma-separated broker list
+	Brokers          string            `mapstructure:"brokers"`     // Kafka: comma-separated broker list
+	SSLMode          string            `mapstructure:"ssl_mode"`    // PostgreSQL: disable, require, verify-ca, verify-full
+	TLSEnabled       bool              `mapstructure:"tls_enabled"` // MySQL/MSSQL/ClickHouse: enable TLS
 	CredentialSource string            `mapstructure:"credential_source"`
 	CredentialRef    string            `mapstructure:"credential_ref"`
 	Credentials      map[string]string `mapstructure:"credentials"`
