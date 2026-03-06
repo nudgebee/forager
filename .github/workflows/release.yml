@@ -285,8 +285,8 @@ jobs:
           sed -i "s/^version:.*/version: ${VERSION}/" deploy/helm/forager/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deploy/helm/forager/Chart.yaml
 
-          # Update image repo to prod ECR
-          sed -i "s|864186153326.dkr.ecr.us-east-1.amazonaws.com|740395098545.dkr.ecr.us-east-1.amazonaws.com|" deploy/helm/forager/values.yaml
+          # Update image repo to prod registry
+          sed -i "s|registry.dev.nudgebee.pollux.in|registry.nudgebee.com|" deploy/helm/forager/values.yaml
 
           helm package deploy/helm/forager/
           helm push nudgebee-forager-chart-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}

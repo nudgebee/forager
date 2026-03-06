@@ -1,7 +1,7 @@
 replicaCount: 1
 
 image:
-  repository: 864186153326.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
+  repository: registry.dev.nudgebee.pollux.in/nudgebee-forager
   pullPolicy: IfNotPresent
   tag: 'latest'
 
