@@ -49,7 +49,7 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 
 	switch envelope.Action {
 	case "datasource_config_sync":
-		return h.handleConfigSync(ctx, msg)
+		return h.handleConfigSync(ctx, msg, envelope.RequestID)
 	default:
 		return h.handleRequest(ctx, msg, envelope.RequestID, envelope.DatasourceID)
 	}
@@ -154,7 +154,7 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 }
 
 // handleConfigSync processes datasource configuration updates from the cloud.
-func (h *Handler) handleConfigSync(ctx context.Context, msg []byte) ([]byte, error) {
+func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID string) ([]byte, error) {
 	var push struct {
 		Action      string `json:"action"`
 		AccountID   string `json:"account_id"`
@@ -262,7 +262,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte) ([]byte, err
 	ack := map[string]any{
 		"action":     "datasource_config_sync_ack",
 		"status":     "ok",
-		"request_id": "", // Will be set by caller if needed
+		"request_id": requestID,
 	}
 	return json.Marshal(ack)
 }
