@@ -201,8 +201,14 @@ func (v *Verifier) verifyPayloadMatchesMessage(signedPayload string, msg []byte)
 		}
 
 		// Compare canonical JSON representations
-		payloadCanonical, _ := canonicalJSON(payloadVal)
-		msgCanonical, _ := canonicalJSON(msgVal)
+		payloadCanonical, err := canonicalJSON(payloadVal)
+		if err != nil {
+			return fmt.Errorf("invalid JSON in signed field %q: %w", key, err)
+		}
+		msgCanonical, err := canonicalJSON(msgVal)
+		if err != nil {
+			return fmt.Errorf("invalid JSON in message field %q: %w", key, err)
+		}
 		if string(payloadCanonical) != string(msgCanonical) {
 			return fmt.Errorf("signed field %q does not match message (payload substitution)", key)
 		}
