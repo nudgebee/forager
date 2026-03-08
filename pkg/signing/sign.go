@@ -79,7 +79,7 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	// Determine which fields to sign based on action
 	var action string
 	if actionRaw, ok := raw["action"]; ok {
-		json.Unmarshal(actionRaw, &action)
+		_ = json.Unmarshal(actionRaw, &action)
 	}
 	// For legacy format, try body.action_name
 	if action == "" {
@@ -87,7 +87,7 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 			var body map[string]json.RawMessage
 			if json.Unmarshal(bodyRaw, &body) == nil {
 				if actionNameRaw, ok := body["action_name"]; ok {
-					json.Unmarshal(actionNameRaw, &action)
+					_ = json.Unmarshal(actionNameRaw, &action)
 				}
 			}
 		}

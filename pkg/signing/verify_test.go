@@ -164,7 +164,9 @@ func TestVerify_RelayAddsFields_StillValid(t *testing.T) {
 
 	// Simulate relay adding request_id and body.timestamp
 	var withRelay map[string]json.RawMessage
-	json.Unmarshal(signed, &withRelay)
+	if err := json.Unmarshal(signed, &withRelay); err != nil {
+		t.Fatalf("Unmarshal signed: %v", err)
+	}
 	withRelay["request_id"], _ = json.Marshal("relay-added-req-id")
 	withRelay["body"], _ = json.Marshal(map[string]any{"timestamp": 1234567890})
 	relayModified, _ := json.Marshal(withRelay)
