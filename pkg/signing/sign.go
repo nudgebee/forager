@@ -53,7 +53,7 @@ var SigningFields = map[string][]string{
 
 	"http_request": {"action", "datasource_id", "method", "url", "header", "body"},
 
-	"mcp_request":  {"action", "datasource_id", "params"},
+	"mcp_request":   {"action", "datasource_id", "params"},
 	"redis_command": {"action", "datasource_id", "params"},
 
 	"mongo_query":     {"action", "datasource_id", "params"},
