@@ -9,6 +9,7 @@ import (
 
 	"nudgebee/forager/pkg/proxy"
 	"nudgebee/forager/pkg/secrets"
+	"nudgebee/forager/pkg/signing"
 )
 
 func testLogger() *slog.Logger {
@@ -24,8 +25,12 @@ func newTestHandler(t *testing.T) *Handler {
 	}
 	secretsMgr := secrets.NewManager(testLogger())
 	registry := proxy.NewRegistry()
+	verifier, err := signing.NewVerifier("", testLogger()) // disabled for tests
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
 
-	return NewHandler(registry, credStore, secretsMgr, testLogger())
+	return NewHandler(registry, credStore, secretsMgr, verifier, testLogger())
 }
 
 func TestHandler_HandleMessage_InvalidJSON(t *testing.T) {

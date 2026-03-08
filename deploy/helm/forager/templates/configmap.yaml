@@ -10,6 +10,9 @@ data:
     data_dir: {{ .Values.forager.dataDir }}
     access_key: ""
     access_secret: ""
+    {{- if .Values.forager.signingPublicKey }}
+    signing_public_key: {{ .Values.forager.signingPublicKey | quote }}
+    {{- end }}
     {{- if .Values.forager.gcp }}
     gcp:
       {{- if .Values.forager.gcp.projectID }}

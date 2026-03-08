@@ -20,6 +20,10 @@ type Config struct {
 	// Health check interval in minutes (default: 10)
 	HealthCheckIntervalMin int `mapstructure:"health_check_interval_min"`
 
+	// Message signing: base64-encoded Ed25519 public key for verifying relay messages.
+	// If empty, signature verification is disabled (warn-only mode).
+	SigningPublicKey string `mapstructure:"signing_public_key"`
+
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
@@ -82,6 +86,7 @@ func Load(configPath string) (*Config, error) {
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
 	_ = v.BindEnv("health_check_interval_min")
+	_ = v.BindEnv("signing_public_key")
 
 	// Cloud secret provider env vars (nested keys need explicit binding)
 	_ = v.BindEnv("aws.region")

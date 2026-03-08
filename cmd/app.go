@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"time"
 
@@ -14,6 +15,7 @@ import (
 	proxyredis "nudgebee/forager/pkg/proxy/redis"
 	proxyssh "nudgebee/forager/pkg/proxy/ssh"
 	"nudgebee/forager/pkg/secrets"
+	"nudgebee/forager/pkg/signing"
 	"nudgebee/forager/pkg/ws"
 )
 
@@ -41,13 +43,18 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 		secrets.NewAzureKV(cfg.Azure.VaultURL, cfg.Azure.TenantID, cfg.Azure.ClientID, logger),
 	)
 
+	verifier, err := signing.NewVerifier(cfg.SigningPublicKey, logger)
+	if err != nil {
+		return nil, fmt.Errorf("signing verifier: %w", err)
+	}
+
 	registry := proxy.NewRegistry()
 
 	for _, ds := range cfg.Datasources {
 		configureDatasource(logger, registry, secretsMgr, ds)
 	}
 
-	handler := ws.NewHandler(registry, credStore, secretsMgr, logger)
+	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
 
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
