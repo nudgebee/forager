@@ -214,7 +214,9 @@ func TestVerify_ExpiredTimestamp(t *testing.T) {
 	signed, _ := s.Sign(msgBytes)
 
 	var raw map[string]json.RawMessage
-	json.Unmarshal(signed, &raw)
+	if err := json.Unmarshal(signed, &raw); err != nil {
+		t.Fatalf("Unmarshal signed: %v", err)
+	}
 	raw["signed_at"], _ = json.Marshal(time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339))
 	tamperedTime, _ := json.Marshal(raw)
 
@@ -258,7 +260,9 @@ func TestVerify_TamperedAction(t *testing.T) {
 
 	// Tamper: change action to ssh_exec
 	var raw map[string]json.RawMessage
-	json.Unmarshal(signed, &raw)
+	if err := json.Unmarshal(signed, &raw); err != nil {
+		t.Fatalf("Unmarshal signed: %v", err)
+	}
 	raw["action"], _ = json.Marshal("ssh_exec")
 	tampered, _ := json.Marshal(raw)
 
@@ -282,7 +286,9 @@ func TestVerify_TamperedParams(t *testing.T) {
 
 	// Tamper: change the query
 	var raw map[string]json.RawMessage
-	json.Unmarshal(signed, &raw)
+	if err := json.Unmarshal(signed, &raw); err != nil {
+		t.Fatalf("Unmarshal signed: %v", err)
+	}
 	raw["params"], _ = json.Marshal(map[string]any{"query": "DROP TABLE users"})
 	tampered, _ := json.Marshal(raw)
 
@@ -306,7 +312,9 @@ func TestVerify_TamperedDatasourceID(t *testing.T) {
 
 	// Tamper: redirect to production datasource
 	var raw map[string]json.RawMessage
-	json.Unmarshal(signed, &raw)
+	if err := json.Unmarshal(signed, &raw); err != nil {
+		t.Fatalf("Unmarshal signed: %v", err)
+	}
 	raw["datasource_id"], _ = json.Marshal("ds-production")
 	tampered, _ := json.Marshal(raw)
 
