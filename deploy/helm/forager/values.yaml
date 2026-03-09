@@ -23,6 +23,7 @@ forager:
   accessKey: ''
   accessSecret: ''
   dataDir: /data
+  signingPublicKey: ''
 
 resources:
   limits:

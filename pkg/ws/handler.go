@@ -15,22 +15,56 @@ import (
 	redisproxy "nudgebee/forager/pkg/proxy/redis"
 	sshproxy "nudgebee/forager/pkg/proxy/ssh"
 	"nudgebee/forager/pkg/secrets"
+	"nudgebee/forager/pkg/signing"
 )
+
+// signedActions are actions that require signature verification when signing is enabled.
+// All actions that can modify state or execute commands should be listed here.
+var signedActions = map[string]bool{
+	// Config sync — can push arbitrary datasources including RCE via MCP stdio
+	"datasource_config_sync": true,
+
+	// Database — arbitrary SQL execution
+	"db_query":    true,
+	"db_execute":  true,
+	"db_metadata": true,
+
+	// SSH — arbitrary command execution, file read/write
+	"ssh_exec":     true,
+	"ssh_upload":   true,
+	"ssh_download": true,
+	"ssh_list_dir": true,
+
+	// HTTP — SSRF, credential theft via redirect
+	"http_request": true,
+
+	// MCP — arbitrary JSON-RPC to local processes
+	"mcp_request": true,
+
+	// MongoDB — arbitrary queries/aggregations
+	"mongo_query":     true,
+	"mongo_aggregate": true,
+
+	// Redis — arbitrary command execution
+	"redis_command": true,
+}
 
 // Handler dispatches incoming relay messages to the appropriate proxy module.
 type Handler struct {
 	registry   *proxy.Registry
 	credStore  *secrets.CloudPushStore
 	secretsMgr *secrets.Manager
+	verifier   *signing.Verifier
 	logger     *slog.Logger
 }
 
 // NewHandler creates a new message handler.
-func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, secretsMgr *secrets.Manager, logger *slog.Logger) *Handler {
+func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, secretsMgr *secrets.Manager, verifier *signing.Verifier, logger *slog.Logger) *Handler {
 	return &Handler{
 		registry:   registry,
 		credStore:  credStore,
 		secretsMgr: secretsMgr,
+		verifier:   verifier,
 		logger:     logger,
 	}
 }
@@ -42,9 +76,42 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 		Action       string `json:"action"`
 		RequestID    string `json:"request_id"`
 		DatasourceID string `json:"datasource_id"`
+		Body         struct {
+			ActionName string `json:"action_name"`
+		} `json:"body"`
 	}
 	if err := json.Unmarshal(msg, &envelope); err != nil {
 		return nil, fmt.Errorf("unmarshal envelope: %w", err)
+	}
+
+	// Resolve the effective action — legacy messages use body.action_name
+	effectiveAction := envelope.Action
+	if effectiveAction == "" {
+		effectiveAction = envelope.Body.ActionName
+	}
+
+	// Verify signature for actions that require it
+	if signedActions[effectiveAction] {
+		if err := h.verifier.Verify(msg); err != nil {
+			h.logger.Error("message signature verification failed",
+				"action", effectiveAction,
+				"request_id", envelope.RequestID,
+				"err", err,
+			)
+			if h.verifier.Enabled() {
+				return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
+			}
+		}
+	}
+	// Legacy HTTP proxy requests (no action field) also require verification when signing is enabled
+	if effectiveAction == "" && h.verifier.Enabled() {
+		if err := h.verifier.Verify(msg); err != nil {
+			h.logger.Error("unsigned legacy HTTP request rejected",
+				"request_id", envelope.RequestID,
+				"err", err,
+			)
+			return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
+		}
 	}
 
 	switch envelope.Action {
