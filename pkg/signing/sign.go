@@ -96,7 +96,7 @@ var SigningFields = map[string][]string{
 	"db_execute":  {"action", "datasource_id", "params"},
 	"db_metadata": {"action", "datasource_id", "params"},
 
-	"ssh_exec":     {"action", "datasource_id", "params"},
+	"ssh_command":  {"action", "datasource_id", "params"},
 	"ssh_upload":   {"action", "datasource_id", "params"},
 	"ssh_download": {"action", "datasource_id", "params"},
 	"ssh_list_dir": {"action", "datasource_id", "params"},
