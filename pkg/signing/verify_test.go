@@ -8,6 +8,8 @@ import (
 	"encoding/pem"
 	"log/slog"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 )
@@ -320,6 +322,52 @@ func TestVerify_TamperedDatasourceID(t *testing.T) {
 
 	if err := v.Verify(tampered); err == nil {
 		t.Fatal("expected error for tampered datasource_id")
+	}
+}
+
+func TestNewVerifier_OpenSSHPublicKey(t *testing.T) {
+	// Generate an OpenSSH ed25519 key using ssh-keygen
+	tmpDir := t.TempDir()
+	keyFile := filepath.Join(tmpDir, "id_ed25519")
+
+	cmd := exec.Command("ssh-keygen", "-t", "ed25519", "-f", keyFile, "-N", "", "-C", "test@test.com")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ssh-keygen failed: %v\n%s", err, out)
+	}
+
+	privPEM, err := os.ReadFile(keyFile)
+	if err != nil {
+		t.Fatalf("read private key: %v", err)
+	}
+
+	pubSSH, err := os.ReadFile(keyFile + ".pub")
+	if err != nil {
+		t.Fatalf("read public key: %v", err)
+	}
+
+	// Create signer from OpenSSH private key
+	signer, err := NewSigner(string(privPEM), "openssh-test")
+	if err != nil {
+		t.Fatalf("NewSigner with OpenSSH key: %v", err)
+	}
+
+	// Create verifier from OpenSSH public key (ssh-ed25519 ... format)
+	v, err := NewVerifier(string(pubSSH), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier with OpenSSH public key: %v", err)
+	}
+	if !v.Enabled() {
+		t.Fatal("expected verifier to be enabled with OpenSSH key")
+	}
+
+	// Sign and verify round-trip
+	msg := []byte(`{"action":"db_query","datasource_id":"ds-1","params":{"query":"SELECT 1"}}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+	if err := v.Verify(signed); err != nil {
+		t.Fatalf("Verify with OpenSSH keypair failed: %v", err)
 	}
 }
 

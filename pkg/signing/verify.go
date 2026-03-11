@@ -8,8 +8,11 @@ import (
 	"encoding/pem"
 	"fmt"
 	"log/slog"
+	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/ssh"
 )
 
 const (
@@ -70,8 +73,27 @@ func NewVerifier(publicKeyStr string, logger *slog.Logger) (*Verifier, error) {
 	return v, nil
 }
 
-// parsePublicKey tries PEM (PKIX) first, then raw base64.
+// parsePublicKey tries OpenSSH authorized_keys format, PEM (PKIX), then raw base64.
 func parsePublicKey(s string) (ed25519.PublicKey, error) {
+	s = strings.TrimSpace(s)
+
+	// Try OpenSSH format (ssh-ed25519 AAAA... comment)
+	if strings.HasPrefix(s, "ssh-ed25519 ") {
+		pubKey, _, _, _, err := ssh.ParseAuthorizedKey([]byte(s))
+		if err != nil {
+			return nil, fmt.Errorf("OpenSSH public key parse failed: %w", err)
+		}
+		cryptoPub, ok := pubKey.(ssh.CryptoPublicKey)
+		if !ok {
+			return nil, fmt.Errorf("OpenSSH key does not implement CryptoPublicKey")
+		}
+		edKey, ok := cryptoPub.CryptoPublicKey().(ed25519.PublicKey)
+		if !ok {
+			return nil, fmt.Errorf("OpenSSH key is not Ed25519")
+		}
+		return edKey, nil
+	}
+
 	// Try PEM
 	block, _ := pem.Decode([]byte(s))
 	if block != nil {
