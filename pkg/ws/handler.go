@@ -30,7 +30,7 @@ var signedActions = map[string]bool{
 	"db_metadata": true,
 
 	// SSH — arbitrary command execution, file read/write
-	"ssh_exec":     true,
+	"ssh_command":     true,
 	"ssh_upload":   true,
 	"ssh_download": true,
 	"ssh_list_dir": true,

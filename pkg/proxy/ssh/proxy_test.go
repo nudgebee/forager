@@ -23,7 +23,7 @@ func TestProxy_Type(t *testing.T) {
 func TestProxy_HandleRequest_NotConfigured(t *testing.T) {
 	p := New(testLogger())
 	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
-		Action: "ssh_exec",
+		Action: "ssh_command",
 		Params: map[string]any{"command": "ls"},
 	})
 	if err == nil {
@@ -45,7 +45,7 @@ func TestProxy_HandleExec_MissingCommand(t *testing.T) {
 	p := New(testLogger())
 	p.client = nil // force not connected path won't be hit since command check is first
 	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
-		Action: "ssh_exec",
+		Action: "ssh_command",
 		Params: map[string]any{},
 	})
 	if err == nil {

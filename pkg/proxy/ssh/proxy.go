@@ -64,6 +64,13 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		p.client = nil
 	}
 
+	// Coerce string port to int (relay may send "22" instead of 22)
+	if s, ok := config["port"].(string); ok {
+		if v, err := strconv.Atoi(s); err == nil {
+			config["port"] = v
+		}
+	}
+
 	// Parse config
 	configJSON, _ := json.Marshal(config)
 	var cfg Config
@@ -140,7 +147,7 @@ func buildAuthMethods(creds map[string]string) ([]ssh.AuthMethod, error) {
 
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
 	switch req.Action {
-	case "ssh_exec":
+	case "ssh_command":
 		return p.handleExec(ctx, req)
 	case "ssh_upload":
 		return p.handleUpload(ctx, req)
@@ -156,7 +163,7 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 func (p *Proxy) handleExec(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
 	command, _ := req.Params["command"].(string)
 	if command == "" {
-		return nil, fmt.Errorf("ssh_exec: command is required")
+		return nil, fmt.Errorf("ssh_command: command is required")
 	}
 
 	timeoutMs := defaultTimeoutMs
@@ -176,28 +183,28 @@ func (p *Proxy) handleExec(ctx context.Context, req *proxy.ActionRequest) (*prox
 	p.mu.RUnlock()
 
 	if client == nil {
-		return nil, fmt.Errorf("ssh_exec: not connected")
+		return nil, fmt.Errorf("ssh_command: not connected")
 	}
 
 	session, err := client.NewSession()
 	if err != nil {
-		return nil, fmt.Errorf("ssh_exec: new session: %w", err)
+		return nil, fmt.Errorf("ssh_command: new session: %w", err)
 	}
 	defer func() { _ = session.Close() }()
 
 	// Capture stdout and stderr with size limits
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ssh_exec: stdout pipe: %w", err)
+		return nil, fmt.Errorf("ssh_command: stdout pipe: %w", err)
 	}
 	stderrPipe, err := session.StderrPipe()
 	if err != nil {
-		return nil, fmt.Errorf("ssh_exec: stderr pipe: %w", err)
+		return nil, fmt.Errorf("ssh_command: stderr pipe: %w", err)
 	}
 
 	// Start command
 	if err := session.Start(command); err != nil {
-		return nil, fmt.Errorf("ssh_exec: start: %w", err)
+		return nil, fmt.Errorf("ssh_command: start: %w", err)
 	}
 
 	// Read output with limits
@@ -214,13 +221,13 @@ func (p *Proxy) handleExec(ctx context.Context, req *proxy.ActionRequest) (*prox
 	select {
 	case <-ctx.Done():
 		_ = session.Signal(ssh.SIGKILL)
-		return nil, fmt.Errorf("ssh_exec: command timed out")
+		return nil, fmt.Errorf("ssh_command: command timed out")
 	case waitErr := <-doneCh:
 		if waitErr != nil {
 			if exitErr, ok := waitErr.(*ssh.ExitError); ok {
 				exitCode = exitErr.ExitStatus()
 			} else {
-				return nil, fmt.Errorf("ssh_exec: wait: %w", waitErr)
+				return nil, fmt.Errorf("ssh_command: wait: %w", waitErr)
 			}
 		}
 	}

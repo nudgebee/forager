@@ -260,12 +260,12 @@ func TestVerify_TamperedAction(t *testing.T) {
 	msgBytes, _ := json.Marshal(msg)
 	signed, _ := s.Sign(msgBytes)
 
-	// Tamper: change action to ssh_exec
+	// Tamper: change action to ssh_command
 	var raw map[string]json.RawMessage
 	if err := json.Unmarshal(signed, &raw); err != nil {
 		t.Fatalf("Unmarshal signed: %v", err)
 	}
-	raw["action"], _ = json.Marshal("ssh_exec")
+	raw["action"], _ = json.Marshal("ssh_command")
 	tampered, _ := json.Marshal(raw)
 
 	if err := v.Verify(tampered); err == nil {
@@ -305,7 +305,7 @@ func TestVerify_TamperedDatasourceID(t *testing.T) {
 	s := testSigner(t, priv)
 
 	msg := map[string]any{
-		"action":        "ssh_exec",
+		"action":        "ssh_command",
 		"datasource_id": "ds-staging",
 		"params":        map[string]any{"command": "ls"},
 	}
