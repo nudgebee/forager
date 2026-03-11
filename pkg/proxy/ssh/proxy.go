@@ -84,7 +84,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	defer p.mu.Unlock()
 
 	// Close existing connections
-	p.closeAllLocked()
+	_ = p.closeAllLocked()
 
 	// Parse config
 	configJSON, _ := json.Marshal(config)
