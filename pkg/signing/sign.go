@@ -2,12 +2,16 @@ package signing
 
 import (
 	"crypto/ed25519"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"golang.org/x/crypto/ssh"
 )
 
 // Signer signs messages with an Ed25519 private key.
@@ -18,21 +22,67 @@ type Signer struct {
 	keyID      string
 }
 
-// NewSigner creates a message signer from a base64-encoded Ed25519 private key.
-func NewSigner(privateKeyB64, keyID string) (*Signer, error) {
-	keyBytes, err := base64.StdEncoding.DecodeString(privateKeyB64)
+// NewSigner creates a message signer from an Ed25519 private key.
+// Accepts OpenSSH PEM (ssh-keygen output), PKCS8 PEM, or base64-encoded raw key.
+func NewSigner(privateKeyStr, keyID string) (*Signer, error) {
+	privKey, err := parsePrivateKey(privateKeyStr)
 	if err != nil {
-		return nil, fmt.Errorf("invalid private key: base64 decode failed: %w", err)
-	}
-
-	if len(keyBytes) != ed25519.PrivateKeySize {
-		return nil, fmt.Errorf("invalid private key: expected %d bytes, got %d", ed25519.PrivateKeySize, len(keyBytes))
+		return nil, fmt.Errorf("invalid private key: %w", err)
 	}
 
 	return &Signer{
-		privateKey: ed25519.PrivateKey(keyBytes),
+		privateKey: privKey,
 		keyID:      keyID,
 	}, nil
+}
+
+// parsePrivateKey tries OpenSSH PEM, PKCS8 PEM, then raw base64.
+func parsePrivateKey(s string) (ed25519.PrivateKey, error) {
+	s = strings.TrimSpace(s)
+
+	// Try PEM formats
+	block, _ := pem.Decode([]byte(s))
+	if block != nil {
+		// OpenSSH format (ssh-keygen output)
+		if block.Type == "OPENSSH PRIVATE KEY" {
+			rawKey, err := ssh.ParseRawPrivateKey([]byte(s))
+			if err != nil {
+				return nil, fmt.Errorf("OpenSSH parse failed: %w", err)
+			}
+			edKey, ok := rawKey.(*ed25519.PrivateKey)
+			if !ok {
+				return nil, fmt.Errorf("OpenSSH key is not Ed25519")
+			}
+			return *edKey, nil
+		}
+
+		// PKCS8 format
+		key, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, fmt.Errorf("PEM parse failed: %w", err)
+		}
+		edKey, ok := key.(ed25519.PrivateKey)
+		if !ok {
+			return nil, fmt.Errorf("PEM key is not Ed25519")
+		}
+		return edKey, nil
+	}
+
+	// Raw base64
+	keyBytes, err := base64.StdEncoding.DecodeString(s)
+	if err != nil {
+		return nil, fmt.Errorf("base64 decode failed: %w", err)
+	}
+
+	if len(keyBytes) == ed25519.SeedSize {
+		return ed25519.NewKeyFromSeed(keyBytes), nil
+	}
+	if len(keyBytes) == ed25519.PrivateKeySize {
+		return ed25519.PrivateKey(keyBytes), nil
+	}
+
+	return nil, fmt.Errorf("invalid key size: expected %d or %d bytes, got %d",
+		ed25519.SeedSize, ed25519.PrivateKeySize, len(keyBytes))
 }
 
 // SigningFields defines which message fields to include in the signed payload.
