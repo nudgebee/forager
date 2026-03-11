@@ -326,12 +326,17 @@ func (p *Proxy) evictOldestLocked() {
 
 // poolCleanupLoop periodically removes expired connections from the pool.
 func (p *Proxy) poolCleanupLoop() {
+	// Capture channel locally to avoid racing with closeAllLocked setting it to nil.
+	p.mu.RLock()
+	done := p.cleanupDone
+	p.mu.RUnlock()
+
 	ticker := time.NewTicker(poolCleanupPeriod)
 	defer ticker.Stop()
 
 	for {
 		select {
-		case <-p.cleanupDone:
+		case <-done:
 			return
 		case <-ticker.C:
 			p.cleanupExpiredConnections()
