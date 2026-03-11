@@ -449,4 +449,3 @@ func TestIntegration_Close(t *testing.T) {
 		t.Fatal("expected error after close")
 	}
 }
-
