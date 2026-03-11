@@ -132,6 +132,9 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		p = proxyhttp.New(logger.With("datasource", ds.Name))
 	case "ssh":
 		proxyType = "ssh-proxy"
+		if len(ds.AllowedHosts) > 0 {
+			cfg["allowed_hosts"] = ds.AllowedHosts
+		}
 		p = proxyssh.New(logger.With("datasource", ds.Name))
 	case "mongodb":
 		proxyType = "mongo-proxy"
