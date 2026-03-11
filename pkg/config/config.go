@@ -44,6 +44,10 @@ type LocalDatasource struct {
 	CredentialSource string            `mapstructure:"credential_source"`
 	CredentialRef    string            `mapstructure:"credential_ref"`
 	Credentials      map[string]string `mapstructure:"credentials"`
+
+	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
+	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
+	AllowedHosts []string `mapstructure:"allowed_hosts"`
 }
 
 // AWSConfig holds AWS-specific configuration.

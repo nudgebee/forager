@@ -30,7 +30,7 @@ var signedActions = map[string]bool{
 	"db_metadata": true,
 
 	// SSH — arbitrary command execution, file read/write
-	"ssh_exec":     true,
+	"ssh_command":  true,
 	"ssh_upload":   true,
 	"ssh_download": true,
 	"ssh_list_dir": true,
@@ -234,6 +234,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 			Credentials      map[string]string `json:"credentials,omitempty"`
 			CredentialSource string            `json:"credential_source"`
 			CredentialRef    string            `json:"credential_ref,omitempty"`
+			AllowedHosts     []string          `json:"allowed_hosts,omitempty"`
 		} `json:"datasources"`
 	}
 	if err := json.Unmarshal(msg, &push); err != nil {
@@ -288,6 +289,10 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		case "mcp-proxy":
 			p = mcpproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
 		case "ssh-proxy":
+			// Pass allowed_hosts into config for dynamic mode
+			if len(ds.AllowedHosts) > 0 {
+				ds.Config["allowed_hosts"] = ds.AllowedHosts
+			}
 			p = sshproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
 		case "mongo-proxy":
 			p = mongoproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
