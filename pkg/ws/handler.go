@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 
 	"nudgebee/forager/pkg/proxy"
 	dbproxy "nudgebee/forager/pkg/proxy/db"
@@ -322,9 +323,10 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		h.logger.Info("datasource configured", "id", ds.ID, "type", ds.Type, "proxy_type", ds.ProxyType)
 	}
 
-	// Remove datasources not in the new config
+	// Remove cloud-managed datasources not in the new config.
+	// Locally-configured datasources (prefixed with "local:") are never removed by cloud sync.
 	for _, id := range h.registry.All() {
-		if !newIDs[id] {
+		if !newIDs[id] && !strings.HasPrefix(id, "local:") {
 			h.logger.Info("removing datasource not in config", "id", id)
 			h.registry.Remove(id) // nolint:errcheck
 		}

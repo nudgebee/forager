@@ -12,6 +12,19 @@ import (
 	"nudgebee/forager/pkg/signing"
 )
 
+// fakeProxy is a minimal Proxy implementation for tests.
+type fakeProxy struct {
+	proxyType string
+}
+
+func (f *fakeProxy) Type() string                                                          { return f.proxyType }
+func (f *fakeProxy) Configure(map[string]any, map[string]string) error                     { return nil }
+func (f *fakeProxy) HandleRequest(context.Context, *proxy.ActionRequest) (*proxy.ActionResponse, error) {
+	return &proxy.ActionResponse{StatusCode: 200}, nil
+}
+func (f *fakeProxy) HealthCheck(context.Context) error { return nil }
+func (f *fakeProxy) Close() error                      { return nil }
+
 func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelError}))
 }
@@ -242,6 +255,36 @@ func TestHandler_ConfigSync_CloudPushCredentials(t *testing.T) {
 	}
 	if creds["username"] != "admin" || creds["password"] != "secret" {
 		t.Fatalf("unexpected stored creds: %v", creds)
+	}
+}
+
+func TestHandler_ConfigSync_PreservesLocalDatasources(t *testing.T) {
+	h := newTestHandler(t)
+
+	// Pre-register a local datasource (simulates cmd/app.go local config)
+	localEntry := proxy.DatasourceEntry{
+		ID:        "local:prod-pg",
+		Type:      "postgresql",
+		ProxyType: "db-proxy",
+		Name:      "prod-pg",
+	}
+	h.registry.Register(localEntry.ID, localEntry, &fakeProxy{proxyType: "db-proxy"})
+
+	// Cloud config sync with a different datasource — should NOT remove local:prod-pg
+	msg := `{
+		"action": "datasource_config_sync",
+		"account_id": "acc-1",
+		"datasources": [
+			{"id": "ds-cloud-1", "type": "prometheus", "proxy_type": "http-proxy", "name": "cloud-prom", "config": {"base_url": "http://localhost:9090"}, "credential_source": "cloud_push"}
+		]
+	}`
+	_, _ = h.HandleMessage(context.Background(), []byte(msg))
+
+	if _, ok := h.registry.Get("local:prod-pg"); !ok {
+		t.Fatal("local:prod-pg should NOT be removed by cloud config sync")
+	}
+	if _, ok := h.registry.Get("ds-cloud-1"); !ok {
+		t.Fatal("ds-cloud-1 should be registered")
 	}
 }
 
