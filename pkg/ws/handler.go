@@ -47,6 +47,9 @@ var signedActions = map[string]bool{
 
 	// Redis — arbitrary command execution
 	"redis_command": true,
+
+	// Config test — creates temporary proxy to test connectivity
+	"test_datasource_config": true,
 }
 
 // Handler dispatches incoming relay messages to the appropriate proxy module.
@@ -117,6 +120,8 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 	switch envelope.Action {
 	case "datasource_config_sync":
 		return h.handleConfigSync(ctx, msg, envelope.RequestID)
+	case "test_datasource_config":
+		return h.handleTestDatasourceConfig(ctx, msg, envelope.RequestID)
 	default:
 		return h.handleRequest(ctx, msg, envelope.RequestID, envelope.DatasourceID)
 	}
@@ -337,6 +342,91 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		"request_id": requestID,
 	}
 	return json.Marshal(ack)
+}
+
+// handleTestDatasourceConfig creates a temporary proxy to test connectivity
+// without registering it. Used to validate credentials before saving an integration.
+func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, requestID string) ([]byte, error) {
+	var req struct {
+		Action     string `json:"action"`
+		Datasource struct {
+			Type             string            `json:"type"`
+			ProxyType        string            `json:"proxy_type"`
+			Config           map[string]any    `json:"config"`
+			Credentials      map[string]string `json:"credentials,omitempty"`
+			CredentialSource string            `json:"credential_source"`
+			CredentialRef    string            `json:"credential_ref,omitempty"`
+		} `json:"datasource"`
+	}
+	if err := json.Unmarshal(msg, &req); err != nil {
+		return nil, fmt.Errorf("unmarshal test config request: %w", err)
+	}
+
+	ds := req.Datasource
+	h.logger.Info("testing datasource config", "type", ds.Type, "proxy_type", ds.ProxyType)
+
+	// Resolve credentials (same logic as handleConfigSync)
+	creds := ds.Credentials
+	if ds.CredentialSource != "local" && ds.CredentialSource != "cloud_push" && ds.CredentialSource != "" {
+		resolved, err := h.secretsMgr.Resolve(ctx, ds.CredentialSource, ds.CredentialRef)
+		if err != nil {
+			return json.Marshal(map[string]any{
+				"action":     "test_datasource_config_result",
+				"request_id": requestID,
+				"success":    false,
+				"error":      fmt.Sprintf("failed to resolve credentials: %s", err.Error()),
+			})
+		}
+		creds = resolved
+	}
+
+	// Create temporary proxy
+	logger := h.logger.With("test", true, "type", ds.Type, "proxy_type", ds.ProxyType)
+	var p proxy.Proxy
+	switch ds.ProxyType {
+	case "http-proxy":
+		p = httpproxy.New(logger)
+	case "db-proxy":
+		dbType, _ := ds.Config["db_type"].(string)
+		if dbType == "" {
+			dbType = ds.Type
+		}
+		p = dbproxy.New(dbType, logger)
+	case "mcp-proxy":
+		p = mcpproxy.New(logger)
+	case "ssh-proxy":
+		p = sshproxy.New(logger)
+	case "mongo-proxy":
+		p = mongoproxy.New(logger)
+	case "redis-proxy":
+		p = redisproxy.New(logger)
+	case "kafka-proxy":
+		p = kafkaproxy.New(logger)
+	default:
+		return json.Marshal(map[string]any{
+			"action":     "test_datasource_config_result",
+			"request_id": requestID,
+			"success":    false,
+			"error":      fmt.Sprintf("unknown proxy type: %s", ds.ProxyType),
+		})
+	}
+
+	// Configure tests connectivity (e.g. db ping, ssh dial)
+	err := p.Configure(ds.Config, creds)
+	_ = p.Close()
+
+	resp := map[string]any{
+		"action":     "test_datasource_config_result",
+		"request_id": requestID,
+		"success":    err == nil,
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		h.logger.Warn("datasource config test failed", "type", ds.Type, "err", err)
+	} else {
+		h.logger.Info("datasource config test succeeded", "type", ds.Type)
+	}
+	return json.Marshal(resp)
 }
 
 func (h *Handler) buildErrorResponse(requestID string, statusCode int, message string) []byte {
