@@ -225,6 +225,36 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 	return h.buildErrorResponse(requestID, 400, "unrecognized message format"), nil
 }
 
+// newProxyByType creates a proxy instance for the given proxy type.
+// Handles db_type fallback for db-proxy and allowed_hosts injection for ssh-proxy.
+func newProxyByType(proxyType, dsType string, config map[string]any, allowedHosts []string, logger *slog.Logger) (proxy.Proxy, error) {
+	switch proxyType {
+	case "http-proxy":
+		return httpproxy.New(logger), nil
+	case "db-proxy":
+		dbType, _ := config["db_type"].(string)
+		if dbType == "" {
+			dbType = dsType // fallback for legacy configs
+		}
+		return dbproxy.New(dbType, logger), nil
+	case "mcp-proxy":
+		return mcpproxy.New(logger), nil
+	case "ssh-proxy":
+		if len(allowedHosts) > 0 {
+			config["allowed_hosts"] = allowedHosts
+		}
+		return sshproxy.New(logger), nil
+	case "mongo-proxy":
+		return mongoproxy.New(logger), nil
+	case "redis-proxy":
+		return redisproxy.New(logger), nil
+	case "kafka-proxy":
+		return kafkaproxy.New(logger), nil
+	default:
+		return nil, fmt.Errorf("unknown proxy type: %s", proxyType)
+	}
+}
+
 // handleConfigSync processes datasource configuration updates from the cloud.
 func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID string) ([]byte, error) {
 	var push struct {
@@ -281,31 +311,8 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		}
 
 		// Create or reconfigure the proxy
-		var p proxy.Proxy
-		switch ds.ProxyType {
-		case "http-proxy":
-			p = httpproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "db-proxy":
-			dbType, _ := ds.Config["db_type"].(string)
-			if dbType == "" {
-				dbType = ds.Type // fallback for legacy configs
-			}
-			p = dbproxy.New(dbType, h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "mcp-proxy":
-			p = mcpproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "ssh-proxy":
-			// Pass allowed_hosts into config for dynamic mode
-			if len(ds.AllowedHosts) > 0 {
-				ds.Config["allowed_hosts"] = ds.AllowedHosts
-			}
-			p = sshproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "mongo-proxy":
-			p = mongoproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "redis-proxy":
-			p = redisproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "kafka-proxy":
-			p = kafkaproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		default:
+		p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, h.logger.With("datasource", ds.ID, "type", ds.Type))
+		if proxyErr != nil {
 			h.logger.Warn("unknown proxy type, skipping", "proxy_type", ds.ProxyType, "datasource_id", ds.ID)
 			continue
 		}
@@ -356,6 +363,7 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 			Credentials      map[string]string `json:"credentials,omitempty"`
 			CredentialSource string            `json:"credential_source"`
 			CredentialRef    string            `json:"credential_ref,omitempty"`
+			AllowedHosts     []string          `json:"allowed_hosts,omitempty"`
 		} `json:"datasource"`
 	}
 	if err := json.Unmarshal(msg, &req); err != nil {
@@ -382,32 +390,13 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 
 	// Create temporary proxy
 	logger := h.logger.With("test", true, "type", ds.Type, "proxy_type", ds.ProxyType)
-	var p proxy.Proxy
-	switch ds.ProxyType {
-	case "http-proxy":
-		p = httpproxy.New(logger)
-	case "db-proxy":
-		dbType, _ := ds.Config["db_type"].(string)
-		if dbType == "" {
-			dbType = ds.Type
-		}
-		p = dbproxy.New(dbType, logger)
-	case "mcp-proxy":
-		p = mcpproxy.New(logger)
-	case "ssh-proxy":
-		p = sshproxy.New(logger)
-	case "mongo-proxy":
-		p = mongoproxy.New(logger)
-	case "redis-proxy":
-		p = redisproxy.New(logger)
-	case "kafka-proxy":
-		p = kafkaproxy.New(logger)
-	default:
+	p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, logger)
+	if proxyErr != nil {
 		return json.Marshal(map[string]any{
 			"action":     "test_datasource_config_result",
 			"request_id": requestID,
 			"success":    false,
-			"error":      fmt.Sprintf("unknown proxy type: %s", ds.ProxyType),
+			"error":      proxyErr.Error(),
 		})
 	}
 
