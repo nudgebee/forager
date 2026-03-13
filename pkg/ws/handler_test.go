@@ -17,8 +17,8 @@ type fakeProxy struct {
 	proxyType string
 }
 
-func (f *fakeProxy) Type() string                                                          { return f.proxyType }
-func (f *fakeProxy) Configure(map[string]any, map[string]string) error                     { return nil }
+func (f *fakeProxy) Type() string                                      { return f.proxyType }
+func (f *fakeProxy) Configure(map[string]any, map[string]string) error { return nil }
 func (f *fakeProxy) HandleRequest(context.Context, *proxy.ActionRequest) (*proxy.ActionResponse, error) {
 	return &proxy.ActionResponse{StatusCode: 200}, nil
 }
