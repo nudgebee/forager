@@ -47,6 +47,9 @@ var signedActions = map[string]bool{
 
 	// Redis — arbitrary command execution
 	"redis_command": true,
+
+	// Config test — creates temporary proxy to test connectivity
+	"test_datasource_config": true,
 }
 
 // Handler dispatches incoming relay messages to the appropriate proxy module.
@@ -117,6 +120,8 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 	switch envelope.Action {
 	case "datasource_config_sync":
 		return h.handleConfigSync(ctx, msg, envelope.RequestID)
+	case "test_datasource_config":
+		return h.handleTestDatasourceConfig(ctx, msg, envelope.RequestID)
 	default:
 		return h.handleRequest(ctx, msg, envelope.RequestID, envelope.DatasourceID)
 	}
@@ -220,6 +225,36 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 	return h.buildErrorResponse(requestID, 400, "unrecognized message format"), nil
 }
 
+// newProxyByType creates a proxy instance for the given proxy type.
+// Handles db_type fallback for db-proxy and allowed_hosts injection for ssh-proxy.
+func newProxyByType(proxyType, dsType string, config map[string]any, allowedHosts []string, logger *slog.Logger) (proxy.Proxy, error) {
+	switch proxyType {
+	case "http-proxy":
+		return httpproxy.New(logger), nil
+	case "db-proxy":
+		dbType, _ := config["db_type"].(string)
+		if dbType == "" {
+			dbType = dsType // fallback for legacy configs
+		}
+		return dbproxy.New(dbType, logger), nil
+	case "mcp-proxy":
+		return mcpproxy.New(logger), nil
+	case "ssh-proxy":
+		if len(allowedHosts) > 0 {
+			config["allowed_hosts"] = allowedHosts
+		}
+		return sshproxy.New(logger), nil
+	case "mongo-proxy":
+		return mongoproxy.New(logger), nil
+	case "redis-proxy":
+		return redisproxy.New(logger), nil
+	case "kafka-proxy":
+		return kafkaproxy.New(logger), nil
+	default:
+		return nil, fmt.Errorf("unknown proxy type: %s", proxyType)
+	}
+}
+
 // handleConfigSync processes datasource configuration updates from the cloud.
 func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID string) ([]byte, error) {
 	var push struct {
@@ -276,31 +311,8 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		}
 
 		// Create or reconfigure the proxy
-		var p proxy.Proxy
-		switch ds.ProxyType {
-		case "http-proxy":
-			p = httpproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "db-proxy":
-			dbType, _ := ds.Config["db_type"].(string)
-			if dbType == "" {
-				dbType = ds.Type // fallback for legacy configs
-			}
-			p = dbproxy.New(dbType, h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "mcp-proxy":
-			p = mcpproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "ssh-proxy":
-			// Pass allowed_hosts into config for dynamic mode
-			if len(ds.AllowedHosts) > 0 {
-				ds.Config["allowed_hosts"] = ds.AllowedHosts
-			}
-			p = sshproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "mongo-proxy":
-			p = mongoproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "redis-proxy":
-			p = redisproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		case "kafka-proxy":
-			p = kafkaproxy.New(h.logger.With("datasource", ds.ID, "type", ds.Type))
-		default:
+		p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, h.logger.With("datasource", ds.ID, "type", ds.Type))
+		if proxyErr != nil {
 			h.logger.Warn("unknown proxy type, skipping", "proxy_type", ds.ProxyType, "datasource_id", ds.ID)
 			continue
 		}
@@ -337,6 +349,73 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		"request_id": requestID,
 	}
 	return json.Marshal(ack)
+}
+
+// handleTestDatasourceConfig creates a temporary proxy to test connectivity
+// without registering it. Used to validate credentials before saving an integration.
+func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, requestID string) ([]byte, error) {
+	var req struct {
+		Action     string `json:"action"`
+		Datasource struct {
+			Type             string            `json:"type"`
+			ProxyType        string            `json:"proxy_type"`
+			Config           map[string]any    `json:"config"`
+			Credentials      map[string]string `json:"credentials,omitempty"`
+			CredentialSource string            `json:"credential_source"`
+			CredentialRef    string            `json:"credential_ref,omitempty"`
+			AllowedHosts     []string          `json:"allowed_hosts,omitempty"`
+		} `json:"datasource"`
+	}
+	if err := json.Unmarshal(msg, &req); err != nil {
+		return nil, fmt.Errorf("unmarshal test config request: %w", err)
+	}
+
+	ds := req.Datasource
+	h.logger.Info("testing datasource config", "type", ds.Type, "proxy_type", ds.ProxyType)
+
+	// Resolve credentials (same logic as handleConfigSync)
+	creds := ds.Credentials
+	if ds.CredentialSource != "local" && ds.CredentialSource != "cloud_push" && ds.CredentialSource != "" {
+		resolved, err := h.secretsMgr.Resolve(ctx, ds.CredentialSource, ds.CredentialRef)
+		if err != nil {
+			return json.Marshal(map[string]any{
+				"action":     "test_datasource_config_result",
+				"request_id": requestID,
+				"success":    false,
+				"error":      fmt.Sprintf("failed to resolve credentials: %s", err.Error()),
+			})
+		}
+		creds = resolved
+	}
+
+	// Create temporary proxy
+	logger := h.logger.With("test", true, "type", ds.Type, "proxy_type", ds.ProxyType)
+	p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, logger)
+	if proxyErr != nil {
+		return json.Marshal(map[string]any{
+			"action":     "test_datasource_config_result",
+			"request_id": requestID,
+			"success":    false,
+			"error":      proxyErr.Error(),
+		})
+	}
+
+	// Configure tests connectivity (e.g. db ping, ssh dial)
+	err := p.Configure(ds.Config, creds)
+	_ = p.Close()
+
+	resp := map[string]any{
+		"action":     "test_datasource_config_result",
+		"request_id": requestID,
+		"success":    err == nil,
+	}
+	if err != nil {
+		resp["error"] = err.Error()
+		h.logger.Warn("datasource config test failed", "type", ds.Type, "err", err)
+	} else {
+		h.logger.Info("datasource config test succeeded", "type", ds.Type)
+	}
+	return json.Marshal(resp)
 }
 
 func (h *Handler) buildErrorResponse(requestID string, statusCode int, message string) []byte {
