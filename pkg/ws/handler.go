@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 
 	"nudgebee/forager/pkg/proxy"
@@ -226,6 +227,28 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 	return h.buildErrorResponse(requestID, 400, "unrecognized message format"), nil
 }
 
+// normalizeConfigValues walks a config map and coerces string values that
+// represent booleans or integers into their native Go types. This is needed
+// because the cloud backend sometimes sends bool/int fields as JSON strings.
+func normalizeConfigValues(config map[string]any) {
+	for k, v := range config {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		switch s {
+		case "true":
+			config[k] = true
+		case "false":
+			config[k] = false
+		default:
+			if n, err := strconv.Atoi(s); err == nil {
+				config[k] = n
+			}
+		}
+	}
+}
+
 // newProxyByType creates a proxy instance for the given proxy type.
 // Handles db_type fallback for db-proxy and allowed_hosts injection for ssh-proxy.
 func newProxyByType(proxyType, dsType string, config map[string]any, allowedHosts []string, logger *slog.Logger) (proxy.Proxy, error) {
@@ -311,6 +334,9 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 			creds = resolved
 		}
 
+		// Coerce string config values (e.g. "true"/"5432") to native types
+		normalizeConfigValues(ds.Config)
+
 		// Create or reconfigure the proxy
 		p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, h.logger.With("datasource", ds.ID, "type", ds.Type))
 		if proxyErr != nil {
@@ -389,6 +415,9 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 		}
 		creds = resolved
 	}
+
+	// Coerce string config values (e.g. "true"/"5432") to native types
+	normalizeConfigValues(ds.Config)
 
 	// Create temporary proxy
 	logger := h.logger.With("test", true, "type", ds.Type, "proxy_type", ds.ProxyType)
