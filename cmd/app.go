@@ -13,6 +13,7 @@ import (
 	proxykafka "nudgebee/forager/pkg/proxy/kafka"
 	proxymongo "nudgebee/forager/pkg/proxy/mongodb"
 	proxyredis "nudgebee/forager/pkg/proxy/redis"
+	proxymcp "nudgebee/forager/pkg/proxy/mcp"
 	proxyssh "nudgebee/forager/pkg/proxy/ssh"
 	"nudgebee/forager/pkg/secrets"
 	"nudgebee/forager/pkg/signing"
@@ -148,6 +149,33 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 			cfg["brokers"] = ds.Brokers
 		}
 		p = proxykafka.New(logger.With("datasource", ds.Name))
+	case "mcp":
+		proxyType = "mcp-proxy"
+		if ds.Transport != "" {
+			cfg["transport"] = ds.Transport
+		}
+		if ds.Command != "" {
+			cfg["command"] = ds.Command
+		}
+		if ds.Args != "" {
+			cfg["args"] = ds.Args
+		}
+		if ds.WorkingDir != "" {
+			cfg["working_dir"] = ds.WorkingDir
+		}
+		if len(ds.Env) > 0 {
+			envMap := make(map[string]any, len(ds.Env))
+			for k, v := range ds.Env {
+				envMap[k] = v
+			}
+			cfg["env"] = envMap
+		}
+		if ds.Credentials != nil {
+			if v, ok := ds.Credentials["auth_type"]; ok {
+				cfg["auth_type"] = v
+			}
+		}
+		p = proxymcp.New(logger.With("datasource", ds.Name))
 	default:
 		logger.Warn("unsupported local datasource type", "type", ds.Type)
 		return

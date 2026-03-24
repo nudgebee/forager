@@ -104,6 +104,7 @@ relay_url: ${RELAY_URL}
 access_key: ${NB_ACCESS_KEY}
 access_secret: ${NB_ACCESS_SECRET}
 data_dir: ${DATA_DIR}
+$([ -n "${NB_SIGNING_PUBLIC_KEY:-}" ] && echo "signing_public_key: \"${NB_SIGNING_PUBLIC_KEY}\"")
 EOF
         chmod 600 "${CONFIG_DIR}/forager.yaml"
         chown nudgebee:nudgebee "${CONFIG_DIR}/forager.yaml"
