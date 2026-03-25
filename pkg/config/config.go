@@ -48,6 +48,13 @@ type LocalDatasource struct {
 	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
 	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
 	AllowedHosts []string `mapstructure:"allowed_hosts"`
+
+	// MCP fields
+	Transport  string            `mapstructure:"transport"`   // http, sse, stdio
+	Command    string            `mapstructure:"command"`     // MCP stdio: command to run
+	Args       string            `mapstructure:"args"`        // MCP stdio: command args (space-separated)
+	Env        map[string]string `mapstructure:"env"`         // MCP stdio: environment variables
+	WorkingDir string            `mapstructure:"working_dir"` // MCP stdio: working directory
 }
 
 // AWSConfig holds AWS-specific configuration.
