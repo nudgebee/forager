@@ -151,6 +151,9 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		p = proxykafka.New(logger.With("datasource", ds.Name))
 	case "mcp":
 		proxyType = "mcp-proxy"
+		if ds.URL != "" {
+			cfg["url"] = ds.URL
+		}
 		if ds.Transport != "" {
 			cfg["transport"] = ds.Transport
 		}
