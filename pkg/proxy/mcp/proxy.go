@@ -136,7 +136,9 @@ func (p *Proxy) handleHTTP(ctx context.Context, req *proxy.ActionRequest) (*prox
 		return nil, fmt.Errorf("creating MCP request: %w", err)
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
-	p.injectAuth(httpReq)
+	if err := p.injectAuth(httpReq); err != nil {
+		return nil, fmt.Errorf("MCP auth: %w", err)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -167,7 +169,9 @@ func (p *Proxy) handleSSE(ctx context.Context, req *proxy.ActionRequest) (*proxy
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
 	httpReq.Header.Set("Accept", "text/event-stream")
-	p.injectAuth(httpReq)
+	if err := p.injectAuth(httpReq); err != nil {
+		return nil, fmt.Errorf("MCP SSE auth: %w", err)
+	}
 
 	resp, err := p.client.Do(httpReq)
 	if err != nil {
@@ -241,7 +245,7 @@ func (p *Proxy) handleStdio(ctx context.Context, req *proxy.ActionRequest) (*pro
 	}, nil
 }
 
-func (p *Proxy) injectAuth(req *http.Request) {
+func (p *Proxy) injectAuth(req *http.Request) error {
 	switch p.authType {
 	case "basic":
 		req.SetBasicAuth(p.creds["username"], p.creds["password"])
@@ -266,11 +270,11 @@ func (p *Proxy) injectAuth(req *http.Request) {
 	case "oauth2":
 		token, err := p.getOAuthToken(req.Context())
 		if err != nil {
-			p.logger.Error("failed to fetch OAuth token", "err", err)
-			return
+			return fmt.Errorf("oauth2 token: %w", err)
 		}
 		req.Header.Set("Authorization", "Bearer "+token)
 	}
+	return nil
 }
 
 // getOAuthToken returns a cached OAuth 2.0 access token, refreshing via client_credentials grant if expired.
@@ -328,8 +332,12 @@ func (p *Proxy) getOAuthToken(ctx context.Context) (string, error) {
 
 	p.oauthToken = tokenResp.AccessToken
 	if tokenResp.ExpiresIn > 0 {
-		// Refresh 30s before actual expiry
-		p.oauthExpAt = time.Now().Add(time.Duration(tokenResp.ExpiresIn)*time.Second - 30*time.Second)
+		lifetime := time.Duration(tokenResp.ExpiresIn) * time.Second
+		buffer := 30 * time.Second
+		if buffer > lifetime/2 {
+			buffer = lifetime / 2
+		}
+		p.oauthExpAt = time.Now().Add(lifetime - buffer)
 	} else {
 		p.oauthExpAt = time.Now().Add(5 * time.Minute)
 	}
@@ -353,7 +361,9 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 			return err
 		}
 		req.Header.Set("Content-Type", "application/json")
-		p.injectAuth(req)
+		if err := p.injectAuth(req); err != nil {
+			return fmt.Errorf("MCP health check auth: %w", err)
+		}
 
 		resp, err := p.client.Do(req)
 		if err != nil {
