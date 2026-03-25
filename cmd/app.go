@@ -58,6 +58,11 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
 
+	handler.SetResyncFunc(func(ctx context.Context) {
+		client.SendInventory()
+		client.SendMetadata(ctx)
+	})
+
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
 		entries := registry.List()
 		items := make([]ws.DatasourceInventoryItem, 0, len(entries))

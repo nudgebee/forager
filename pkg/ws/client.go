@@ -179,7 +179,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	c.logger.Info("connected to relay, greeting sent")
 
 	// Send datasource inventory for auto-registration
-	c.sendInventory()
+	c.SendInventory()
 
 	// Setup ping/pong
 	conn.SetReadDeadline(time.Now().Add(pongWait)) // nolint:errcheck
@@ -222,7 +222,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.sendMetadata(ctx)
+			c.SendMetadata(ctx)
 		}()
 	}
 
@@ -314,7 +314,8 @@ func (c *Client) healthReportLoop(ctx context.Context) {
 	}
 }
 
-func (c *Client) sendInventory() {
+// SendInventory sends the datasource inventory to the relay.
+func (c *Client) SendInventory() {
 	if c.inventoryFn == nil {
 		return
 	}
@@ -337,7 +338,8 @@ func (c *Client) sendInventory() {
 	c.logger.Info("sent datasource inventory for auto-registration", "datasource_count", len(items))
 }
 
-func (c *Client) sendMetadata(ctx context.Context) {
+// SendMetadata collects and sends datasource metadata to the relay.
+func (c *Client) SendMetadata(ctx context.Context) {
 	if c.metadataFn == nil {
 		return
 	}

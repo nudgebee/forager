@@ -54,12 +54,16 @@ var signedActions = map[string]bool{
 	"test_datasource_config": true,
 }
 
+// ResyncFunc is called when the relay requests an inventory resync.
+type ResyncFunc func(ctx context.Context)
+
 // Handler dispatches incoming relay messages to the appropriate proxy module.
 type Handler struct {
 	registry   *proxy.Registry
 	credStore  *secrets.CloudPushStore
 	secretsMgr *secrets.Manager
 	verifier   *signing.Verifier
+	resyncFn   ResyncFunc
 	logger     *slog.Logger
 }
 
@@ -72,6 +76,11 @@ func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, sec
 		verifier:   verifier,
 		logger:     logger,
 	}
+}
+
+// SetResyncFunc sets the callback invoked when the relay requests an inventory resync.
+func (h *Handler) SetResyncFunc(fn ResyncFunc) {
+	h.resyncFn = fn
 }
 
 // HandleMessage processes a single message from the relay server.
@@ -124,6 +133,16 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 		return h.handleConfigSync(ctx, msg, envelope.RequestID)
 	case "test_datasource_config":
 		return h.handleTestDatasourceConfig(ctx, msg, envelope.RequestID)
+	case "resync_inventory":
+		if h.resyncFn != nil {
+			h.resyncFn(ctx)
+			h.logger.Info("inventory resync triggered by relay")
+		}
+		return json.Marshal(map[string]any{
+			"action":     "resync_inventory_ack",
+			"request_id": envelope.RequestID,
+			"status":     "ok",
+		})
 	default:
 		return h.handleRequest(ctx, msg, envelope.RequestID, envelope.DatasourceID)
 	}
