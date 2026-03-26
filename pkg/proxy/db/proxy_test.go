@@ -352,6 +352,21 @@ func TestSanitizeQuery(t *testing.T) {
 			input: `mariadb -e "SELECT 1" --database mydb`,
 			want:  "SELECT 1",
 		},
+		{
+			name:  "sqlcmd wrapper",
+			input: `sqlcmd -Q "SELECT name FROM sys.tables" -s "	" -W`,
+			want:  "SELECT name FROM sys.tables",
+		},
+		{
+			name:  "sqlcmd with database flag",
+			input: `sqlcmd -d "mydb" -Q "SELECT @@VERSION" -s "	" -W`,
+			want:  "SELECT @@VERSION",
+		},
+		{
+			name:  "sqlcmd without -Q flag passthrough",
+			input: `sqlcmd -S localhost`,
+			want:  `sqlcmd -S localhost`,
+		},
 	}
 
 	for _, tt := range tests {
