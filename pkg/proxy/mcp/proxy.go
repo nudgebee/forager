@@ -120,6 +120,19 @@ func (p *Proxy) buildRequestBody(req *proxy.ActionRequest) ([]byte, error) {
 		return []byte(req.Body), nil
 	}
 	if req.Params != nil {
+		// If params contains a "method" key, the caller sent action_params
+		// (e.g. from the relay's legacy format). Wrap in a JSON-RPC envelope.
+		if method, ok := req.Params["method"].(string); ok && method != "" {
+			rpcReq := map[string]any{
+				"jsonrpc": "2.0",
+				"id":      1,
+				"method":  method,
+			}
+			if params, ok := req.Params["params"]; ok && params != nil {
+				rpcReq["params"] = params
+			}
+			return json.Marshal(rpcReq)
+		}
 		return json.Marshal(req.Params)
 	}
 	return nil, fmt.Errorf("no request body or params provided")
