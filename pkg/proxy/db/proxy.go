@@ -304,6 +304,15 @@ func sanitizeQuery(query string) string {
 		return arg
 	}
 
+	// Detect sqlcmd wrapping: sqlcmd [flags] -Q "SQL"
+	if strings.HasPrefix(lower, "sqlcmd") {
+		arg := extractFlagArg(q, lower, " -q ")
+		if arg == "" {
+			return q
+		}
+		return arg
+	}
+
 	return q
 }
 
