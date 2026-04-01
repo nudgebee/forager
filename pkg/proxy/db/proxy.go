@@ -313,6 +313,19 @@ func sanitizeQuery(query string) string {
 		return arg
 	}
 
+	// Detect sqlplus wrapping: sqlplus [flags] -Q "SQL"
+	// The -Q flag is a convention used by the workspace shim (real sqlplus
+	// doesn't have -Q). Forager receives this from the workspace proxy path.
+	if strings.HasPrefix(lower, "sqlplus") {
+		arg := extractFlagArg(q, lower, " -q ")
+		if arg == "" {
+			return q
+		}
+		// Strip trailing semicolons — go-ora rejects them
+		arg = strings.TrimRight(arg, "; \t\n")
+		return arg
+	}
+
 	return q
 }
 
