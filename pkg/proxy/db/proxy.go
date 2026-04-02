@@ -3,10 +3,12 @@ package db
 import (
 	"context"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"log/slog"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -112,7 +114,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("building DSN: %w", err)
 	}
 
-	pool, err := sql.Open(driverName, dsn)
+	pool, err := openDB(driverName, dsn)
 	if err != nil {
 		return fmt.Errorf("opening db: %w", err)
 	}
@@ -172,7 +174,7 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 	if pool == nil {
 		return fmt.Errorf("database not configured")
 	}
-	return pool.PingContext(ctx)
+	return safeProbe(ctx, pool, p.dbType)
 }
 
 func (p *Proxy) Close() error {
@@ -188,6 +190,58 @@ func (p *Proxy) Close() error {
 }
 
 // probeQuery returns a no-op SELECT suitable for the database type.
+// panicSafeConnector wraps a driver.Connector and recovers from panics in
+// Connect. The go-ora driver can panic with a nil-pointer dereference during
+// connection setup (e.g. when network middleboxes corrupt TNS packets).
+// database/sql calls Connect from both user goroutines and its internal
+// connectionOpener goroutine, so recovering at the Connector level is the
+// only way to protect all call sites.
+type panicSafeConnector struct {
+	inner  driver.Connector
+	driver driver.Driver
+}
+
+func (c *panicSafeConnector) Connect(ctx context.Context) (conn driver.Conn, err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			conn = nil
+			err = fmt.Errorf("driver panic: %v\n%s", r, debug.Stack())
+		}
+	}()
+	return c.inner.Connect(ctx)
+}
+
+func (c *panicSafeConnector) Driver() driver.Driver {
+	return c.driver
+}
+
+// openDB opens a sql.DB for the given driver. For the Oracle driver, the
+// connector is wrapped with panic recovery so that nil-pointer dereferences
+// inside go-ora cannot crash the process.
+func openDB(driverName, dsn string) (*sql.DB, error) {
+	if driverName != "oracle" {
+		return sql.Open(driverName, dsn)
+	}
+	// Lookup the registered driver to obtain a Connector.
+	db, err := sql.Open(driverName, dsn)
+	if err != nil {
+		return nil, err
+	}
+	drv := db.Driver()
+	_ = db.Close()
+
+	oc, ok := drv.(driver.DriverContext)
+	if !ok {
+		// Fallback: driver doesn't support DriverContext; use plain Open.
+		return sql.Open(driverName, dsn)
+	}
+	connector, err := oc.OpenConnector(dsn)
+	if err != nil {
+		return nil, err
+	}
+	return sql.OpenDB(&panicSafeConnector{inner: connector, driver: drv}), nil
+}
+
 func probeQuery(dbType string) string {
 	switch dbType {
 	case "oracle":
@@ -204,7 +258,7 @@ func probeQuery(dbType string) string {
 func safeProbe(ctx context.Context, pool *sql.DB, dbType string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("driver panic: %v", r)
+			err = fmt.Errorf("driver panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 	row := pool.QueryRowContext(ctx, probeQuery(dbType))
