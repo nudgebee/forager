@@ -121,10 +121,14 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	pool.SetMaxIdleConns(cfg.MaxIdle)
 	pool.SetConnMaxLifetime(time.Duration(cfg.MaxLifetime) * time.Second)
 
-	// Test connection
+	// Test connection using a lightweight query instead of PingContext.
+	// go-ora's Ping sends a TNS-level operation (0x93) that some network
+	// middleboxes (transit gateways, load balancers) mishandle, causing
+	// nil-pointer panics in the driver. A simple query validates the full
+	// path without relying on the TNS ping operation.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	if err := pool.PingContext(ctx); err != nil {
+	if err := safeProbe(ctx, pool, p.dbType); err != nil {
 		_ = pool.Close()
 		return fmt.Errorf("connection test failed: %w", err)
 	}
@@ -181,6 +185,31 @@ func (p *Proxy) Close() error {
 		return err
 	}
 	return nil
+}
+
+// probeQuery returns a no-op SELECT suitable for the database type.
+func probeQuery(dbType string) string {
+	switch dbType {
+	case "oracle":
+		return "SELECT 1 FROM dual"
+	case "mssql":
+		return "SELECT 1"
+	default:
+		return "SELECT 1"
+	}
+}
+
+// safeProbe validates the connection by running a lightweight query,
+// recovering from any driver panics (e.g. go-ora nil-pointer dereference).
+func safeProbe(ctx context.Context, pool *sql.DB, dbType string) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("driver panic: %v", r)
+		}
+	}()
+	row := pool.QueryRowContext(ctx, probeQuery(dbType))
+	var n int
+	return row.Scan(&n)
 }
 
 func (p *Proxy) buildDSN() (string, string, error) {
@@ -263,6 +292,9 @@ func (p *Proxy) buildDSN() (string, string, error) {
 //   - psql [flags] -c "\copy (SQL) TO stdout WITH CSV HEADER"
 //   - psql [flags] -c "SQL"
 //   - mariadb [flags] -e "SQL"
+//   - sqlcmd [flags] -Q "SQL"
+//   - echo "SQL" | sqlplus [flags]
+//   - sqlplus [flags] <<< "SQL"
 //
 // If the query doesn't match these patterns it is returned unchanged.
 func sanitizeQuery(query string) string {
@@ -311,6 +343,24 @@ func sanitizeQuery(query string) string {
 			return q
 		}
 		return arg
+	}
+
+	// Detect pipe to sqlplus: echo "SQL" | sqlplus [flags]
+	if pipeIdx := strings.Index(lower, "| sqlplus"); pipeIdx >= 0 {
+		prefix := strings.TrimSpace(q[:pipeIdx])
+		lowerPrefix := strings.ToLower(prefix)
+		if strings.HasPrefix(lowerPrefix, "echo ") {
+			return stripQuotes(strings.TrimSpace(prefix[5:]))
+		}
+		return q
+	}
+
+	// Detect sqlplus wrapping: sqlplus [flags] <<< "SQL"
+	if strings.HasPrefix(lower, "sqlplus") {
+		if hereIdx := strings.Index(q, "<<<"); hereIdx >= 0 {
+			return stripQuotes(strings.TrimSpace(q[hereIdx+3:]))
+		}
+		return q
 	}
 
 	return q
@@ -368,6 +418,16 @@ func extractFlagArg(original, lowered, flag string) string {
 		return ""
 	}
 	return fields[0]
+}
+
+// stripQuotes removes a matching pair of surrounding single or double quotes.
+func stripQuotes(s string) string {
+	if len(s) >= 2 {
+		if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
+			return s[1 : len(s)-1]
+		}
+	}
+	return s
 }
 
 func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {

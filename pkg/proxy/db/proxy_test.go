@@ -367,6 +367,31 @@ func TestSanitizeQuery(t *testing.T) {
 			input: `sqlcmd -S localhost`,
 			want:  `sqlcmd -S localhost`,
 		},
+		{
+			name:  "echo pipe to sqlplus double quotes",
+			input: `echo "SELECT * FROM dual" | sqlplus -s user/pass@//host:1521/ORCL`,
+			want:  "SELECT * FROM dual",
+		},
+		{
+			name:  "echo pipe to sqlplus single quotes",
+			input: `echo 'SELECT name FROM v$session' | sqlplus -s /nolog`,
+			want:  "SELECT name FROM v$session",
+		},
+		{
+			name:  "sqlplus here-string double quotes",
+			input: `sqlplus -s user/pass@host <<< "SELECT sysdate FROM dual"`,
+			want:  "SELECT sysdate FROM dual",
+		},
+		{
+			name:  "sqlplus here-string single quotes",
+			input: `sqlplus -s /nolog <<< 'SELECT 1 FROM dual'`,
+			want:  "SELECT 1 FROM dual",
+		},
+		{
+			name:  "sqlplus without here-string or pipe passthrough",
+			input: `sqlplus -s user/pass@host @script.sql`,
+			want:  `sqlplus -s user/pass@host @script.sql`,
+		},
 	}
 
 	for _, tt := range tests {
