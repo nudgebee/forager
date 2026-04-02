@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -204,7 +205,7 @@ func (c *panicSafeConnector) Connect(ctx context.Context) (conn driver.Conn, err
 	defer func() {
 		if r := recover(); r != nil {
 			conn = nil
-			err = fmt.Errorf("driver panic: %v", r)
+			err = fmt.Errorf("driver panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 	return c.inner.Connect(ctx)
@@ -257,7 +258,7 @@ func probeQuery(dbType string) string {
 func safeProbe(ctx context.Context, pool *sql.DB, dbType string) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
-			err = fmt.Errorf("driver panic: %v", r)
+			err = fmt.Errorf("driver panic: %v\n%s", r, debug.Stack())
 		}
 	}()
 	row := pool.QueryRowContext(ctx, probeQuery(dbType))
