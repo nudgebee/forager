@@ -277,9 +277,22 @@ func (p *Proxy) buildDSN() (string, string, error) {
 		if sn, ok := p.configRaw["service_name"].(string); ok && sn != "" {
 			serviceName = sn
 		}
-		dsn := fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
+		// Use TNS description with SERVER=DEDICATED to prevent listener
+		// redirects. go-ora panics when the Accept packet after a redirect
+		// is malformed (common through transit gateways / load balancers).
+		connStr := fmt.Sprintf(
+			"(DESCRIPTION=(ADDRESS=(PROTOCOL=TCP)(HOST=%s)(PORT=%d))(CONNECT_DATA=(SERVICE_NAME=%s)(SERVER=DEDICATED)))",
+			p.config.Host, p.config.Port, serviceName,
+		)
+		q := url.Values{}
+		q.Set("connStr", connStr)
+		if p.config.TLSEnabled {
+			q.Set("SSL", "true")
+			q.Set("SSL Verify", "false")
+		}
+		dsn := fmt.Sprintf("oracle://%s:%s@%s:%d/?%s",
 			url.PathEscape(username), url.PathEscape(password),
-			p.config.Host, p.config.Port, serviceName)
+			p.config.Host, p.config.Port, q.Encode())
 		return dsn, "oracle", nil
 
 	default:

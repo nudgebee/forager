@@ -4,6 +4,7 @@ import (
 	"context"
 	"log/slog"
 	"os"
+	"strings"
 	"testing"
 
 	"nudgebee/forager/pkg/proxy"
@@ -145,9 +146,14 @@ func TestProxy_BuildDSN_Oracle(t *testing.T) {
 	if driver != "oracle" {
 		t.Fatalf("expected oracle driver, got %s", driver)
 	}
-	expected := "oracle://sys:pass@oracle.internal:1521/ORCL"
-	if dsn != expected {
-		t.Fatalf("expected DSN %q, got %q", expected, dsn)
+	if !strings.HasPrefix(dsn, "oracle://sys:pass@oracle.internal:1521/?") {
+		t.Fatalf("unexpected DSN prefix: %s", dsn)
+	}
+	if !strings.Contains(dsn, "SERVICE_NAME%3DORCL") {
+		t.Fatalf("DSN missing SERVICE_NAME=ORCL: %s", dsn)
+	}
+	if !strings.Contains(dsn, "SERVER%3DDEDICATED") {
+		t.Fatalf("DSN missing SERVER=DEDICATED: %s", dsn)
 	}
 }
 
@@ -161,9 +167,8 @@ func TestProxy_BuildDSN_Oracle_ServiceName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDSN: %v", err)
 	}
-	expected := "oracle://sys:pass@oracle.internal:1521/MYSERVICE"
-	if dsn != expected {
-		t.Fatalf("expected DSN %q, got %q", expected, dsn)
+	if !strings.Contains(dsn, "SERVICE_NAME%3DMYSERVICE") {
+		t.Fatalf("DSN missing SERVICE_NAME=MYSERVICE: %s", dsn)
 	}
 }
 
