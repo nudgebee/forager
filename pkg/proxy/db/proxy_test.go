@@ -145,7 +145,7 @@ func TestProxy_BuildDSN_Oracle(t *testing.T) {
 	if driver != "oracle" {
 		t.Fatalf("expected oracle driver, got %s", driver)
 	}
-	expected := "oracle://sys:pass@oracle.internal:1521/ORCL"
+	expected := "oracle://sys:pass@oracle.internal:1521/ORCL?ENABLE_OOB=FALSE"
 	if dsn != expected {
 		t.Fatalf("expected DSN %q, got %q", expected, dsn)
 	}
@@ -161,7 +161,7 @@ func TestProxy_BuildDSN_Oracle_ServiceName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("buildDSN: %v", err)
 	}
-	expected := "oracle://sys:pass@oracle.internal:1521/MYSERVICE"
+	expected := "oracle://sys:pass@oracle.internal:1521/MYSERVICE?ENABLE_OOB=FALSE"
 	if dsn != expected {
 		t.Fatalf("expected DSN %q, got %q", expected, dsn)
 	}
