@@ -331,9 +331,19 @@ func (p *Proxy) buildDSN() (string, string, error) {
 		if sn, ok := p.configRaw["service_name"].(string); ok && sn != "" {
 			serviceName = sn
 		}
+		q := url.Values{}
+		if enc, ok := p.configRaw["encryption"].(string); ok && enc != "" {
+			q.Set("encryption", enc)
+		}
+		if di, ok := p.configRaw["data_integrity"].(string); ok && di != "" {
+			q.Set("data integrity", di)
+		}
 		dsn := fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
 			url.PathEscape(username), url.PathEscape(password),
 			p.config.Host, p.config.Port, serviceName)
+		if len(q) > 0 {
+			dsn += "?" + q.Encode()
+		}
 		return dsn, "oracle", nil
 
 	default:
