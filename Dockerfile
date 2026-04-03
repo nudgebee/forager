@@ -2,15 +2,17 @@ FROM golang:1.25-bookworm AS build-stage
 
 WORKDIR /app
 
-# Install Oracle Instant Client (basiclite + SDK) for godror CGO build
+# Install Oracle Instant Client (basiclite + SDK) for godror CGO build.
+# Uses Oracle's "latest" URL which always points to the current release.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libaio1 unzip wget && \
-    wget -q https://download.oracle.com/otn_software/linux/instantclient/2340000/instantclient-basiclite-linux.x64-23.4.0.24.05dbru.zip && \
-    wget -q https://download.oracle.com/otn_software/linux/instantclient/2340000/instantclient-sdk-linux.x64-23.4.0.24.05dbru.zip && \
-    unzip -q instantclient-basiclite-linux.x64-*.zip -d /opt/oracle && \
-    unzip -q instantclient-sdk-linux.x64-*.zip -d /opt/oracle && \
+    wget -q https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip && \
+    wget -q https://download.oracle.com/otn_software/linux/instantclient/instantclient-sdk-linuxx64.zip && \
+    unzip -q instantclient-basiclite-linuxx64.zip -d /opt/oracle && \
+    unzip -oq instantclient-sdk-linuxx64.zip -d /opt/oracle && \
     rm -f instantclient-*.zip && \
-    echo /opt/oracle/instantclient_23_4 > /etc/ld.so.conf.d/oracle-instantclient.conf && \
+    OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
+    echo "$OCI_DIR" > /etc/ld.so.conf.d/oracle-instantclient.conf && \
     ldconfig && \
     rm -rf /var/lib/apt/lists/*
 
@@ -20,8 +22,9 @@ RUN go mod download
 
 COPY . ./
 ENV CGO_ENABLED=1
-ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_23_4
-RUN go build -tags oracle -o /app/nudgebee-forager ./cmd
+RUN OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
+    export LD_LIBRARY_PATH="$OCI_DIR" && \
+    go build -tags oracle -o /app/nudgebee-forager ./cmd
 RUN chmod +x /app/nudgebee-forager
 
 
@@ -33,8 +36,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 COPY --from=build-stage /app/nudgebee-forager /app/nudgebee-forager
-COPY --from=build-stage /opt/oracle/instantclient_23_4 /opt/oracle/instantclient_23_4
-ENV LD_LIBRARY_PATH=/opt/oracle/instantclient_23_4
+COPY --from=build-stage /opt/oracle/instantclient_* /opt/oracle/instantclient/
+ENV LD_LIBRARY_PATH=/opt/oracle/instantclient
 
 RUN groupadd --system nudgebee && useradd --system --no-create-home --gid nudgebee nudgebee
 RUN mkdir -p /data && chown nudgebee:nudgebee /data
