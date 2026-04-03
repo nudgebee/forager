@@ -132,6 +132,16 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	defer cancel()
 	if err := safeProbe(ctx, pool, p.dbType); err != nil {
 		_ = pool.Close()
+		// Log redacted DSN for Oracle to aid debugging NNE/network issues.
+		if p.dbType == "oracle" {
+			p.logger.Error("oracle connection probe failed",
+				"host", cfg.Host, "port", cfg.Port,
+				"database", cfg.Database,
+				"driver", driverName,
+				"dsn_query", dsnQueryParams(dsn),
+				"err", err,
+			)
+		}
 		return fmt.Errorf("connection test failed: %w", err)
 	}
 
@@ -332,6 +342,11 @@ func (p *Proxy) buildDSN() (string, string, error) {
 			serviceName = sn
 		}
 		q := url.Values{}
+		// Disable OOB (Out-of-Band) break messages by default. Oracle 19c+
+		// sends OOB during connection setup using TCP urgent data, which
+		// transit gateways and load balancers often mishandle, corrupting
+		// the TNS accept packet and causing driver panics.
+		q.Set("ENABLE_OOB", "FALSE")
 		if enc, ok := p.configRaw["encryption"].(string); ok && enc != "" {
 			q.Set("encryption", enc)
 		}
@@ -349,6 +364,15 @@ func (p *Proxy) buildDSN() (string, string, error) {
 	default:
 		return "", "", fmt.Errorf("unsupported database type: %s", p.dbType)
 	}
+}
+
+// dsnQueryParams extracts query parameters from a DSN URL for logging (no credentials).
+func dsnQueryParams(dsn string) string {
+	u, err := url.Parse(dsn)
+	if err != nil {
+		return ""
+	}
+	return u.RawQuery
 }
 
 // sanitizeQuery strips CLI tool wrapping that callers may send.
