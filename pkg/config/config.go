@@ -38,9 +38,9 @@ type LocalDatasource struct {
 	Host             string            `mapstructure:"host"`
 	Port             int               `mapstructure:"port"`
 	Database         string            `mapstructure:"database"`
-	Brokers          string            `mapstructure:"brokers"`     // Kafka: comma-separated broker list
-	SSLMode          string            `mapstructure:"ssl_mode"`    // PostgreSQL: disable, require, verify-ca, verify-full
-	TLSEnabled       bool              `mapstructure:"tls_enabled"` // MySQL/MSSQL/ClickHouse: enable TLS
+	Brokers          string            `mapstructure:"brokers"`        // Kafka: comma-separated broker list
+	SSLMode          string            `mapstructure:"ssl_mode"`       // PostgreSQL: disable, require, verify-ca, verify-full
+	TLSEnabled       bool              `mapstructure:"tls_enabled"`    // MySQL/MSSQL/ClickHouse: enable TLS
 	ServiceName      string            `mapstructure:"service_name"`   // Oracle: service name override
 	Encryption       string            `mapstructure:"encryption"`     // Oracle: ACCEPTED, REJECTED, REQUESTED, REQUIRED
 	DataIntegrity    string            `mapstructure:"data_integrity"` // Oracle: ACCEPTED, REJECTED, REQUESTED, REQUIRED
