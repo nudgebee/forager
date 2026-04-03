@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"database/sql"
-	"database/sql/driver"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -17,7 +16,6 @@ import (
 	_ "github.com/go-sql-driver/mysql"
 	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/microsoft/go-mssqldb"
-	_ "github.com/sijms/go-ora/v2"
 
 	"nudgebee/forager/pkg/proxy"
 )
@@ -114,7 +112,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("building DSN: %w", err)
 	}
 
-	pool, err := openDB(driverName, dsn)
+	pool, err := sql.Open(driverName, dsn)
 	if err != nil {
 		return fmt.Errorf("opening db: %w", err)
 	}
@@ -123,11 +121,8 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	pool.SetMaxIdleConns(cfg.MaxIdle)
 	pool.SetConnMaxLifetime(time.Duration(cfg.MaxLifetime) * time.Second)
 
-	// Test connection using a lightweight query instead of PingContext.
-	// go-ora's Ping sends a TNS-level operation (0x93) that some network
-	// middleboxes (transit gateways, load balancers) mishandle, causing
-	// nil-pointer panics in the driver. A simple query validates the full
-	// path without relying on the TNS ping operation.
+	// Test connection using a lightweight query. This avoids driver-specific
+	// issues with PingContext and validates the full connection path.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	if err := safeProbe(ctx, pool, p.dbType); err != nil {
@@ -196,59 +191,6 @@ func (p *Proxy) Close() error {
 		return err
 	}
 	return nil
-}
-
-// probeQuery returns a no-op SELECT suitable for the database type.
-// panicSafeConnector wraps a driver.Connector and recovers from panics in
-// Connect. The go-ora driver can panic with a nil-pointer dereference during
-// connection setup (e.g. when network middleboxes corrupt TNS packets).
-// database/sql calls Connect from both user goroutines and its internal
-// connectionOpener goroutine, so recovering at the Connector level is the
-// only way to protect all call sites.
-type panicSafeConnector struct {
-	inner  driver.Connector
-	driver driver.Driver
-}
-
-func (c *panicSafeConnector) Connect(ctx context.Context) (conn driver.Conn, err error) {
-	defer func() {
-		if r := recover(); r != nil {
-			conn = nil
-			err = fmt.Errorf("driver panic: %v\n%s", r, debug.Stack())
-		}
-	}()
-	return c.inner.Connect(ctx)
-}
-
-func (c *panicSafeConnector) Driver() driver.Driver {
-	return c.driver
-}
-
-// openDB opens a sql.DB for the given driver. For the Oracle driver, the
-// connector is wrapped with panic recovery so that nil-pointer dereferences
-// inside go-ora cannot crash the process.
-func openDB(driverName, dsn string) (*sql.DB, error) {
-	if driverName != "oracle" {
-		return sql.Open(driverName, dsn)
-	}
-	// Lookup the registered driver to obtain a Connector.
-	db, err := sql.Open(driverName, dsn)
-	if err != nil {
-		return nil, err
-	}
-	drv := db.Driver()
-	_ = db.Close()
-
-	oc, ok := drv.(driver.DriverContext)
-	if !ok {
-		// Fallback: driver doesn't support DriverContext; use plain Open.
-		return sql.Open(driverName, dsn)
-	}
-	connector, err := oc.OpenConnector(dsn)
-	if err != nil {
-		return nil, err
-	}
-	return sql.OpenDB(&panicSafeConnector{inner: connector, driver: drv}), nil
 }
 
 func probeQuery(dbType string) string {
@@ -336,29 +278,7 @@ func (p *Proxy) buildDSN() (string, string, error) {
 		return u.String(), "clickhouse", nil
 
 	case "oracle":
-		serviceName := p.config.Database
-		if sn, ok := p.configRaw["service_name"].(string); ok && sn != "" {
-			serviceName = sn
-		}
-		q := url.Values{}
-		// Disable OOB (Out-of-Band) break messages by default. Oracle 19c+
-		// sends OOB during connection setup using TCP urgent data, which
-		// transit gateways and load balancers often mishandle, corrupting
-		// the TNS accept packet and causing driver panics.
-		q.Set("ENABLE_OOB", "FALSE")
-		if enc, ok := p.configRaw["encryption"].(string); ok && enc != "" {
-			q.Set("encryption", enc)
-		}
-		if di, ok := p.configRaw["data_integrity"].(string); ok && di != "" {
-			q.Set("data integrity", di)
-		}
-		dsn := fmt.Sprintf("oracle://%s:%s@%s:%d/%s",
-			url.PathEscape(username), url.PathEscape(password),
-			p.config.Host, p.config.Port, serviceName)
-		if len(q) > 0 {
-			dsn += "?" + q.Encode()
-		}
-		return dsn, "oracle", nil
+		return buildOracleDSN(p.config.Host, p.config.Port, p.config.Database, username, password, p.configRaw)
 
 	default:
 		return "", "", fmt.Errorf("unsupported database type: %s", p.dbType)
