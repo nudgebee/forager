@@ -116,6 +116,15 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 	if ds.TLSEnabled {
 		cfg["tls_enabled"] = true
 	}
+	if ds.ServiceName != "" {
+		cfg["service_name"] = ds.ServiceName
+	}
+	if ds.Encryption != "" {
+		cfg["encryption"] = ds.Encryption
+	}
+	if ds.DataIntegrity != "" {
+		cfg["data_integrity"] = ds.DataIntegrity
+	}
 
 	var p proxy.Proxy
 	var proxyType string
