@@ -105,8 +105,7 @@ if ($existingService) {
     sc.exe config $ServiceName binPath= $binPathArg | Out-Null
 } else {
     Write-Log "Creating Windows Service..."
-    sc.exe create $ServiceName binPath= $binPathArg start= auto DisplayName= $DisplayName | Out-Null
-    sc.exe description $ServiceName "Nudgebee Forager Agent - monitors and proxies datasource connections" | Out-Null
+    New-Service -Name $ServiceName -BinaryPathName $binPathArg -DisplayName $DisplayName -StartupType Automatic -Description "Nudgebee Forager Agent - monitors and proxies datasource connections"
     sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
 }
 
