@@ -200,9 +200,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		conn.WriteMessage(websocket.CloseMessage,
+		_ = conn.WriteMessage(websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
-		conn.Close()
+		_ = conn.Close()
 	}()
 
 	// Writer goroutine
