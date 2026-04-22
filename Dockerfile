@@ -21,10 +21,18 @@ COPY go.mod go.sum ./
 RUN go mod download
 
 COPY . ./
+
+ARG VERSION=dev
+ARG COMMIT=unknown
+ARG BUILD_TIME=unknown
+
 ENV CGO_ENABLED=1
 RUN OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
     export LD_LIBRARY_PATH="$OCI_DIR" && \
-    go build -tags oracle -o /app/nudgebee-forager ./cmd
+    VERSION_PKG=nudgebee/forager/pkg/version && \
+    go build -tags oracle \
+      -ldflags "-s -w -X ${VERSION_PKG}.Version=${VERSION} -X ${VERSION_PKG}.Commit=${COMMIT} -X ${VERSION_PKG}.BuildTime=${BUILD_TIME}" \
+      -o /app/nudgebee-forager ./cmd
 RUN chmod +x /app/nudgebee-forager
 
 
