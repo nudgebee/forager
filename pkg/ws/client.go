@@ -11,6 +11,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+
+	"nudgebee/forager/pkg/version"
 )
 
 const (
@@ -158,9 +160,13 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	// Send greeting
 	greeting := map[string]any{
-		"action":     "auth",
-		"agent_type": "proxy",
-		"version":    "1.0.0",
+		"action":           "auth",
+		"agent_type":       "proxy",
+		"version":          version.Version,
+		"agent_version":    version.Version,
+		"agent_commit":     version.Commit,
+		"agent_build_time": version.BuildTime,
+		"protocol_version": "1.0.0",
 		"capabilities": map[string]bool{
 			"http-proxy":  true,
 			"db-proxy":    true,
@@ -367,8 +373,10 @@ func (c *Client) sendHealthReport(ctx context.Context) {
 	}
 
 	msg := map[string]any{
-		"action":      "datasource_health_update",
-		"datasources": report,
+		"action":        "datasource_health_update",
+		"datasources":   report,
+		"agent_version": version.Version,
+		"agent_commit":  version.Commit,
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {

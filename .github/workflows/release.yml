@@ -66,6 +66,17 @@ jobs:
           go-version: '1.25'
           cache: true
 
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
       - name: Build binary
         env:
           GOOS: ${{ matrix.goos }}
@@ -73,7 +84,9 @@ jobs:
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          go build -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd
+          VERSION_PKG=nudgebee/forager/pkg/version
+          LDFLAGS="-s -w -X ${VERSION_PKG}.Version=${{ steps.version.outputs.version }} -X ${VERSION_PKG}.Commit=${{ steps.version.outputs.commit }} -X ${VERSION_PKG}.BuildTime=${{ steps.version.outputs.build_time }}"
+          go build -ldflags "$LDFLAGS" -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -167,7 +180,10 @@ jobs:
 
       - name: Set image tag
         id: tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push amd64
         run: |
@@ -175,6 +191,9 @@ jobs:
             --platform linux/amd64 \
             --push \
             --provenance=false \
+            --build-arg VERSION=${{ steps.version.outputs.version }} \
+            --build-arg COMMIT=${{ steps.tag.outputs.commit }} \
+            --build-arg BUILD_TIME=${{ steps.tag.outputs.build_time }} \
             -t ${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }}-amd64 \
             .
 
@@ -206,9 +225,21 @@ jobs:
           aws ecr get-login-password --region ${{ env.AWS_REGION }} \
             | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
 
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set image tag
         id: tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+        run: |
+          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
+          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
       - name: Build and push arm64
         run: |
@@ -216,6 +247,9 @@ jobs:
             --platform linux/arm64 \
             --push \
             --provenance=false \
+            --build-arg VERSION=${{ steps.version.outputs.version }} \
+            --build-arg COMMIT=${{ steps.tag.outputs.commit }} \
+            --build-arg BUILD_TIME=${{ steps.tag.outputs.build_time }} \
             -t ${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }}-arm64 \
             .
 
