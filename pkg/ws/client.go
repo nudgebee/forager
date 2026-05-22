@@ -200,6 +200,17 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	var wg sync.WaitGroup
 
+	// Close the connection when the context is cancelled so that
+	// readLoop's blocking ReadMessage call returns immediately.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		<-ctx.Done()
+		_ = conn.WriteMessage(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		_ = conn.Close()
+	}()
+
 	// Writer goroutine
 	wg.Add(1)
 	go func() {
