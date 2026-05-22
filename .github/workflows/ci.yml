@@ -30,6 +30,9 @@ jobs:
         run: go test -race -cover ./...
 
   dco:
+    # Skip DCO for trusted GitHub bots; their commits don't include
+    # Signed-off-by trailers but are governed by the bot's own policy.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

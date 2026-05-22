@@ -65,7 +65,7 @@ iwr -useb https://github.com/nudgebee/forager/releases/latest/download/install.p
 ### Kubernetes (Helm)
 
 ```bash
-helm install forager oci://ghcr.io/nudgebee/charts/forager \
+helm install forager oci://ghcr.io/nudgebee/charts/nudgebee-forager-chart \
   --set forager.accessKey=... \
   --set forager.accessSecret=...
 ```
@@ -138,7 +138,7 @@ docker build -t forager .   # local Docker image (with Oracle support)
 - **Standalone binaries** — attached to each
   [GitHub Release](https://github.com/nudgebee/forager/releases):
   linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64.
-- **Helm chart** — `oci://ghcr.io/nudgebee/charts/forager`.
+- **Helm chart** — `oci://ghcr.io/nudgebee/charts/nudgebee-forager-chart`.
 
 ## Documentation
 
