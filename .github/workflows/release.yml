@@ -1,20 +1,31 @@
-name: Release (Prod)
+name: Release
 
 on:
   push:
-    tags:
-      - '[0-9]+.[0-9]+.[0-9]+*'
+    branches: [main]
+    tags: ['v*.*.*']
   workflow_dispatch:
     inputs:
-      version:
-        description: 'Version tag (e.g. 1.0.0)'
+      tag:
+        description: 'Tag to release (e.g. v0.1.0). Must already exist.'
         required: true
 
+permissions:
+  contents: write   # GitHub Releases + tag refs
+  packages: write   # GHCR push
+  id-token: write   # cosign keyless OIDC
+
 env:
-  ECR_REGISTRY: 740395098545.dkr.ecr.us-east-1.amazonaws.com
-  ECR_REPO: 740395098545.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
-  S3_BUCKET: nudgebee-prod-documents
+  IMAGE: ghcr.io/nudgebee/forager
+  CHART_REPO: oci://ghcr.io/nudgebee/charts
+  # Existing customer endpoints. GHCR is the source of truth; the mirror
+  # jobs below copy tagged releases to these so customers consuming
+  # registry.nudgebee.com (which fronts ECR + S3) keep getting updates.
+  # Sunset once all customers are migrated to ghcr.io/nudgebee/forager.
   AWS_REGION: us-east-1
+  ECR_REGISTRY: 740395098545.dkr.ecr.us-east-1.amazonaws.com
+  ECR_IMAGE_REPO: 740395098545.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
+  S3_BUCKET: nudgebee-prod-documents
 
 jobs:
   validate:
@@ -41,9 +52,12 @@ jobs:
       - name: Test
         run: go test -race -cover ./...
 
+  # Cross-compiled standalone binaries (CGO=0, no Oracle support).
+  # Oracle support is Docker-only; see Dockerfile.
   build-binaries:
-    runs-on: ubuntu-latest
     needs: validate
+    if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
     strategy:
       matrix:
         include:
@@ -66,262 +80,292 @@ jobs:
           go-version: '1.25'
           cache: true
 
-      - name: Determine version
-        id: version
+      - name: Resolve version metadata
+        id: v
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+            VERSION="${{ inputs.tag }}"
           else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
+            VERSION="${GITHUB_REF#refs/tags/}"
           fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Build binary
+      - name: Build
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
           CGO_ENABLED: '0'
         run: |
           mkdir -p dist
-          VERSION_PKG=nudgebee/forager/pkg/version
-          LDFLAGS="-s -w -X ${VERSION_PKG}.Version=${{ steps.version.outputs.version }} -X ${VERSION_PKG}.Commit=${{ steps.version.outputs.commit }} -X ${VERSION_PKG}.BuildTime=${{ steps.version.outputs.build_time }}"
-          go build -ldflags "$LDFLAGS" -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} ./cmd
+          VPKG=nudgebee/forager/pkg/version
+          LDFLAGS="-s -w -X ${VPKG}.Version=${{ steps.v.outputs.version }} -X ${VPKG}.Commit=${{ steps.v.outputs.commit }} -X ${VPKG}.BuildTime=${{ steps.v.outputs.build_time }}"
+          go build -ldflags "$LDFLAGS" \
+            -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
+            ./cmd
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v8
         with:
-          name: nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}
+          name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
 
-  upload-to-s3:
-    runs-on: ubuntu-latest
-    needs: build-binaries
-    steps:
-      - uses: actions/checkout@v6
-
-      - uses: aws-actions/configure-aws-credentials@v6
-        with:
-          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
-
-      - name: Download all artifacts
-        uses: actions/download-artifact@v8
-        with:
-          path: dist
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Upload binaries and install scripts to S3
-        run: |
-          VERSION="${{ steps.version.outputs.version }}"
-
-          for V in "${VERSION}" "latest"; do
-            S3_PATH="s3://${S3_BUCKET}/forager/${V}"
-
-            # Upload all binaries
-            for f in dist/*/nudgebee-forager-*; do
-              FILENAME=$(basename "$f")
-              aws s3 cp "$f" "${S3_PATH}/${FILENAME}" --content-type application/octet-stream
-            done
-
-            # Upload install scripts
-            aws s3 cp deploy/install.sh "${S3_PATH}/install.sh" --content-type text/plain
-            aws s3 cp deploy/install-macos.sh "${S3_PATH}/install-macos.sh" --content-type text/plain
-            aws s3 cp deploy/install.ps1 "${S3_PATH}/install.ps1" --content-type text/plain
-
-            echo "Uploaded to ${S3_PATH}/"
-          done
-
-  build-docker:
-    runs-on: [self-hosted, X64]
+  # Docker image: linux/amd64 only for now.
+  # The Dockerfile downloads Oracle Instant Client (x86_64-only zip),
+  # so multi-arch via QEMU would produce a broken arm64 image. Tracked
+  # as a follow-up after the Dockerfile picks the right OIC zip by arch.
+  build-and-push-image:
     needs: validate
+    runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+      version: ${{ steps.meta.outputs.version }}
     steps:
       - uses: actions/checkout@v6
-
-      - name: Install AWS CLI
-        run: |
-          if ! command -v aws &> /dev/null; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o /tmp/awscliv2.zip
-            unzip -qo /tmp/awscliv2.zip -d /tmp
-            sudo /tmp/aws/install --update
-            rm -rf /tmp/awscliv2.zip /tmp/aws
-          fi
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: docker/login-action@v3
         with:
-          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to ECR
+      - name: Compute build metadata
+        id: buildmeta
         run: |
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
-            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
-
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set image tag
-        id: tag
-        run: |
-          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
           echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
           echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
 
-      - name: Build and push amd64
-        run: |
-          docker buildx build \
-            --platform linux/amd64 \
-            --push \
-            --provenance=false \
-            --build-arg VERSION=${{ steps.version.outputs.version }} \
-            --build-arg COMMIT=${{ steps.tag.outputs.commit }} \
-            --build-arg BUILD_TIME=${{ steps.tag.outputs.build_time }} \
-            -t ${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }}-amd64 \
-            .
-
-  build-docker-arm64:
-    runs-on: [self-hosted, arm64]
-    needs: validate
-    steps:
-      - uses: actions/checkout@v6
-
-      - name: Install AWS CLI
-        run: |
-          if ! command -v aws &> /dev/null; then
-            curl -fsSL "https://awscli.amazonaws.com/awscli-exe-linux-aarch64.zip" -o /tmp/awscliv2.zip
-            unzip -qo /tmp/awscliv2.zip -d /tmp
-            sudo /tmp/aws/install --update
-            rm -rf /tmp/awscliv2.zip /tmp/aws
-          fi
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: docker/metadata-action@v5
+        id: meta
         with:
-          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          images: ${{ env.IMAGE }}
+          flavor: latest=auto
+          tags: |
+            type=ref,event=branch,suffix=-{{sha}}
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
 
-      - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
-            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+      - name: Build & push
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            COMMIT=${{ steps.buildmeta.outputs.commit }}
+            BUILD_TIME=${{ steps.buildmeta.outputs.build_time }}
+          provenance: false
 
-      - name: Determine version
-        id: version
-        run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: Set image tag
-        id: tag
-        run: |
-          echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
-          echo "commit=$(git rev-parse --short HEAD)" >> "$GITHUB_OUTPUT"
-          echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
-
-      - name: Build and push arm64
-        run: |
-          docker buildx build \
-            --platform linux/arm64 \
-            --push \
-            --provenance=false \
-            --build-arg VERSION=${{ steps.version.outputs.version }} \
-            --build-arg COMMIT=${{ steps.tag.outputs.commit }} \
-            --build-arg BUILD_TIME=${{ steps.tag.outputs.build_time }} \
-            -t ${{ env.ECR_REPO }}:${{ steps.tag.outputs.tag }}-arm64 \
-            .
-
-  docker-manifest:
+  sign-image:
+    needs: build-and-push-image
+    if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
-    needs: [build-docker, build-docker-arm64]
     steps:
-      - uses: actions/checkout@v6
+      - uses: sigstore/cosign-installer@v3
 
-      - uses: aws-actions/configure-aws-credentials@v6
+      - uses: docker/login-action@v3
         with:
-          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ env.AWS_REGION }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Login to ECR
-        run: |
-          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
-            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+      - name: Cosign sign (keyless)
+        run: cosign sign --yes ${{ env.IMAGE }}@${{ needs.build-and-push-image.outputs.digest }}
 
-      - name: Set image tag
-        id: tag
-        run: echo "tag=${{ github.sha }}" >> "$GITHUB_OUTPUT"
+  sbom:
+    needs: build-and-push-image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anchore/sbom-action@v0
+        with:
+          image: ${{ env.IMAGE }}@${{ needs.build-and-push-image.outputs.digest }}
+          format: spdx-json
+          output-file: sbom.spdx.json
+          upload-artifact: false
 
-      - name: Create and push manifest
-        run: |
-          TAG="${{ steps.tag.outputs.tag }}"
-          docker manifest create ${{ env.ECR_REPO }}:${TAG} \
-            --amend ${{ env.ECR_REPO }}:${TAG}-amd64 \
-            --amend ${{ env.ECR_REPO }}:${TAG}-arm64
-          docker manifest push ${{ env.ECR_REPO }}:${TAG}
-
-          docker manifest create ${{ env.ECR_REPO }}:latest \
-            --amend ${{ env.ECR_REPO }}:${TAG}-amd64 \
-            --amend ${{ env.ECR_REPO }}:${TAG}-arm64
-          docker manifest push ${{ env.ECR_REPO }}:latest
+      - uses: actions/upload-artifact@v8
+        with:
+          name: sbom
+          path: sbom.spdx.json
 
   publish-helm:
-    runs-on: ubuntu-latest
     needs: validate
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
 
+      - uses: azure/setup-helm@v4
+
+      - name: Resolve chart version (strip leading 'v')
+        id: v
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "chart_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: GHCR login for Helm
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: Package & push chart
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
+        run: |
+          sed -i "s/^version:.*/version: ${CHART_VERSION}/" deploy/helm/forager/Chart.yaml
+          sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/helm/forager/Chart.yaml
+          helm package deploy/helm/forager/
+          helm push nudgebee-forager-chart-${CHART_VERSION}.tgz ${{ env.CHART_REPO }}
+          echo "Pushed ${{ env.CHART_REPO }}/nudgebee-forager-chart:${CHART_VERSION}"
+
+  github-release:
+    needs: [build-binaries, build-and-push-image, sbom]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: sbom
+          path: sbom
+
+      - name: Stage install scripts alongside binaries
+        run: |
+          cp deploy/install.sh dist/install.sh
+          cp deploy/install-macos.sh dist/install-macos.sh
+          cp deploy/install.ps1 dist/install.ps1
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: |
+            dist/*
+            sbom/sbom.spdx.json
+
+  # ──────────────────────────────────────────────────────────────────
+  # Mirror jobs — keep registry.nudgebee.com (ECR + S3 backed) in sync
+  # with what we publish to GHCR/GitHub Releases. Tag pushes only.
+  # Existing customers consuming these endpoints keep working.
+  # Sunset once customers have migrated to GHCR.
+  # ──────────────────────────────────────────────────────────────────
+
+  mirror-image-to-ecr:
+    needs: build-and-push-image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
       - uses: aws-actions/configure-aws-credentials@v6
         with:
           aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
           aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      - name: Login to ECR for Helm
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Install regctl
+        run: |
+          REGCTL_VERSION=v0.9.1
+          curl -fsSL "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" \
+            -o /usr/local/bin/regctl
+          chmod +x /usr/local/bin/regctl
+
+      - name: Copy GHCR digest → ECR
+        env:
+          DIGEST: ${{ needs.build-and-push-image.outputs.digest }}
+          VERSION: ${{ needs.build-and-push-image.outputs.version }}
+        run: |
+          regctl image copy "${IMAGE}@${DIGEST}" "${ECR_IMAGE_REPO}:${VERSION}"
+          regctl image copy "${IMAGE}@${DIGEST}" "${ECR_IMAGE_REPO}:latest"
+          echo "Mirrored to ${ECR_IMAGE_REPO}:${VERSION} and :latest"
+
+  mirror-helm-to-ecr:
+    needs: publish-helm
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Resolve chart version (strip leading 'v')
+        id: v
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "chart_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: GHCR login (helm)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: ECR login (helm)
         run: |
           aws ecr get-login-password --region ${{ env.AWS_REGION }} \
             | helm registry login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
 
-      - name: Determine version
-        id: version
+      - name: Pull chart from GHCR, push to ECR
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
         run: |
-          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            echo "version=${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
-          else
-            echo "version=${GITHUB_REF#refs/tags/}" >> "$GITHUB_OUTPUT"
-          fi
+          helm pull ${{ env.CHART_REPO }}/nudgebee-forager-chart --version "${CHART_VERSION}"
+          helm push nudgebee-forager-chart-${CHART_VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
+          echo "Mirrored chart to oci://${{ env.ECR_REGISTRY }}/nudgebee-forager-chart:${CHART_VERSION}"
 
-      - name: Package and push Helm chart
+  mirror-binaries-to-s3:
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+
+      - name: Upload binaries + install scripts to S3
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          sed -i "s/^version:.*/version: ${VERSION}/" deploy/helm/forager/Chart.yaml
-          sed -i "s/^appVersion:.*/appVersion: \"${VERSION}\"/" deploy/helm/forager/Chart.yaml
-
-          # Update image repo to prod registry
-          sed -i "s|registry.dev.nudgebee.pollux.in|registry.nudgebee.com|" deploy/helm/forager/values.yaml
-
-          helm package deploy/helm/forager/
-          helm push nudgebee-forager-chart-${VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
-          echo "Pushed oci://${{ env.ECR_REGISTRY }}/nudgebee-forager-chart:${VERSION}"
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Keep historical layout: /forager/{vX.Y.Z|X.Y.Z|latest}/<file>
+          for V in "v${VERSION}" "${VERSION}" "latest"; do
+            S3_PATH="s3://${S3_BUCKET}/forager/${V}"
+            for f in dist/*; do
+              FILENAME=$(basename "$f")
+              aws s3 cp "$f" "${S3_PATH}/${FILENAME}" --content-type application/octet-stream
+            done
+            aws s3 cp deploy/install.sh "${S3_PATH}/install.sh" --content-type text/plain
+            aws s3 cp deploy/install-macos.sh "${S3_PATH}/install-macos.sh" --content-type text/plain
+            aws s3 cp deploy/install.ps1 "${S3_PATH}/install.ps1" --content-type text/plain
+            echo "Mirrored binaries to ${S3_PATH}/"
+          done
