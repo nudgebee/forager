@@ -3,6 +3,7 @@ module nudgebee/forager
 go 1.25.7
 
 require (
+	cloud.google.com/go/auth v0.18.2
 	cloud.google.com/go/secretmanager v1.20.0
 	github.com/Azure/azure-sdk-for-go/sdk/azcore v1.21.1
 	github.com/Azure/azure-sdk-for-go/sdk/azidentity v1.13.1
@@ -29,7 +30,6 @@ require (
 )
 
 require (
-	cloud.google.com/go/auth v0.18.2 // indirect
 	cloud.google.com/go/auth/oauth2adapt v0.2.8 // indirect
 	cloud.google.com/go/compute/metadata v0.9.0 // indirect
 	cloud.google.com/go/iam v1.7.0 // indirect
