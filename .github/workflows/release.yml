@@ -220,8 +220,8 @@ jobs:
           sed -i "s/^version:.*/version: ${CHART_VERSION}/" deploy/helm/forager/Chart.yaml
           sed -i "s/^appVersion:.*/appVersion: \"${CHART_VERSION}\"/" deploy/helm/forager/Chart.yaml
           helm package deploy/helm/forager/
-          helm push nudgebee-forager-chart-${CHART_VERSION}.tgz ${{ env.CHART_REPO }}
-          echo "Pushed ${{ env.CHART_REPO }}/nudgebee-forager-chart:${CHART_VERSION}"
+          helm push forager-${CHART_VERSION}.tgz ${{ env.CHART_REPO }}
+          echo "Pushed ${{ env.CHART_REPO }}/forager:${CHART_VERSION}"
 
   github-release:
     needs: [build-binaries, build-and-push-image, sbom]
@@ -331,9 +331,9 @@ jobs:
         env:
           CHART_VERSION: ${{ steps.v.outputs.chart_version }}
         run: |
-          helm pull ${{ env.CHART_REPO }}/nudgebee-forager-chart --version "${CHART_VERSION}"
-          helm push nudgebee-forager-chart-${CHART_VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
-          echo "Mirrored chart to oci://${{ env.ECR_REGISTRY }}/nudgebee-forager-chart:${CHART_VERSION}"
+          helm pull ${{ env.CHART_REPO }}/forager --version "${CHART_VERSION}"
+          helm push forager-${CHART_VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
+          echo "Mirrored chart to oci://${{ env.ECR_REGISTRY }}/forager:${CHART_VERSION}"
 
   mirror-binaries-to-s3:
     needs: build-binaries
