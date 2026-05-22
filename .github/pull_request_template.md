@@ -18,3 +18,10 @@ Fixes # (issue)
 
 - [ ] Unit tests
 - [ ] Manual testing
+
+# Checklist
+
+- [ ] Commits are signed off (`git commit -s`) per [DCO](https://developercertificate.org/)
+- [ ] `make validate` passes (fmt + lint + test)
+- [ ] Docs updated if the wire shape, config surface, or proxy module behavior changed
+
