@@ -28,3 +28,29 @@ jobs:
 
       - name: Test
         run: go test -race -cover ./...
+
+  dco:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+      - name: Verify DCO sign-off on all commits
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          unsigned=$(git log --no-merges --format='%H %s' "$BASE..$HEAD" \
+            | while read -r sha rest; do
+                if ! git log -1 --format='%B' "$sha" | grep -qE '^Signed-off-by: '; then
+                  echo "$sha $rest"
+                fi
+              done)
+          if [ -n "$unsigned" ]; then
+            echo "::error::Commits missing Signed-off-by trailer:"
+            echo "$unsigned"
+            echo
+            echo "Sign each commit with 'git commit -s'; amend the last commit with 'git commit -s --amend', or rebase to add sign-off retroactively."
+            exit 1
+          fi
+          echo "All commits signed off."
