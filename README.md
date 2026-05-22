@@ -47,8 +47,12 @@ under `/etc/nudgebee/`, and registers a systemd unit.
 
 ```bash
 curl -fsSL https://github.com/nudgebee/forager/releases/latest/download/install-macos.sh \
-  | NB_ACCESS_KEY=... NB_ACCESS_SECRET=... bash
+  | sudo NB_ACCESS_KEY=... NB_ACCESS_SECRET=... bash
 ```
+
+Installs the binary to `/usr/local/bin/nudgebee-forager`, drops config
+under `/usr/local/etc/nudgebee/`, and registers a launchd daemon at
+`/Library/LaunchDaemons/com.nudgebee.forager.plist` (requires root).
 
 ### Windows (PowerShell, as Administrator)
 

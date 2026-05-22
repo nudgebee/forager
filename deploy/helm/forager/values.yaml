@@ -1,9 +1,11 @@
 replicaCount: 1
 
 image:
-  repository: registry.dev.nudgebee.pollux.in/nudgebee-forager
+  repository: ghcr.io/nudgebee/forager
   pullPolicy: IfNotPresent
-  tag: 'latest'
+  # Empty tag falls back to .Chart.AppVersion (set by the release workflow
+  # from the git tag). Override here or via --set image.tag=... to pin.
+  tag: ''
 
 imagePullSecrets: []
 nameOverride: ''

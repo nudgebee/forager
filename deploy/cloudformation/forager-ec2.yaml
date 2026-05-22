@@ -163,7 +163,12 @@ Resources:
           export NB_RELAY_URL='${NudgebeeRelayURL}'
           export NB_VERSION='${AgentVersion}'
 
-          curl -fsSL https://registry.nudgebee.com/downloads/forager/${AgentVersion}/install.sh | bash
+          if [ "${AgentVersion}" = "latest" ]; then
+            INSTALL_URL="https://github.com/nudgebee/forager/releases/latest/download/install.sh"
+          else
+            INSTALL_URL="https://github.com/nudgebee/forager/releases/download/${AgentVersion}/install.sh"
+          fi
+          curl -fsSL "$INSTALL_URL" | bash
 
           # Signal CloudFormation
           /opt/aws/bin/cfn-signal -e $? \
