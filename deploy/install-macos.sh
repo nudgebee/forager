@@ -2,7 +2,9 @@
 set -euo pipefail
 
 # Nudgebee Forager Installer for macOS
-# Usage: curl -fsSL <url>/install-macos.sh | sudo NB_ACCESS_KEY=xxx NB_ACCESS_SECRET=yyy bash
+# Usage:
+#   curl -fsSL https://github.com/nudgebee/forager/releases/latest/download/install-macos.sh \
+#     | sudo NB_ACCESS_KEY=xxx NB_ACCESS_SECRET=yyy bash
 
 INSTALL_DIR="/usr/local/bin"
 CONFIG_DIR="/usr/local/etc/nudgebee"
@@ -11,7 +13,10 @@ LOG_DIR="/usr/local/var/log"
 BINARY_NAME="nudgebee-forager"
 PLIST_LABEL="com.nudgebee.forager"
 PLIST_PATH="/Library/LaunchDaemons/${PLIST_LABEL}.plist"
-DOWNLOAD_BASE="${NB_DOWNLOAD_URL:-https://registry.nudgebee.com/downloads/forager}"
+# Default downloads come from GitHub Releases. Mirror users can point
+# NB_DOWNLOAD_URL at any host that mirrors the same path layout
+# (/download/<tag>/<file> and /latest/download/<file>).
+DOWNLOAD_BASE="${NB_DOWNLOAD_URL:-https://github.com/nudgebee/forager/releases}"
 VERSION="${NB_VERSION:-latest}"
 RELAY_URL="${NB_RELAY_URL:-wss://relay.nudgebee.com/register}"
 
@@ -34,7 +39,7 @@ check_root() {
 check_required_vars() {
     if [ -z "${NB_ACCESS_KEY:-}" ]; then
         err "NB_ACCESS_KEY is required"
-        err "Usage: curl -fsSL <url>/install-macos.sh | sudo NB_ACCESS_KEY=xxx NB_ACCESS_SECRET=yyy bash"
+        err "Usage: curl -fsSL https://github.com/nudgebee/forager/releases/latest/download/install-macos.sh | sudo NB_ACCESS_KEY=xxx NB_ACCESS_SECRET=yyy bash"
         exit 1
     fi
     if [ -z "${NB_ACCESS_SECRET:-}" ]; then
@@ -65,7 +70,12 @@ detect_platform() {
 }
 
 download_binary() {
-    local url="${DOWNLOAD_BASE}/${VERSION}/${BINARY_NAME}-darwin-${ARCH}"
+    local url
+    if [ "$VERSION" = "latest" ]; then
+        url="${DOWNLOAD_BASE}/latest/download/${BINARY_NAME}-darwin-${ARCH}"
+    else
+        url="${DOWNLOAD_BASE}/download/${VERSION}/${BINARY_NAME}-darwin-${ARCH}"
+    fi
     log "Downloading forager from ${url}..."
 
     if command -v curl &>/dev/null; then

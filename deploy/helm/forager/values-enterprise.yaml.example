@@ -1,0 +1,25 @@
+# values-enterprise.yaml.example
+#
+# Reference overrides for users who mirror Forager images to a private
+# registry instead of pulling from ghcr.io/nudgebee/forager directly.
+# Copy to values-enterprise.yaml and adjust, then:
+#
+#   helm install forager oci://ghcr.io/nudgebee/charts/forager \
+#     -f values-enterprise.yaml \
+#     --set forager.accessKey=... \
+#     --set forager.accessSecret=...
+#
+# Or for fully air-gapped installs, pull the chart and the image to your
+# private registry first.
+
+image:
+  # Replace with your private registry hostname.
+  repository: registry.example.com/forager
+  # Pin to a specific tag; empty defaults to .Chart.AppVersion.
+  tag: ''
+  pullPolicy: IfNotPresent
+
+# Name of an existing imagePullSecret in the install namespace that grants
+# pull access to the private registry above.
+imagePullSecrets:
+  - name: example-registry-pull

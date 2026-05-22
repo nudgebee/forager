@@ -1,5 +1,6 @@
 {{- define "imageName" -}}
-{{- printf "%s:%s" .Values.image.repository .Values.image.tag }}
+{{- $tag := default .Chart.AppVersion .Values.image.tag -}}
+{{- printf "%s:%s" .Values.image.repository $tag }}
 {{- end }}
 
 {{- define "forager.name" -}}

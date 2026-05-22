@@ -1,12 +1,18 @@
 # Nudgebee Forager Installer for Windows
-# Usage: powershell -ExecutionPolicy Bypass -Command "& { $env:NB_ACCESS_KEY='xxx'; $env:NB_ACCESS_SECRET='yyy'; iwr -useb <url>/install.ps1 | iex }"
+# Usage (run from an Administrator PowerShell):
+#   $env:NB_ACCESS_KEY = "xxx"
+#   $env:NB_ACCESS_SECRET = "yyy"
+#   iwr -useb https://github.com/nudgebee/forager/releases/latest/download/install.ps1 | iex
 
 param(
     [string]$AccessKey = $env:NB_ACCESS_KEY,
     [string]$AccessSecret = $env:NB_ACCESS_SECRET,
     [string]$RelayUrl = $(if ($env:NB_RELAY_URL) { $env:NB_RELAY_URL } else { "wss://relay.nudgebee.com/register" }),
     [string]$Version = $(if ($env:NB_VERSION) { $env:NB_VERSION } else { "latest" }),
-    [string]$DownloadBase = $(if ($env:NB_DOWNLOAD_URL) { $env:NB_DOWNLOAD_URL } else { "https://registry.nudgebee.com/downloads/forager" })
+    # Default downloads come from GitHub Releases. Mirror users can point
+    # NB_DOWNLOAD_URL at any host that mirrors the same path layout
+    # (/download/<tag>/<file> and /latest/download/<file>).
+    [string]$DownloadBase = $(if ($env:NB_DOWNLOAD_URL) { $env:NB_DOWNLOAD_URL } else { "https://github.com/nudgebee/forager/releases" })
 )
 
 $ErrorActionPreference = "Stop"
@@ -48,7 +54,11 @@ $arch = if ([Environment]::Is64BitOperatingSystem) { "amd64" } else { "386" }
 Write-Log "Detected platform: windows/$arch"
 
 # Download binary
-$url = "$DownloadBase/$Version/nudgebee-forager-windows-$arch.exe"
+if ($Version -eq "latest") {
+    $url = "$DownloadBase/latest/download/nudgebee-forager-windows-$arch.exe"
+} else {
+    $url = "$DownloadBase/download/$Version/nudgebee-forager-windows-$arch.exe"
+}
 Write-Log "Downloading forager from $url..."
 
 New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
