@@ -105,7 +105,7 @@ jobs:
             -o dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }} \
             ./cmd
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: bin-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/nudgebee-forager-${{ matrix.goos }}-${{ matrix.goarch }}${{ matrix.ext }}
@@ -190,7 +190,7 @@ jobs:
           output-file: sbom.spdx.json
           upload-artifact: false
 
-      - uses: actions/upload-artifact@v8
+      - uses: actions/upload-artifact@v7
         with:
           name: sbom
           path: sbom.spdx.json
