@@ -123,8 +123,8 @@ git clone https://github.com/nudgebee/forager
 cd forager
 make build              # → bin/forager
 make test               # unit tests with -race
-make build-all          # cross-compile for linux/darwin/windows × amd64/arm64
-make docker-build       # local Docker image (with Oracle support)
+make build-all          # cross-compile: linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64
+docker build -t forager .   # local Docker image (with Oracle support)
 ```
 
 ## Releases
@@ -132,8 +132,8 @@ make docker-build       # local Docker image (with Oracle support)
 - **Docker images** — `ghcr.io/nudgebee/forager:vX.Y.Z` and `:latest`,
   multi-arch (linux/amd64 + linux/arm64), cosign-signed.
 - **Standalone binaries** — attached to each
-  [GitHub Release](https://github.com/nudgebee/forager/releases) for
-  Linux, macOS, and Windows (amd64 + arm64 where applicable).
+  [GitHub Release](https://github.com/nudgebee/forager/releases):
+  linux/{amd64,arm64}, darwin/{amd64,arm64}, windows/amd64.
 - **Helm chart** — `oci://ghcr.io/nudgebee/charts/forager`.
 
 ## Documentation
