@@ -18,6 +18,14 @@ permissions:
 env:
   IMAGE: ghcr.io/nudgebee/forager
   CHART_REPO: oci://ghcr.io/nudgebee/charts
+  # Existing customer endpoints. GHCR is the source of truth; the mirror
+  # jobs below copy tagged releases to these so customers consuming
+  # registry.nudgebee.com (which fronts ECR + S3) keep getting updates.
+  # Sunset once all customers are migrated to ghcr.io/nudgebee/forager.
+  AWS_REGION: us-east-1
+  ECR_REGISTRY: 740395098545.dkr.ecr.us-east-1.amazonaws.com
+  ECR_IMAGE_REPO: 740395098545.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
+  S3_BUCKET: nudgebee-prod-documents
 
 jobs:
   validate:
@@ -245,3 +253,119 @@ jobs:
           files: |
             dist/*
             sbom/sbom.spdx.json
+
+  # ──────────────────────────────────────────────────────────────────
+  # Mirror jobs — keep registry.nudgebee.com (ECR + S3 backed) in sync
+  # with what we publish to GHCR/GitHub Releases. Tag pushes only.
+  # Existing customers consuming these endpoints keep working.
+  # Sunset once customers have migrated to GHCR.
+  # ──────────────────────────────────────────────────────────────────
+
+  mirror-image-to-ecr:
+    needs: build-and-push-image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Login to ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Install regctl
+        run: |
+          REGCTL_VERSION=v0.9.1
+          curl -fsSL "https://github.com/regclient/regclient/releases/download/${REGCTL_VERSION}/regctl-linux-amd64" \
+            -o /usr/local/bin/regctl
+          chmod +x /usr/local/bin/regctl
+
+      - name: Copy GHCR digest → ECR
+        env:
+          DIGEST: ${{ needs.build-and-push-image.outputs.digest }}
+          VERSION: ${{ needs.build-and-push-image.outputs.version }}
+        run: |
+          regctl image copy "${IMAGE}@${DIGEST}" "${ECR_IMAGE_REPO}:${VERSION}"
+          regctl image copy "${IMAGE}@${DIGEST}" "${ECR_IMAGE_REPO}:latest"
+          echo "Mirrored to ${ECR_IMAGE_REPO}:${VERSION} and :latest"
+
+  mirror-helm-to-ecr:
+    needs: publish-helm
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: azure/setup-helm@v4
+
+      - name: Resolve chart version (strip leading 'v')
+        id: v
+        run: |
+          TAG="${GITHUB_REF#refs/tags/}"
+          echo "chart_version=${TAG#v}" >> "$GITHUB_OUTPUT"
+
+      - name: GHCR login (helm)
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io -u ${{ github.actor }} --password-stdin
+
+      - name: ECR login (helm)
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} \
+            | helm registry login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Pull chart from GHCR, push to ECR
+        env:
+          CHART_VERSION: ${{ steps.v.outputs.chart_version }}
+        run: |
+          helm pull ${{ env.CHART_REPO }}/nudgebee-forager-chart --version "${CHART_VERSION}"
+          helm push nudgebee-forager-chart-${CHART_VERSION}.tgz oci://${{ env.ECR_REGISTRY }}
+          echo "Mirrored chart to oci://${{ env.ECR_REGISTRY }}/nudgebee-forager-chart:${CHART_VERSION}"
+
+  mirror-binaries-to-s3:
+    needs: build-binaries
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: aws-actions/configure-aws-credentials@v6
+        with:
+          aws-access-key-id: ${{ secrets.PROD_AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.PROD_AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: bin-*
+          merge-multiple: true
+
+      - name: Upload binaries + install scripts to S3
+        run: |
+          VERSION="${GITHUB_REF#refs/tags/v}"
+          # Keep historical layout: /forager/{vX.Y.Z|X.Y.Z|latest}/<file>
+          for V in "v${VERSION}" "${VERSION}" "latest"; do
+            S3_PATH="s3://${S3_BUCKET}/forager/${V}"
+            for f in dist/*; do
+              FILENAME=$(basename "$f")
+              aws s3 cp "$f" "${S3_PATH}/${FILENAME}" --content-type application/octet-stream
+            done
+            aws s3 cp deploy/install.sh "${S3_PATH}/install.sh" --content-type text/plain
+            aws s3 cp deploy/install-macos.sh "${S3_PATH}/install-macos.sh" --content-type text/plain
+            aws s3 cp deploy/install.ps1 "${S3_PATH}/install.ps1" --content-type text/plain
+            echo "Mirrored binaries to ${S3_PATH}/"
+          done
