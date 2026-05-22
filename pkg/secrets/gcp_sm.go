@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sync"
 
+	"cloud.google.com/go/auth/credentials"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
 	"google.golang.org/api/option"
@@ -58,7 +59,15 @@ func (g *GCPSM) ensureClient(ctx context.Context) error {
 	g.initOnce.Do(func() {
 		var opts []option.ClientOption
 		if g.credentialsFile != "" {
-			opts = append(opts, option.WithCredentialsFile(g.credentialsFile))
+			creds, err := credentials.DetectDefault(&credentials.DetectOptions{
+				CredentialsFile: g.credentialsFile,
+				Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
+			})
+			if err != nil {
+				g.initErr = fmt.Errorf("gcp_sm: load credentials from %s: %w", g.credentialsFile, err)
+				return
+			}
+			opts = append(opts, option.WithAuthCredentials(creds))
 		}
 		client, err := secretmanager.NewClient(ctx, opts...)
 		if err != nil {
