@@ -26,10 +26,16 @@ env:
   # AWS auth is GitHub OIDC -> assume role vars.AWS_ROLE_ARN. The role's
   # trust policy restricts assumption to refs/tags/v* on this repo only.
   # No long-lived AWS keys in repo secrets.
-  AWS_REGION: us-east-1
-  ECR_REGISTRY: 740395098545.dkr.ecr.us-east-1.amazonaws.com
-  ECR_IMAGE_REPO: 740395098545.dkr.ecr.us-east-1.amazonaws.com/nudgebee-forager
-  S3_BUCKET: nudgebee-prod-documents
+  #
+  # Account ID, region, and bucket are repo variables (not source) so the
+  # public repo doesn't leak infra identifiers, and forks can point the
+  # mirror at their own AWS account. Required vars:
+  #   vars.AWS_ACCOUNT_ID     vars.AWS_REGION
+  #   vars.AWS_ROLE_ARN       vars.MIRROR_S3_BUCKET
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REGISTRY: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com
+  ECR_IMAGE_REPO: ${{ vars.AWS_ACCOUNT_ID }}.dkr.ecr.${{ vars.AWS_REGION }}.amazonaws.com/nudgebee-forager
+  S3_BUCKET: ${{ vars.MIRROR_S3_BUCKET }}
 
 jobs:
   validate:
