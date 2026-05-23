@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.1.0] - TBD
+## [0.1.0] - 2026-05-23
 
 ### Added
 - Initial public release.
@@ -20,7 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Vault, plus a local cloud-push credential store.
 - Deployment artifacts: Helm chart, systemd unit, CloudFormation
   template, install scripts for Linux, macOS, and Windows.
-- Multi-arch Docker images published to `ghcr.io/nudgebee/forager`.
+- Docker images published to `ghcr.io/nudgebee/forager` (linux/amd64;
+  multi-arch tracked as a follow-up once the Dockerfile picks Oracle
+  Instant Client by `$TARGETARCH`).
 
 [Unreleased]: https://github.com/nudgebee/forager/compare/v0.1.0...HEAD
 [0.1.0]: https://github.com/nudgebee/forager/releases/tag/v0.1.0
