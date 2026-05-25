@@ -267,6 +267,9 @@ jobs:
 
       - uses: softprops/action-gh-release@v2
         with:
+          # Mark as prerelease when the tag has a '-' suffix
+          # (vX.Y.Z-rcN, -betaN, -alphaN, ...).
+          prerelease: ${{ contains(github.ref, '-') }}
           generate_release_notes: true
           files: |
             dist/*
