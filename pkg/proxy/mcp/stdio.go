@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"strings"
 	"sync"
 )
 
@@ -20,9 +21,40 @@ type stdioProcess struct {
 	logger *slog.Logger
 }
 
+// validateCommand sanitizes the command used to launch the MCP subprocess.
+//
+// The command originates from trusted operator-supplied datasource
+// configuration rather than end-user request data, but we still defend against
+// malformed or injected values: reject control characters that have no place in
+// an executable path, and require that the command resolve to a real executable
+// on PATH (or as an explicit path). This bounds the subprocess-launch surface to
+// genuine, resolvable executables. The resolved absolute path is returned and
+// used for the launch.
+func validateCommand(command string) (string, error) {
+	if command == "" {
+		return "", fmt.Errorf("command is empty")
+	}
+	if strings.ContainsAny(command, "\x00\n\r") {
+		return "", fmt.Errorf("command contains illegal control characters")
+	}
+	resolved, err := exec.LookPath(command)
+	if err != nil {
+		return "", fmt.Errorf("resolving command %q: %w", command, err)
+	}
+	return resolved, nil
+}
+
 // start launches the MCP server process.
 func (s *stdioProcess) start(command string, args []string, env []string, workingDir string) error {
-	s.cmd = exec.Command(command, args...)
+	resolved, err := validateCommand(command)
+	if err != nil {
+		return fmt.Errorf("invalid MCP command: %w", err)
+	}
+
+	// #nosec G204 -- resolved is produced by validateCommand (real executable
+	// resolved via LookPath, control characters rejected) and the command
+	// originates from trusted operator configuration, not end-user request data.
+	s.cmd = exec.Command(resolved, args...)
 
 	if workingDir != "" {
 		s.cmd.Dir = workingDir
@@ -34,7 +66,6 @@ func (s *stdioProcess) start(command string, args []string, env []string, workin
 	// Capture stderr for logging
 	s.cmd.Stderr = &logWriter{logger: s.logger, level: slog.LevelWarn}
 
-	var err error
 	s.stdin, err = s.cmd.StdinPipe()
 	if err != nil {
 		return fmt.Errorf("creating stdin pipe: %w", err)
