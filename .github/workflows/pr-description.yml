@@ -1,0 +1,74 @@
+name: PR Description
+
+# Validates that the pull request description follows
+# .github/pull_request_template.md. Runs on description edits as well as code
+# pushes so authors get fast feedback when they fill (or empty) the template.
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, edited, reopened, synchronize]
+
+# Least privilege: this job only reads the PR body from the event payload.
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: Validate description
+    # Bots (e.g. dependabot) open PRs without the human template; skip them.
+    if: github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check PR description follows the template
+        env:
+          # Passed via env (never interpolated into the script) to avoid
+          # script injection from untrusted PR body content.
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          set -uo pipefail
+
+          FAILED=0
+          fail() { echo "::error::$1"; FAILED=1; }
+
+          # 1. Body must not be empty / whitespace-only.
+          if [ -z "${BODY//[[:space:]]/}" ]; then
+            echo "::error::PR description is empty. Fill in the pull request template (.github/pull_request_template.md)."
+            exit 1
+          fi
+
+          # 2. Required section headers from the template must be present.
+          while IFS= read -r header; do
+            [ -z "$header" ] && continue
+            if ! grep -qF "$header" <<<"$BODY"; then
+              fail "Missing required section: '$header'. Keep the headers from the PR template."
+            fi
+          done <<'HEADERS'
+          # Description
+          ## Type of change
+          # How Has This Been Tested?
+          # Checklist
+          HEADERS
+
+          # 3. The Description placeholder must be replaced with a real summary.
+          if grep -qF "Please include a summary of the changes and the related issue." <<<"$BODY"; then
+            fail "The Description section still has the template placeholder text. Describe your change."
+          fi
+
+          # 4. At least one 'Type of change' box must be ticked ('- [x]').
+          type_section=$(awk '/^## Type of change/{f=1; next} /^#/{if (f) exit} f' <<<"$BODY")
+          if ! grep -qE '^[[:space:]]*- \[[xX]\]' <<<"$type_section"; then
+            fail "No 'Type of change' box is checked. Tick the one(s) that apply using '- [x]'."
+          fi
+
+          # 5. At least one 'How Has This Been Tested?' box must be ticked.
+          tested_section=$(awk '/^# How Has This Been Tested\?/{f=1; next} /^#/{if (f) exit} f' <<<"$BODY")
+          if ! grep -qE '^[[:space:]]*- \[[xX]\]' <<<"$tested_section"; then
+            fail "No 'How Has This Been Tested?' box is checked. State how you tested using '- [x]'."
+          fi
+
+          if [ "$FAILED" -ne 0 ]; then
+            echo
+            echo "Edit the PR description to follow .github/pull_request_template.md, then re-save."
+            exit 1
+          fi
+          echo "PR description follows the template."
