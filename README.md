@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/nudgebee/forager/actions/workflows/ci.yml/badge.svg)](https://github.com/nudgebee/forager/actions/workflows/ci.yml)
 [![CodeQL](https://github.com/nudgebee/forager/actions/workflows/codeql.yml/badge.svg)](https://github.com/nudgebee/forager/actions/workflows/codeql.yml)
-[![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/nudgebee/forager/badge)](https://scorecard.dev/viewer/?uri=github.com/nudgebee/forager)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/nudgebee/forager/badge)](https://scorecard.dev/viewer/?uri=github.com/nudgebee/forager)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 
 Lightweight agent that runs in a customer environment (VM, container, or
