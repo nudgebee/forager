@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `govulncheck` job in CI to flag known vulnerabilities in dependencies.
 - Release artifacts now ship a `checksums.txt` with a keyless cosign
   signature (`checksums.txt.sig` / `.pem`) so downloads can be verified.
+- Native Go fuzz tests for the signing package: public-key parsing,
+  canonical-JSON normalization, and signature envelope verification.
 
 ### Changed
 - Pinned all GitHub Actions to full commit SHAs (Dependabot keeps the
