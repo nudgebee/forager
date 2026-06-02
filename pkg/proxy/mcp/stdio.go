@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"sync"
 )
@@ -30,14 +31,26 @@ type stdioProcess struct {
 // on PATH (or as an explicit path). This bounds the subprocess-launch surface to
 // genuine, resolvable executables. The resolved absolute path is returned and
 // used for the launch.
-func validateCommand(command string) (string, error) {
+//
+// A relative command containing a path separator (e.g. "./bin/mcp-server") is
+// resolved relative to workingDir, matching where the process will actually run,
+// rather than the parent process's current directory.
+func validateCommand(command, workingDir string) (string, error) {
 	if command == "" {
 		return "", fmt.Errorf("command is empty")
 	}
 	if strings.ContainsAny(command, "\x00\n\r") {
 		return "", fmt.Errorf("command contains illegal control characters")
 	}
-	resolved, err := exec.LookPath(command)
+
+	pathToCheck := command
+	// Only rewrite path-qualified relative commands; bare names (no separator)
+	// must still be looked up on PATH.
+	if workingDir != "" && filepath.Base(command) != command && !filepath.IsAbs(command) {
+		pathToCheck = filepath.Join(workingDir, command)
+	}
+
+	resolved, err := exec.LookPath(pathToCheck)
 	if err != nil {
 		return "", fmt.Errorf("resolving command %q: %w", command, err)
 	}
@@ -46,7 +59,7 @@ func validateCommand(command string) (string, error) {
 
 // start launches the MCP server process.
 func (s *stdioProcess) start(command string, args []string, env []string, workingDir string) error {
-	resolved, err := validateCommand(command)
+	resolved, err := validateCommand(command, workingDir)
 	if err != nil {
 		return fmt.Errorf("invalid MCP command: %w", err)
 	}
