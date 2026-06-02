@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
@@ -66,8 +67,46 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	return nil
 }
 
+// resolveTargetURL appends the request path/query to the configured base_url
+// and guarantees the result still targets the base_url's scheme and host. The
+// request URL comes from the control plane (untrusted from CodeQL's point of
+// view); without this guard a value such as "@evil.com/..." or "//evil.com"
+// could redirect the request to an arbitrary server (SSRF, CWE-918).
+func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
+	base, err := url.Parse(p.baseURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid base_url %q: %w", p.baseURL, err)
+	}
+
+	// The request URL must be a path/query relative to base_url; it must not
+	// carry its own scheme or host.
+	ref, err := url.Parse(reqURL)
+	if err != nil {
+		return "", fmt.Errorf("invalid request url %q: %w", reqURL, err)
+	}
+	if ref.IsAbs() || ref.Host != "" {
+		return "", fmt.Errorf("request url must be relative to base_url, got %q", reqURL)
+	}
+
+	// Build the target from base_url's trusted scheme/host/userinfo, appending
+	// the request path and query (preserving the previous base_url+req.URL path
+	// semantics). The destination host can never derive from the request URL.
+	out := &url.URL{
+		Scheme:   base.Scheme,
+		User:     base.User,
+		Host:     base.Host,
+		Path:     base.Path + ref.Path,
+		RawQuery: ref.RawQuery,
+		Fragment: ref.Fragment,
+	}
+	return out.String(), nil
+}
+
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
-	targetURL := p.baseURL + req.URL
+	targetURL, err := p.resolveTargetURL(req.URL)
+	if err != nil {
+		return nil, err
+	}
 
 	var bodyReader io.Reader
 	if req.Body != "" {

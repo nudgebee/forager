@@ -15,6 +15,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"nudgebee/forager/pkg/proxy"
 )
@@ -40,6 +41,14 @@ type Config struct {
 	AllowedHosts   []string `json:"allowed_hosts"`
 	PoolTTL        int      `json:"pool_ttl_seconds"`
 	PoolMaxSize    int      `json:"pool_max_size"`
+
+	// Host key verification (optional). When either is set the server's host
+	// key is verified, protecting against man-in-the-middle attacks. When both
+	// are empty, verification is skipped (insecure, backwards-compatible).
+	//   - KnownHosts: path to an OpenSSH known_hosts file.
+	//   - HostKey:    a single authorized_keys-style host public key line.
+	KnownHosts string `json:"known_hosts"`
+	HostKey    string `json:"host_key"`
 }
 
 // poolEntry is a cached SSH connection in dynamic mode.
@@ -79,6 +88,34 @@ func New(logger *slog.Logger) *Proxy {
 
 func (p *Proxy) Type() string { return "ssh-proxy" }
 
+// hostKeyCallback builds the SSH host key verification callback from config.
+//
+// When known_hosts (a file path) or host_key (an authorized_keys-style line) is
+// configured, the server's host key is verified, defending against
+// man-in-the-middle attacks. When neither is set, verification is skipped to
+// preserve backwards-compatible behavior; this is insecure and is logged so
+// operators can opt into verification.
+func hostKeyCallback(cfg Config, logger *slog.Logger) (ssh.HostKeyCallback, error) {
+	switch {
+	case cfg.KnownHosts != "":
+		cb, err := knownhosts.New(cfg.KnownHosts)
+		if err != nil {
+			return nil, fmt.Errorf("loading known_hosts %q: %w", cfg.KnownHosts, err)
+		}
+		return cb, nil
+	case cfg.HostKey != "":
+		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(cfg.HostKey))
+		if err != nil {
+			return nil, fmt.Errorf("parsing host_key: %w", err)
+		}
+		return ssh.FixedHostKey(key), nil
+	default:
+		logger.Warn("ssh host key verification disabled: set known_hosts or host_key to enable",
+			"hint", "without verification the connection is not protected against MITM")
+		return ssh.InsecureIgnoreHostKey(), nil // #nosec G106 -- opt-out fallback, see doc comment
+	}
+}
+
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -112,10 +149,15 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("ssh username is required")
 	}
 
+	hostKeyCB, err := hostKeyCallback(cfg, p.logger)
+	if err != nil {
+		return fmt.Errorf("configuring ssh host key verification: %w", err)
+	}
+
 	sshCfg := &ssh.ClientConfig{
 		User:            username,
 		Auth:            authMethods,
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(), // TODO: support known_hosts
+		HostKeyCallback: hostKeyCB,
 		Timeout:         dialTimeout,
 	}
 
