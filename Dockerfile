@@ -1,4 +1,4 @@
-FROM golang:1.26-bookworm AS build-stage
+FROM golang:1.26-bookworm@sha256:386d475a660466863d9f8c766fec64d7fdad3edac2c6a05020c09534d71edb4b AS build-stage
 
 WORKDIR /app
 
@@ -36,7 +36,7 @@ RUN OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
 RUN chmod +x /app/nudgebee-forager
 
 
-FROM debian:bookworm-slim AS release-stage
+FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS release-stage
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates libaio1 && \

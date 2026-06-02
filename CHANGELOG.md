@@ -12,10 +12,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   OpenSSF API, plus a Scorecard badge in the README.
 - CodeQL static analysis workflow (`codeql.yml`) for Go.
 - `govulncheck` job in CI to flag known vulnerabilities in dependencies.
+- Release artifacts now ship a `checksums.txt` with a keyless cosign
+  signature (`checksums.txt.sig` / `.pem`) so downloads can be verified.
+- Native Go fuzz tests for the signing package: public-key parsing,
+  canonical-JSON normalization, and signature envelope verification.
 
 ### Changed
 - Pinned all GitHub Actions to full commit SHAs (Dependabot keeps the
   `# vX.Y.Z` comments and SHAs current).
+- Pinned Dockerfile base images (`golang`, `debian`) by digest and
+  `govulncheck` to a tagged version (OpenSSF Scorecard Pinned-Dependencies).
 - Scoped workflow `GITHUB_TOKEN` permissions to least privilege: read-only
   at the top level, per-job escalation only where needed.
 
