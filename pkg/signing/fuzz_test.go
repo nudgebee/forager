@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"testing"
+	"time"
 )
 
 // FuzzParsePublicKey exercises the three accepted public-key encodings
@@ -84,11 +85,14 @@ func FuzzVerify(f *testing.F) {
 	f.Add([]byte(`{"signature":"!!!","signed_payload":"{}","signed_at":"now","nonce":"n"}`))
 
 	f.Fuzz(func(t *testing.T, data []byte) {
-		// A fresh verifier each iteration so replay-nonce state from one
-		// input can't influence the next.
-		vv, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
-		if err != nil {
-			t.Fatalf("NewVerifier: %v", err)
+		// Construct the verifier directly to skip per-iteration public-key
+		// parsing; a fresh seenNonces map keeps replay state isolated
+		// between inputs.
+		vv := &Verifier{
+			publicKey:  pub,
+			enabled:    true,
+			logger:     testLogger(),
+			seenNonces: make(map[string]time.Time),
 		}
 		_ = vv.Verify(data) // must not panic on any input
 	})
