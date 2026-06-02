@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- OpenSSF Scorecard workflow (`scorecard.yml`) publishing results to the
+  OpenSSF API, plus a Scorecard badge in the README.
+- CodeQL static analysis workflow (`codeql.yml`) for Go.
+- `govulncheck` job in CI to flag known vulnerabilities in dependencies.
+
+### Changed
+- Pinned all GitHub Actions to full commit SHAs (Dependabot keeps the
+  `# vX.Y.Z` comments and SHAs current).
+- Scoped workflow `GITHUB_TOKEN` permissions to least privilege: read-only
+  at the top level, per-job escalation only where needed.
+
 ## [0.1.0] - 2026-05-23
 
 ### Added
