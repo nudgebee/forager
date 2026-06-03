@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
@@ -89,13 +90,19 @@ func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
 	}
 
 	// Build the target from base_url's trusted scheme/host/userinfo, appending
-	// the request path and query (preserving the previous base_url+req.URL path
-	// semantics). The destination host can never derive from the request URL.
+	// the request path and query. The destination host can never derive from the
+	// request URL. Collapse a duplicated slash at the join boundary so a
+	// trailing-slash base_url plus a leading-slash request path does not produce
+	// "//"; otherwise the path is appended verbatim to preserve existing routing.
+	basePath, refPath := base.Path, ref.Path
+	if strings.HasSuffix(basePath, "/") && strings.HasPrefix(refPath, "/") {
+		refPath = refPath[1:]
+	}
 	out := &url.URL{
 		Scheme:   base.Scheme,
 		User:     base.User,
 		Host:     base.Host,
-		Path:     base.Path + ref.Path,
+		Path:     basePath + refPath,
 		RawQuery: ref.RawQuery,
 		Fragment: ref.Fragment,
 	}
