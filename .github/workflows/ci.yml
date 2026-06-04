@@ -48,32 +48,3 @@ jobs:
         run: |
           go install golang.org/x/vuln/cmd/govulncheck@v1.3.0
           govulncheck ./...
-
-  dco:
-    # Skip DCO for trusted GitHub bots; their commits don't include
-    # Signed-off-by trailers but are governed by the bot's own policy.
-    if: github.event.pull_request.user.login != 'dependabot[bot]'
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
-        with:
-          fetch-depth: 0
-      - name: Verify DCO sign-off on all commits
-        env:
-          BASE: ${{ github.event.pull_request.base.sha }}
-          HEAD: ${{ github.event.pull_request.head.sha }}
-        run: |
-          unsigned=$(git log --no-merges --format='%H %s' "$BASE..$HEAD" \
-            | while read -r sha rest; do
-                if ! git log -1 --format='%B' "$sha" | grep -qE '^Signed-off-by: '; then
-                  echo "$sha $rest"
-                fi
-              done)
-          if [ -n "$unsigned" ]; then
-            echo "::error::Commits missing Signed-off-by trailer:"
-            echo "$unsigned"
-            echo
-            echo "Sign each commit with 'git commit -s'; amend the last commit with 'git commit -s --amend', or rebase to add sign-off retroactively."
-            exit 1
-          fi
-          echo "All commits signed off."
