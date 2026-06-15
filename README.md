@@ -158,7 +158,7 @@ docker build -t forager .   # local Docker image (with Oracle support)
 ## Contributing
 
 PRs welcome. See [CONTRIBUTING.md](CONTRIBUTING.md) for the dev loop,
-PR guidelines, and the DCO sign-off requirement.
+PR guidelines, and the CLA requirement.
 
 ## Security
 

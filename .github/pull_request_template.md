@@ -21,7 +21,7 @@ Fixes # (issue)
 
 # Checklist
 
-- [ ] Commits are signed off (`git commit -s`) per [DCO](https://developercertificate.org/)
+- [ ] CLA signed (the CLA bot will prompt on your first PR)
 - [ ] `make validate` passes (fmt + lint + test)
 - [ ] Docs updated if the wire shape, config surface, or proxy module behavior changed
 

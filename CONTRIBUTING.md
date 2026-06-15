@@ -40,26 +40,12 @@ The `make validate` target runs all three.
 - **Update docs** when you change the wire shape, config surface, or
   proxy module behavior — see the relevant page under `docs/`.
 
-## DCO sign-off
+## Contributor License Agreement
 
-All commits must be signed off under the [Developer Certificate of
-Origin](https://developercertificate.org/). Add a sign-off line to every
-commit:
-
-```bash
-git commit -s -m "feat(proxy): add new datasource type"
-```
-
-This appends a `Signed-off-by: Your Name <you@example.com>` line to the
-commit message, confirming you have the right to submit the contribution
-under the project's license. Commits without a sign-off will be rejected
-by CI.
-
-To configure git to always include your sign-off:
-
-```bash
-git config --global format.signOff true
-```
+Before your contribution can be merged, you must sign the project's
+Contributor License Agreement (CLA). When you open your first PR, the CLA
+bot will comment with a link; follow it to sign. The check must pass before
+a maintainer can merge.
 
 ## Code conventions
 
