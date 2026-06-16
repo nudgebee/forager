@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -137,6 +138,17 @@ func Load(configPath string) (*Config, error) {
 	}
 	if cfg.AccessSecret == "" {
 		return nil, fmt.Errorf("access_secret is required (set NB_ACCESS_SECRET or access_secret in config)")
+	}
+
+	// Validate relay_url scheme
+	if cfg.RelayURL != "" {
+		u, err := url.Parse(cfg.RelayURL)
+		if err != nil {
+			return nil, fmt.Errorf("relay_url must be a valid URL: %w", err)
+		}
+		if u.Scheme != "ws" && u.Scheme != "wss" {
+			return nil, fmt.Errorf("relay_url must use ws:// or wss:// scheme, got: %q", cfg.RelayURL)
+		}
 	}
 
 	return &cfg, nil
