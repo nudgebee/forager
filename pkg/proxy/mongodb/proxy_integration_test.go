@@ -67,6 +67,9 @@ func decodeData(t *testing.T, resp *proxy.ActionResponse, err error, action stri
 	if err != nil {
 		t.Fatalf("%s: unexpected error: %v", action, err)
 	}
+	if resp == nil {
+		t.Fatalf("%s: response is nil", action)
+	}
 	if resp.StatusCode != 200 {
 		t.Fatalf("%s: expected status 200, got %d (data=%s)", action, resp.StatusCode, resp.Data)
 	}
