@@ -1,4 +1,8 @@
-FROM golang:1.26-bookworm@sha256:5d2b868674b57c9e48cdd39e891acce4196b6926ca6d11e9c270a8f85106203d AS build-stage
+# golang 1.26.5: fixes the Go stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
+# traversal) / CVE-2026-42505 (crypto/tls ECH) that 1.26.4 builds carry.
+FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS build-stage
+# Always compile with the base image's Go, never an auto-downloaded toolchain.
+ENV GOTOOLCHAIN=local
 
 WORKDIR /app
 
@@ -38,8 +42,21 @@ RUN chmod +x /app/nudgebee-forager
 
 FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS release-stage
 
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# apt-get upgrade patches the base packages to the latest bookworm security
+# releases — the pinned digest snapshot drifts behind (Trivy flagged 13 fixable
+# C/H/M: libgnutls30 incl. 2 CRITICAL, libgcrypt20, liblzma5).
+# OS-package cache-bust: bumping OS_PKG_EPOCH (ISO week) changes this layer's
+# cache key so a registry/build cache can't serve a stale package layer; bump it
+# when a scan flags a stale package.
+# DEBIAN_FRONTEND=noninteractive keeps upgraded packages from opening debconf
+# prompts and hanging the non-TTY CI build; scoped via `export` so it does not
+# persist into the image.
+ARG OS_PKG_EPOCH=2026-W29
+RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
+    export DEBIAN_FRONTEND=noninteractive && \
+    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates libaio1 && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
