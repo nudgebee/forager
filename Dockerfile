@@ -48,10 +48,15 @@ FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f206
 # OS-package cache-bust: bumping OS_PKG_EPOCH (ISO week) changes this layer's
 # cache key so a registry/build cache can't serve a stale package layer; bump it
 # when a scan flags a stale package.
+# DEBIAN_FRONTEND=noninteractive keeps upgraded packages from opening debconf
+# prompts and hanging the non-TTY CI build; scoped via `export` so it does not
+# persist into the image.
 ARG OS_PKG_EPOCH=2026-W29
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
+    export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates libaio1 && \
+    apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
