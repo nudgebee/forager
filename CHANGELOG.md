@@ -13,7 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CodeQL static analysis workflow (`codeql.yml`) for Go.
 - `govulncheck` job in CI to flag known vulnerabilities in dependencies.
 - Release artifacts now ship a `checksums.txt` with a keyless cosign
-  signature (`checksums.txt.sig` / `.pem`) so downloads can be verified.
+  signature (`checksums.txt.bundle`) so downloads can be verified.
 - Native Go fuzz tests for the signing package: public-key parsing,
   canonical-JSON normalization, and signature envelope verification.
 

@@ -287,13 +287,24 @@ jobs:
         working-directory: dist
         run: |
           # One checksum manifest over every release asset, then a keyless
-          # cosign signature + certificate over that manifest. Verifiers
-          # check the signature once and the checksums cover the rest.
+          # cosign signature over that manifest. Verifiers check the signature
+          # once and the checksums cover the rest.
+          #
+          # cosign v3 (shipped by cosign-installer v4) defaults to the new
+          # bundle format: --output-signature / --output-certificate are ignored
+          # and a single --bundle file carries the signature, the Fulcio
+          # certificate and the transparency-log entry together. Without
+          # --bundle it fails with "create bundle file: open : no such file or
+          # directory", which broke the v0.1.3 release.
+          #
+          # Verify a downloaded release with:
+          #   cosign verify-blob --bundle checksums.txt.bundle \
+          #     --certificate-identity-regexp '^https://github.com/nudgebee/forager/' \
+          #     --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+          #     checksums.txt
+          #   sha256sum -c checksums.txt
           sha256sum * > checksums.txt
-          cosign sign-blob --yes \
-            --output-signature checksums.txt.sig \
-            --output-certificate checksums.txt.pem \
-            checksums.txt
+          cosign sign-blob --yes --bundle checksums.txt.bundle checksums.txt
 
       - uses: softprops/action-gh-release@b4309332981a82ec1c5618f44dd2e27cc8bfbfda # v3.0.0
         with:
