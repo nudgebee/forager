@@ -35,7 +35,7 @@ tracks build on the VM resource:
 
 1. **Observability** — node health, metrics, logs, service state.
 2. **Security** — package inventory → CVE matching, patching, CIS
-   benchmarking (the customer ask driving this doc).
+   benchmarking (the initiative's first deliverable).
 3. **Automation** — signed, audited command execution on VMs through
    the per-segment forager; patching is one instance of it.
 
