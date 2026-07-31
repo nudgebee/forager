@@ -400,8 +400,27 @@ caps. Forager holds zero schedule state.
 ## 9. Forager changes
 
 New proxy module `pkg/proxy/discovery`, registered like existing
-modules. New datasource types configured like db proxies (credentials
-via existing `pkg/secrets` local/cloud-push):
+modules.
+
+**Datasource configuration: from the Nudgebee UI, pushed down**
+(recommendation — matches every surveyed tool: Rapid7 discovery
+connections live in the console and are assigned to engines; Qualys
+and Tenable manage scanners centrally; the per-segment node only
+enrolls). Two reasons beyond precedent: the coverage report needs the
+server to know *intended* scope (CIDRs, datasources) or gaps can't be
+computed; and the existing integrations config-push path
+(`integration_config.go` / `proxy_config_push.go`) plus `pkg/secrets`
+cloud-push already deliver exactly this. Forager keeps only bootstrap
+config (relay URL, pairing) locally.
+
+Open point — credential residency: datasource *existence and scope*
+is always UI-configured, but the credential *value* is either
+UI-entered (cloud-push, default) or a local/vault reference on the
+forager for customers who won't let credentials transit our cloud
+(`pkg/secrets` local mode exists for this).
+
+New datasource types (credentials via existing `pkg/secrets`
+local/cloud-push):
 
 - `vcenter` (govmomi, read-only role)
 - `proxmox` (REST `/cluster/resources`)
