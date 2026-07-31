@@ -2,19 +2,15 @@
 
 First epic of the **VM Patch & Vulnerability Management** initiative:
 
-| Epic | What ships | Customer's phase |
-|------|-----------|------------------|
-| **1. Discovery & package inventory (this one)** | Every VM found, packages cached, coverage report | first half of their "Phase 1" |
-| 2. Vulnerability matching | Packages → CVEs (vendor advisories), escalation policy (CVSS/urgency config) | second half of their "Phase 1" |
-| 3. Patching | Subscription-based patch apply, approval flow, maintenance windows | their "Phase 2" |
-| 4. Hardening & insight | CIS benchmarking, AI impact analysis of vulns on applications | later asks |
+| Epic | What ships |
+|------|-----------|
+| **1. Discovery & package inventory (this one)** | Every VM found, packages cached, coverage report |
+| 2. Vulnerability matching | Packages → CVEs (vendor advisories), escalation policy (CVSS/urgency config) |
+| 3. Patching | Subscription-based patch apply, approval flow, maintenance windows |
+| 4. Hardening & insight | CIS benchmarking, AI impact analysis of vulns on applications |
 
-The last column maps our epics to the phase numbers the customer used
-in their ask ("Phase 1 - discovery of VM -> packages and
-vulnerability, phase 2 - applying patch") — their "Phase 1" spans our
-epics 1+2, so on customer calls the numbers differ. Epics 2–4 are
-sequenced, not speculative — 2 needs 1's package data, 3 needs 2's
-vuln data. We only break tickets down for epic 1 now.
+Epics 2–4 are sequenced, not speculative — 2 needs 1's package data,
+3 needs 2's vuln data. We only break tickets down for epic 1 now.
 
 ## Summary
 
@@ -31,11 +27,13 @@ customer ask), and later for observability and automation on VMs.
 
 ## Why
 
-A customer wants patch and vulnerability management for their VMs,
-including on-premise machines where no cloud API exists. Nothing else
-in that product can ship until we reliably know which VMs exist and
-what's installed on them. No vendor today does this for Linux without
-installing an agent on every VM — that gap is our opening.
+Customers running self-hosted and on-premise VM fleets need patch &
+vulnerability management, and cloud APIs don't cover those machines.
+Nothing else in the product can ship until we reliably know which VMs
+exist and what's installed on them. No vendor today does agentless
+Linux inventory from a per-segment collector — every competitor
+requires an agent on each VM — so this is both the prerequisite and
+the differentiation. A design-partner customer is waiting on it.
 
 ## How (in one paragraph)
 
