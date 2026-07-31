@@ -105,22 +105,13 @@ type + read-only credential via `pkg/secrets`.
 AC: returns UUID, name, power state, guest OS, IPs **including
 powered-off VMs**; powered-off reaches `assets.power_state`.
 
-## P5 — Server: scheduler, coverage states, cloud projection
-Repo: nudgebee (api-server).
-
-Tasks: (a) scheduler — server-side, forager holds zero schedule
-state; candidate: reuse the scan_orchestrator pattern (confirm at
-kickoff): sweep cadence per CIDR, hypervisor poll, per-asset
-inventory cadence, windows, concurrency caps; (b) coverage-state machine — `discovered →
-reachable → inventoried` tracked independently, gap-reason taxonomy
-(ssh-refused, ssh-auth-failed, stale, powered-off, unsupported-os,
-eol-no-repo) denormalized onto assets; (c) project existing
-cloud_resources VMs into `asset_observations` (instance-id STRONG) so
-cloud and on-prem VMs merge into one asset universe.
-
-AC: window/cap violations impossible by construction; every
-non-inventoried asset has exactly one primary gap reason; an EC2
-instance also seen via SSH is one asset, not two.
+## P5 — removed (folded into P2 and kickoff decisions)
+Coverage states + gap-reason taxonomy and the cloud-VM merge
+(instance-id as STRONG identity) moved into P2 — they're part of the
+same projection logic. Scheduling of recurring runs is a kickoff
+decision (candidate: reuse the scan_orchestrator pattern — see
+`RunOne`/`ScanAccount` usage in recommendation/service.go); forager
+still holds zero schedule state either way.
 
 ## P6 — Content pack v1 + publish pipeline
 Repo: content (+ server config). `linux-inventory` covering the §6
@@ -153,9 +144,9 @@ that credential management is the operational cost center.
 ## Dependencies
 
 ```
-P1 ─┬─► M0 exit ─► P3, P5 ─► P6, P7
-P2 ─┘                │
-customer answer ─► P4┘        P8 alongside P6/P7
+P1 ─┬─► M0 exit ─► P3 ─► P6, P7
+P2 ─┘               │
+customer answer ─► P4        P8 alongside P6/P7
 ```
 
 P1 and P2 have no dependencies and run in parallel. P4 is the only

@@ -66,11 +66,10 @@ application-level (non-OS) packages.
 | # | Ticket | Where | Note |
 |---|--------|-------|------|
 | P1 | Forager: SSH inventory + signed content-pack runner | forager | no dependencies |
-| P2 | Server: asset storage + ingest + parsers + dedup logic | nudgebee | no dependencies |
+| P2 | Server: asset storage + ingest + parsers + dedup + coverage states | nudgebee | no dependencies |
 | P3 | Forager: network sweep + Active Directory lookup | forager | after P1+P2 demo |
 | P4 | Forager: hypervisor connector (vCenter/Proxmox/libvirt) | forager | **blocked: customer must tell us their hypervisor** |
-| P5 | Server: scheduler + coverage states + merge cloud VMs | nudgebee | after P1+P2 demo |
-| P6 | Content pack v1 + signing/publish pipeline | content | with P5 |
+| P6 | Content pack v1 + signing/publish pipeline | content | after P1 |
 | P7 | UI: asset list + coverage report screen | nudgebee | last |
 | P8 | Customer setup docs (SSH user, firewall/IDS allowlist) | nudgebee-docs | alongside P6/P7 |
 
