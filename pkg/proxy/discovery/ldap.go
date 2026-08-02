@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"time"
 
@@ -77,7 +78,25 @@ func runLDAPDiscovery(ctx context.Context, cfg ldapConfig, activeWithinDays int)
 	}
 	defer func() { _ = conn.Close() }()
 
+	// go-ldap has no context-aware operations, so cancellation is wired up by
+	// closing the connection: an in-flight bind or search then fails
+	// immediately instead of running to its own timeout. Without this, a
+	// cancelled action would keep a directory query alive for up to
+	// timeout_seconds after nobody is waiting for it.
+	done := make(chan struct{})
+	defer close(done)
+	go func() {
+		select {
+		case <-ctx.Done():
+			_ = conn.Close()
+		case <-done:
+		}
+	}()
+
 	if err := conn.Bind(cfg.BindDN, cfg.BindPass); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ldap discovery cancelled: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("ldap bind failed: %w", redactLDAPError(err))
 	}
 
@@ -104,6 +123,9 @@ func runLDAPDiscovery(ctx context.Context, cfg ldapConfig, activeWithinDays int)
 
 	res, err := conn.SearchWithPaging(req, pageSize)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, fmt.Errorf("ldap discovery cancelled: %w", ctxErr)
+		}
 		return nil, fmt.Errorf("ldap search failed: %w", redactLDAPError(err))
 	}
 
@@ -218,8 +240,8 @@ func parseADTimestamp(raw string) time.Time {
 	if raw == "" || raw == "0" || raw == "9223372036854775807" {
 		return time.Time{}
 	}
-	var ticks int64
-	if _, err := fmt.Sscanf(raw, "%d", &ticks); err != nil || ticks <= 0 {
+	ticks, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || ticks <= 0 {
 		return time.Time{}
 	}
 	return time.Unix(ticks/10_000_000-windowsEpochToUnixSec, 0)
@@ -249,8 +271,8 @@ func isAccountEnabled(uac string) bool {
 	if uac == "" {
 		return true
 	}
-	var flags int64
-	if _, err := fmt.Sscanf(uac, "%d", &flags); err != nil {
+	flags, err := strconv.ParseInt(uac, 10, 64)
+	if err != nil {
 		return true
 	}
 	return flags&0x2 == 0

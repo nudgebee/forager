@@ -18,6 +18,8 @@ const (
 	maxRatePPS            = 1000
 	defaultProbeTimeoutMs = 1000
 	defaultSweepWorkers   = 64
+	maxSweepWorkers       = 512
+	rdnsConcurrency       = 32
 	maxSweepAddresses     = 65536 // a /16; larger scopes must be split server-side
 )
 
@@ -193,10 +195,13 @@ func expandCIDRs(cidrs, exclusions []netip.Prefix) ([]string, int, error) {
 			return nil, 0, fmt.Errorf("only IPv4 CIDRs are supported, got %s", cidr)
 		}
 
-		size := 1 << (32 - cidr.Bits())
-		if len(addrs)+size > maxSweepAddresses {
+		// Computed as int64: on a 32-bit platform `1 << 32` overflows int, and
+		// a /0 would silently expand to nothing instead of being rejected.
+		size64 := int64(1) << (32 - cidr.Bits())
+		if int64(len(addrs))+size64 > maxSweepAddresses {
 			return nil, 0, fmt.Errorf("sweep scope exceeds %d addresses; split it into smaller CIDRs", maxSweepAddresses)
 		}
+		size := int(size64)
 
 		addr := cidr.Masked().Addr()
 		for i := 0; i < size; i++ {
@@ -224,14 +229,27 @@ func isExcluded(addr netip.Addr, exclusions []netip.Prefix) bool {
 	return false
 }
 
+// enrichRDNS resolves names for responders, bounded so that a sweep finding
+// many hosts does not fire an unbounded number of simultaneous queries at the
+// customer's resolver — which looks like a DNS flood and is liable to be
+// treated as one.
 func enrichRDNS(ctx context.Context, hosts map[string]*SweepHost) {
 	var wg sync.WaitGroup
 	var mu sync.Mutex
+	sem := make(chan struct{}, rdnsConcurrency)
 
 	for ip := range hosts {
 		wg.Add(1)
 		go func(ip string) {
 			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+
 			lookupCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			defer cancel()
 
@@ -327,7 +345,16 @@ func parseSweepParams(params map[string]any, maxRate int) (sweepConfig, error) {
 	}
 	cfg.probeTimeout = time.Duration(timeoutMs) * time.Millisecond
 
+	// Workers govern how many probes are in flight, not how fast they are
+	// sent — the rate limiter owns that. Raising this helps when a scope is
+	// mostly dead addresses, where each probe costs a full timeout.
 	cfg.workers = defaultSweepWorkers
+	if v, ok := intParam(params, "workers"); ok && v > 0 {
+		cfg.workers = v
+		if cfg.workers > maxSweepWorkers {
+			cfg.workers = maxSweepWorkers
+		}
+	}
 	return cfg, nil
 }
 

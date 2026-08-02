@@ -42,6 +42,7 @@ Finds hosts that are up, by plain TCP connect across the requested CIDRs.
 | `ports` | `[]int` | Defaults to 22, 3389, 5985. |
 | `exclusions` | `[]string` | CIDRs or bare addresses, removed before any packet is sent. |
 | `rate_pps` | `int` | Probes/second, default 100, clamped to `max_rate_pps`. |
+| `workers` | `int` | Probes in flight, default 64, max 512. Governs concurrency, not rate — raising it helps when a scope is mostly dead addresses. |
 | `timeout_ms` | `int` | Per-probe connect timeout, default 1000. |
 
 Returns per responder: IP, open ports, MAC (local segment only), reverse DNS.

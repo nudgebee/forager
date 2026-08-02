@@ -379,3 +379,77 @@ func listenCounting(t *testing.T, counter *int64) countingListener {
 
 	return countingListener{port: l.Addr().(*net.TCPAddr).Port}
 }
+
+// A /0 expands to 2^32 addresses. Computing that as int overflows on 32-bit
+// platforms, where the scope would silently expand to nothing instead of
+// being rejected.
+func TestExpandCIDRs_FullRangeRejectedNotOverflowed(t *testing.T) {
+	addrs, _, err := expandCIDRs(mustPrefixes(t, "0.0.0.0/0"), nil)
+	if err == nil {
+		t.Fatalf("accepted a /0; got %d addresses instead of a rejection", len(addrs))
+	}
+	if len(addrs) != 0 {
+		t.Errorf("returned %d addresses alongside the error", len(addrs))
+	}
+}
+
+func TestParseSweepParams_WorkersConfigurableAndClamped(t *testing.T) {
+	base := map[string]any{"cidrs": []any{"10.0.1.0/24"}}
+
+	cfg, err := parseSweepParams(base, maxRatePPS)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if cfg.workers != defaultSweepWorkers {
+		t.Errorf("workers = %d, want default %d", cfg.workers, defaultSweepWorkers)
+	}
+
+	cfg, err = parseSweepParams(map[string]any{
+		"cidrs":   []any{"10.0.1.0/24"},
+		"workers": float64(128),
+	}, maxRatePPS)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if cfg.workers != 128 {
+		t.Errorf("workers = %d, want 128", cfg.workers)
+	}
+
+	cfg, err = parseSweepParams(map[string]any{
+		"cidrs":   []any{"10.0.1.0/24"},
+		"workers": float64(100000),
+	}, maxRatePPS)
+	if err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if cfg.workers != maxSweepWorkers {
+		t.Errorf("workers = %d, want it clamped to %d", cfg.workers, maxSweepWorkers)
+	}
+}
+
+// Raising workers must not raise the probe rate: the limiter owns rate, and
+// the cap is a safety property that no request parameter may erode.
+func TestRunSweep_MoreWorkersDoNotExceedRateCap(t *testing.T) {
+	const ratePPS = 40
+
+	cfg := sweepConfig{
+		cidrs:        mustPrefixes(t, "127.0.0.0/26"),
+		ports:        []int{1},
+		ratePPS:      ratePPS,
+		probeTimeout: 200 * time.Millisecond,
+		workers:      maxSweepWorkers,
+	}
+
+	start := time.Now()
+	result, err := runSweep(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("sweep: %v", err)
+	}
+	elapsed := time.Since(start)
+
+	minDuration := time.Duration(float64(result.Scanned-burstFor(ratePPS))/float64(ratePPS)*float64(time.Second)) - 100*time.Millisecond
+	if elapsed < minDuration {
+		t.Errorf("%d workers swept %d addresses in %s — faster than the %d pps cap allows (min %s)",
+			cfg.workers, result.Scanned, elapsed, ratePPS, minDuration)
+	}
+}
