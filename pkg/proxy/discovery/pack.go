@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"fmt"
+	"regexp"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -48,6 +49,12 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 		return nil, fmt.Errorf("pack too large: %d bytes (max %d)", len(raw), maxPackBytes)
 	}
 
+	// Checked before parsing: the signature covers the document minus these
+	// lines, so their count is part of what makes the signature meaningful.
+	if n := countSignatureLines(raw); n != 1 {
+		return nil, fmt.Errorf("pack must contain exactly one top-level signature line, found %d", n)
+	}
+
 	var p Pack
 	if err := yaml.Unmarshal(raw, &p); err != nil {
 		return nil, fmt.Errorf("parsing pack: %w", err)
@@ -84,19 +91,51 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 // through git checkouts, editors and HTTP, any of which may rewrite CRLF.
 // Without this, a pack signed on one platform fails verification on another
 // for a reason that looks identical to tampering.
+//
+// Exactly one top-level signature line may be removed — see countSignatureLines
+// for why that matters.
 func SignedBytes(raw []byte) []byte {
+	body, _ := splitSignatureLine(raw)
+	return body
+}
+
+// signatureLine matches a top-level `signature:` key. Anchored at column 0 so
+// indented lines — which is where a YAML scalar's continuation lives — are
+// never removed, and tolerant of space before the colon, which YAML accepts as
+// the same key.
+var signatureLine = regexp.MustCompile(`^signature[ \t]*:`)
+
+// splitSignatureLine returns the bytes a signature covers and how many
+// signature lines were removed.
+func splitSignatureLine(raw []byte) ([]byte, int) {
 	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
 	normalized = strings.ReplaceAll(normalized, "\r", "\n")
 
 	lines := strings.Split(normalized, "\n")
 	kept := make([]string, 0, len(lines))
+	removed := 0
 	for _, line := range lines {
-		if strings.HasPrefix(line, "signature:") {
+		if signatureLine.MatchString(line) {
+			removed++
 			continue
 		}
 		kept = append(kept, line)
 	}
-	return []byte(strings.TrimRight(strings.Join(kept, "\n"), " \t\n"))
+	return []byte(strings.TrimRight(strings.Join(kept, "\n"), " \t\n")), removed
+}
+
+// countSignatureLines reports how many top-level signature lines a document
+// contains.
+//
+// This has to be exactly one. Because verification removes these lines before
+// checking the signature, any line the stripper removes is a line an attacker
+// could add or alter without invalidating the signature. Today a second one
+// happens to be caught downstream — the YAML parser rejects the duplicate key
+// — but that is a property of the parser, not a guarantee this package makes,
+// and the signature check must not depend on it.
+func countSignatureLines(raw []byte) int {
+	_, removed := splitSignatureLine(raw)
+	return removed
 }
 
 func (p *Pack) validate() error {

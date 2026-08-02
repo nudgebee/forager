@@ -243,6 +243,18 @@ func (p *Proxy) parseAllowedCIDRs(cidrs []string) error {
 			p.allowedNets = append(p.allowedNets, ipNet)
 			continue
 		}
+		// A bare address is a single-host network. Treating it as a hostname
+		// instead would mean a target given by name that resolves to this
+		// address never matches, since name resolution is only compared
+		// against the network list.
+		if ip := net.ParseIP(c); ip != nil {
+			bits := 32
+			if ip.To4() == nil {
+				bits = 128
+			}
+			p.allowedNets = append(p.allowedNets, &net.IPNet{IP: ip, Mask: net.CIDRMask(bits, bits)})
+			continue
+		}
 		p.allowedHosts = append(p.allowedHosts, c)
 	}
 	return nil
@@ -395,6 +407,49 @@ func (p *Proxy) handleLDAP(ctx context.Context, req *proxy.ActionRequest) (*prox
 	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
 }
 
+// partitionTargetsByScope splits targets into those inside this datasource's
+// scope and rejection results for those outside it, resolving names
+// concurrently. Order is preserved so results stay comparable across runs.
+func (p *Proxy) partitionTargetsByScope(ctx context.Context, targets []string, concurrency int) ([]string, []TargetResult) {
+	if concurrency <= 0 {
+		concurrency = defaultConcurrency
+	}
+
+	verdicts := make([]bool, len(targets))
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+
+	for i, t := range targets {
+		wg.Add(1)
+		go func(idx int, target string) {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			verdicts[idx] = p.isTargetAllowed(target)
+		}(i, t)
+	}
+	wg.Wait()
+
+	var allowed []string
+	var rejected []TargetResult
+	for i, t := range targets {
+		if verdicts[i] {
+			allowed = append(allowed, t)
+			continue
+		}
+		rejected = append(rejected, TargetResult{
+			Host:   t,
+			Status: StatusError,
+			Error:  "target is outside this datasource's allowed_cidrs",
+		})
+	}
+	return allowed, rejected
+}
+
 // prefixWithinAny reports whether requested is contained by one of the
 // configured prefixes.
 func prefixWithinAny(requested netip.Prefix, configured []*net.IPNet) bool {
@@ -448,19 +503,11 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 
 	// Out-of-scope targets are rejected as results, not as a batch error: the
 	// server asked about them and deserves to see why they were not collected.
-	var allowed []string
-	var rejected []TargetResult
-	for _, t := range targets {
-		if p.isTargetAllowed(t) {
-			allowed = append(allowed, t)
-			continue
-		}
-		rejected = append(rejected, TargetResult{
-			Host:   t,
-			Status: StatusError,
-			Error:  "target is outside this datasource's allowed_cidrs",
-		})
-	}
+	//
+	// Checked concurrently because a target given as a hostname costs a DNS
+	// lookup: done in sequence, a batch of named hosts would block the handler
+	// for as long as the lookups take before a single host was contacted.
+	allowed, rejected := p.partitionTargetsByScope(ctx, targets, cfg.Concurrency)
 
 	execCfg := execConfig{
 		port:            cfg.Port,

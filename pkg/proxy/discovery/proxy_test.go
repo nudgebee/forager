@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
@@ -434,5 +435,101 @@ func TestConfigDefaults(t *testing.T) {
 	applyConfigDefaults(&over)
 	if over.Concurrency != maxConcurrency {
 		t.Errorf("concurrency = %d, want it clamped to %d", over.Concurrency, maxConcurrency)
+	}
+}
+
+// A bare address in allowed_cidrs is a single-host network. Treated as a
+// hostname instead, a target given by name that resolves to it would never
+// match, since name resolution is only compared against the network list.
+func TestParseAllowedCIDRs_BareIPBecomesSingleHostNetwork(t *testing.T) {
+	p := New(slog.New(slog.DiscardHandler))
+	if err := p.parseAllowedCIDRs([]string{"10.0.1.5", "10.0.2.0/24", "db.corp.local"}); err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+
+	if len(p.allowedNets) != 2 {
+		t.Fatalf("networks = %d, want 2 (the bare IP plus the CIDR)", len(p.allowedNets))
+	}
+	if len(p.allowedHosts) != 1 || p.allowedHosts[0] != "db.corp.local" {
+		t.Errorf("hosts = %v, want only the hostname", p.allowedHosts)
+	}
+
+	if !p.isTargetAllowed("10.0.1.5") {
+		t.Error("bare IP in allowed_cidrs did not match itself as a target")
+	}
+	if p.isTargetAllowed("10.0.1.6") {
+		t.Error("a bare IP allowlist entry matched a neighbouring address")
+	}
+}
+
+func TestParseAllowedCIDRs_BareIPv6(t *testing.T) {
+	p := New(slog.New(slog.DiscardHandler))
+	if err := p.parseAllowedCIDRs([]string{"2001:db8::1"}); err != nil {
+		t.Fatalf("parsing: %v", err)
+	}
+	if len(p.allowedNets) != 1 {
+		t.Fatalf("networks = %d, want 1", len(p.allowedNets))
+	}
+	if !p.isTargetAllowed("2001:db8::1") {
+		t.Error("bare IPv6 address did not match itself")
+	}
+}
+
+// Scope checks resolve hostnames, so doing them in sequence would block the
+// handler for the sum of every lookup before a single host was contacted.
+func TestPartitionTargetsByScope_ChecksConcurrently(t *testing.T) {
+	p, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs": []any{"10.0.1.0/24"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	// Names in a reserved TLD: guaranteed not to resolve, so each costs a
+	// full resolver round trip.
+	targets := make([]string, 60)
+	for i := range targets {
+		targets[i] = fmt.Sprintf("host-%d.invalid", i)
+	}
+
+	start := time.Now()
+	allowed, rejected := p.partitionTargetsByScope(context.Background(), targets, 30)
+	elapsed := time.Since(start)
+
+	if len(allowed) != 0 {
+		t.Errorf("allowed = %v, want none (no name resolves into scope)", allowed)
+	}
+	if len(rejected) != len(targets) {
+		t.Errorf("rejected = %d, want %d", len(rejected), len(targets))
+	}
+	// Sequential resolution of 60 names would take far longer than this even
+	// with a fast resolver; the bound is loose to stay stable in CI.
+	if elapsed > 20*time.Second {
+		t.Errorf("scope check took %s — looks sequential rather than concurrent", elapsed)
+	}
+}
+
+// Order must survive the concurrent check, so results stay comparable run to
+// run and a caller can correlate them with what it asked for.
+func TestPartitionTargetsByScope_PreservesOrder(t *testing.T) {
+	p, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs": []any{"10.0.1.0/24"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	targets := []string{"10.0.1.1", "192.168.1.1", "10.0.1.2", "192.168.1.2", "10.0.1.3"}
+	allowed, rejected := p.partitionTargetsByScope(context.Background(), targets, 4)
+
+	wantAllowed := []string{"10.0.1.1", "10.0.1.2", "10.0.1.3"}
+	if len(allowed) != len(wantAllowed) {
+		t.Fatalf("allowed = %v, want %v", allowed, wantAllowed)
+	}
+	for i := range wantAllowed {
+		if allowed[i] != wantAllowed[i] {
+			t.Errorf("allowed[%d] = %s, want %s", i, allowed[i], wantAllowed[i])
+		}
+	}
+
+	wantRejected := []string{"192.168.1.1", "192.168.1.2"}
+	for i := range wantRejected {
+		if rejected[i].Host != wantRejected[i] {
+			t.Errorf("rejected[%d] = %s, want %s", i, rejected[i].Host, wantRejected[i])
+		}
 	}
 }
