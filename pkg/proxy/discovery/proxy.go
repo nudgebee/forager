@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"nudgebee/forager/pkg/proxy"
 	"nudgebee/forager/pkg/signing"
@@ -47,6 +48,13 @@ type Config struct {
 
 	// PackDir caches verified packs on disk, keyed by version.
 	PackDir string `json:"pack_dir"`
+
+	// KnownHostsFile enables SSH host key verification against an OpenSSH
+	// known_hosts file. When set, a host whose key is absent or changed is
+	// refused. Discovery finds hosts whose keys we have not seen before, so
+	// this cannot be the default yet — but customers who can supply host keys
+	// (config management, golden images) should get real verification.
+	KnownHostsFile string `json:"known_hosts_file"`
 }
 
 // Proxy executes discovery actions against hosts in its network segment.
@@ -92,14 +100,15 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("discovery: %w", err)
 	}
 
+	hostKeyCallback, err := p.hostKeyCallback(cfg)
+	if err != nil {
+		return fmt.Errorf("discovery: %w", err)
+	}
+
 	p.sshConfig = &ssh.ClientConfig{
-		User: username,
-		Auth: authMethods,
-		// Target hosts are discovered, so their keys are unknown on first
-		// contact and rotate with re-imaged VMs. Collection is read-only and
-		// the credential is unprivileged; host-key pinning belongs with the
-		// server-side asset record, not here. Tracked as a follow-up.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
+		User:            username,
+		Auth:            authMethods,
+		HostKeyCallback: hostKeyCallback,
 		Timeout:         time.Duration(cfg.DialTimeoutS) * time.Second,
 	}
 
@@ -126,6 +135,32 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		"pack_verification", p.packPubKey != nil,
 	)
 	return nil
+}
+
+// hostKeyCallback returns known_hosts verification when the customer has
+// supplied a file, and otherwise accepts unknown keys with a warning.
+//
+// Discovery's job is finding hosts nobody has catalogued, so their keys are
+// unknown on first contact and change whenever a VM is re-imaged — strict
+// verification by default would make the product unable to do the one thing
+// it exists for. The residual risk is bounded: collection runs read-only
+// under an unprivileged credential and executes only signature-verified
+// commands, so a spoofed host can feed us false inventory but cannot gain
+// anything from us. Recording keys on the server-side asset record and
+// pinning on subsequent runs is the real fix and belongs with that work.
+func (p *Proxy) hostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
+	if cfg.KnownHostsFile != "" {
+		cb, err := knownhosts.New(cfg.KnownHostsFile)
+		if err != nil {
+			return nil, fmt.Errorf("loading known_hosts_file %q: %w", cfg.KnownHostsFile, err)
+		}
+		p.logger.Info("ssh host key verification enabled", "known_hosts", cfg.KnownHostsFile)
+		return cb, nil
+	}
+
+	p.logger.Warn("ssh host key verification disabled: no known_hosts_file configured",
+		"hint", "set known_hosts_file to verify target host keys")
+	return ssh.InsecureIgnoreHostKey(), nil // #nosec G106 -- see hostKeyCallback doc comment
 }
 
 func applyConfigDefaults(cfg *Config) {
@@ -193,11 +228,20 @@ func (p *Proxy) parseAllowedCIDRs(cidrs []string) error {
 
 // isTargetAllowed enforces the segment scope the server configured. An empty
 // allowlist means unrestricted, matching the ssh proxy's behaviour.
+//
+// The allowlist is snapshotted under a short read lock rather than held for
+// the whole call: Configure can replace it concurrently, and the DNS lookup
+// below is far too slow to hold a lock across.
 func (p *Proxy) isTargetAllowed(host string) bool {
-	if len(p.allowedNets) == 0 && len(p.allowedHosts) == 0 {
+	p.mu.RLock()
+	allowedNets := p.allowedNets
+	allowedHosts := p.allowedHosts
+	p.mu.RUnlock()
+
+	if len(allowedNets) == 0 && len(allowedHosts) == 0 {
 		return true
 	}
-	for _, h := range p.allowedHosts {
+	for _, h := range allowedHosts {
 		if h == host {
 			return true
 		}
@@ -210,7 +254,7 @@ func (p *Proxy) isTargetAllowed(host string) bool {
 		}
 		for _, a := range addrs {
 			if resolved := net.ParseIP(a); resolved != nil {
-				for _, n := range p.allowedNets {
+				for _, n := range allowedNets {
 					if n.Contains(resolved) {
 						return true
 					}
@@ -219,7 +263,7 @@ func (p *Proxy) isTargetAllowed(host string) bool {
 		}
 		return false
 	}
-	for _, n := range p.allowedNets {
+	for _, n := range allowedNets {
 		if n.Contains(ip) {
 			return true
 		}

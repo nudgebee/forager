@@ -111,6 +111,30 @@ func TestParseAndVerify_RejectsBadPacks(t *testing.T) {
 	}
 }
 
+// Packs are text files that pass through git checkouts, editors and HTTP,
+// any of which may rewrite line endings. A CRLF pack must still verify —
+// otherwise a platform difference is indistinguishable from tampering.
+func TestParseAndVerify_ToleratesCRLF(t *testing.T) {
+	pub, priv := testKeys(t)
+	signed := signPack(t, validBody, priv)
+
+	crlf := strings.ReplaceAll(signed, "\n", "\r\n")
+	if _, err := ParseAndVerify([]byte(crlf), pub); err != nil {
+		t.Fatalf("CRLF pack rejected: %v", err)
+	}
+}
+
+// Normalizing line endings must not weaken tamper detection.
+func TestParseAndVerify_CRLFTamperingStillRejected(t *testing.T) {
+	pub, priv := testKeys(t)
+	signed := signPack(t, validBody, priv)
+
+	crlf := strings.ReplaceAll(strings.Replace(signed, "rpm -qa", "rm -rf /", 1), "\n", "\r\n")
+	if _, err := ParseAndVerify([]byte(crlf), pub); err == nil {
+		t.Fatal("tampered CRLF pack was accepted")
+	}
+}
+
 func TestSelect_RunsMatchingCollectors(t *testing.T) {
 	pub, priv := testKeys(t)
 	pack, err := ParseAndVerify([]byte(signPack(t, validBody, priv)), pub)

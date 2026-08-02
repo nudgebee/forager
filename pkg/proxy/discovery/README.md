@@ -63,6 +63,7 @@ and no target list of its own.
 | `allowed_cidrs` | none | Segment scope. Empty means unrestricted. |
 | `pack_public_key` | — | Required; without it no pack can be trusted, so nothing runs. |
 | `pack_dir` | — | Cache directory for packs fetched by version. |
+| `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified and unknown/changed keys are refused. |
 
 Credentials (`username` plus `private_key` or `password`) arrive through
 `pkg/secrets`, local or cloud-push. They never appear in logs or responses.
@@ -79,10 +80,13 @@ a binary whose job is running signed content against production hosts.
 
 ## Known gaps
 
-- **Host keys are not verified.** Discovered hosts have unknown keys on first
-  contact and rotate when re-imaged. Collection is read-only under an
-  unprivileged credential, but pinning keys to the server-side asset record
-  is the right long-term fix.
+- **Host keys are unverified unless `known_hosts_file` is set.** Discovery
+  finds hosts nobody has catalogued, so their keys are unknown on first
+  contact and change when a VM is re-imaged — strict verification by default
+  would break the one thing this module exists to do. Customers who can
+  supply host keys should set `known_hosts_file` and get real verification.
+  Recording keys on the server-side asset record and pinning on later runs is
+  the fix that removes the tradeoff, and belongs with that work.
 - Sweep, LDAP, and hypervisor discovery actions are separate tickets
   (nudgebee/forager#114, #115); this module currently implements inventory only.
 - The production pack, its CI signing, and pin/ring rollout are #116.

@@ -26,6 +26,10 @@ type fakeSSHServer struct {
 	// responses maps a command to its canned stdout.
 	responses map[string]string
 
+	// stderrFor maps a command to stderr written before its stdout, used to
+	// exercise concurrent pipe draining.
+	stderrFor map[string]string
+
 	// delay is applied before answering, to exercise concurrency.
 	delay time.Duration
 
@@ -143,7 +147,6 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			_ = req.Reply(false, nil)
 			continue
 		}
-		cmd := string(req.Payload[4:])
 		_ = req.Reply(true, nil)
 
 		done := s.trackExec()
@@ -152,11 +155,17 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 		}
 		defer done()
 
+		cmd := string(req.Payload[4:])
 		out, known := s.responses[cmd]
 		if !known {
 			_, _ = io.WriteString(ch.Stderr(), "command not found\n")
 			_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(127))
 			return
+		}
+		// stderr first and unread by a sequential client: this is what makes
+		// the deadlock reproducible.
+		if errOut, ok := s.stderrFor[cmd]; ok {
+			_, _ = io.WriteString(ch.Stderr(), errOut)
 		}
 		_, _ = io.WriteString(ch, out)
 		_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(0))
@@ -440,6 +449,42 @@ func TestRunInventory_OutputIsCapped(t *testing.T) {
 
 	if got := len(results[0].Collected["pkgs-dpkg"]); got > 1000 {
 		t.Errorf("collected %d bytes, want <= 1000", got)
+	}
+}
+
+// Reading stdout and stderr in sequence deadlocks when the remote fills one
+// pipe's buffer while we wait on the other. Pipe buffers are typically 64KB,
+// so a collector writing more than that to stderr — `dnf repolist` warnings,
+// for one — used to hang the whole host until its timeout.
+func TestRunCommand_LargeStderrDoesNotDeadlock(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"cat /etc/os-release": ubuntuOSRelease,
+		"dpkg-query -W":       "acl\t2.3.1-1\tamd64\n",
+	})
+	// Enough stderr to exhaust the SSH channel window (~2MB) before any
+	// stdout is written: below that the window absorbs it and nothing blocks.
+	srv.stderrFor = map[string]string{"dpkg-query -W": strings.Repeat("warning: repo unreachable\n", 200_000)}
+
+	cfg := testExecConfig(srv.port(), 2)
+	cfg.hostTimeout = 5 * time.Second
+	cfg.commandTimeout = 3 * time.Second
+
+	done := make(chan []TargetResult, 1)
+	go func() {
+		done <- runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), cfg)
+	}()
+
+	select {
+	case results := <-done:
+		if results[0].Status != StatusOK {
+			t.Fatalf("status = %s (%s), want ok", results[0].Status, results[0].Error)
+		}
+		if !strings.Contains(results[0].Collected["pkgs-dpkg"], "acl") {
+			t.Error("stdout lost while draining a large stderr")
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("inventory deadlocked on a host writing heavily to stderr")
 	}
 }
 

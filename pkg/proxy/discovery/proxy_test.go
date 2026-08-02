@@ -7,8 +7,13 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
+	"golang.org/x/crypto/ssh/knownhosts"
 
 	"nudgebee/forager/pkg/proxy"
 )
@@ -242,6 +247,42 @@ func TestHealthCheck(t *testing.T) {
 	})
 	if err := ready.HealthCheck(context.Background()); err != nil {
 		t.Errorf("configured proxy reported unhealthy: %v", err)
+	}
+}
+
+// Customers who can supply host keys get real verification; a bad path must
+// fail configuration loudly rather than silently falling back to accepting
+// any key.
+func TestConfigure_KnownHostsFile(t *testing.T) {
+	dir := t.TempDir()
+	khPath := filepath.Join(dir, "known_hosts")
+
+	pub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("generating host key: %v", err)
+	}
+	sshPub, err := ssh.NewPublicKey(pub)
+	if err != nil {
+		t.Fatalf("converting key: %v", err)
+	}
+	line := knownhosts.Line([]string{"10.0.1.15:22"}, sshPub)
+	if err := os.WriteFile(khPath, []byte(line+"\n"), 0o600); err != nil {
+		t.Fatalf("writing known_hosts: %v", err)
+	}
+
+	p := New(slog.New(slog.DiscardHandler))
+	if err := p.Configure(map[string]any{"known_hosts_file": khPath}, map[string]string{
+		"username": "nudgebee-ro", "password": "x",
+	}); err != nil {
+		t.Fatalf("configuring with known_hosts: %v", err)
+	}
+
+	missing := New(slog.New(slog.DiscardHandler))
+	err = missing.Configure(map[string]any{"known_hosts_file": filepath.Join(dir, "nope")}, map[string]string{
+		"username": "nudgebee-ro", "password": "x",
+	})
+	if err == nil {
+		t.Fatal("configure accepted an unreadable known_hosts_file instead of failing")
 	}
 }
 

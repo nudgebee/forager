@@ -2,6 +2,7 @@ package discovery
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -206,11 +207,29 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 		return "", "", fmt.Errorf("start: %w", err)
 	}
 
+	// stdout and stderr must be drained concurrently. Reading them in
+	// sequence deadlocks whenever the remote fills one pipe's buffer while we
+	// are still blocked on the other — `dnf repolist` writing warnings to
+	// stderr ahead of its stdout is enough to trigger it.
 	type readResult struct{ stdout, stderr []byte }
 	readCh := make(chan readResult, 1)
 	go func() {
-		out, _ := io.ReadAll(io.LimitReader(stdoutPipe, int64(cfg.maxOutputBytes)))
-		errOut, _ := io.ReadAll(io.LimitReader(stderrPipe, int64(cfg.maxOutputBytes)))
+		var out, errOut []byte
+		var readWG sync.WaitGroup
+		readWG.Add(2)
+		go func() {
+			defer readWG.Done()
+			out, _ = io.ReadAll(io.LimitReader(stdoutPipe, int64(cfg.maxOutputBytes)))
+			// Discard the remainder so a host exceeding the cap cannot block
+			// on a full pipe and hold the session open until timeout.
+			_, _ = io.Copy(io.Discard, stdoutPipe)
+		}()
+		go func() {
+			defer readWG.Done()
+			errOut, _ = io.ReadAll(io.LimitReader(stderrPipe, int64(cfg.maxOutputBytes)))
+			_, _ = io.Copy(io.Discard, stderrPipe)
+		}()
+		readWG.Wait()
 		readCh <- readResult{out, errOut}
 	}()
 
@@ -227,9 +246,10 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 
 	select {
 	case waitErr := <-waitCh:
-		// Non-zero exit is reported through output, not as a Go error.
+		// Non-zero exit is reported through output, not as a Go error:
+		// `dnf needs-restarting -r` answers through its exit code.
 		var exitErr *ssh.ExitError
-		if waitErr != nil && !asExitError(waitErr, &exitErr) {
+		if waitErr != nil && !errors.As(waitErr, &exitErr) {
 			return "", "", fmt.Errorf("wait: %w", waitErr)
 		}
 	case <-cmdCtx.Done():
@@ -238,12 +258,4 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 	}
 
 	return string(read.stdout), string(read.stderr), nil
-}
-
-func asExitError(err error, target **ssh.ExitError) bool {
-	e, ok := err.(*ssh.ExitError)
-	if ok {
-		*target = e
-	}
-	return ok
 }

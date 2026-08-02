@@ -80,8 +80,15 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 // separated from its signature in transit or on disk. Trailing whitespace is
 // normalized so that appending the signature line — which necessarily changes
 // the document's tail — does not invalidate the signature.
+// Line endings are normalized to \n first: packs are text files that travel
+// through git checkouts, editors and HTTP, any of which may rewrite CRLF.
+// Without this, a pack signed on one platform fails verification on another
+// for a reason that looks identical to tampering.
 func SignedBytes(raw []byte) []byte {
-	lines := strings.Split(string(raw), "\n")
+	normalized := strings.ReplaceAll(string(raw), "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+
+	lines := strings.Split(normalized, "\n")
 	kept := make([]string, 0, len(lines))
 	for _, line := range lines {
 		if strings.HasPrefix(line, "signature:") {
@@ -89,7 +96,7 @@ func SignedBytes(raw []byte) []byte {
 		}
 		kept = append(kept, line)
 	}
-	return []byte(strings.TrimRight(strings.Join(kept, "\n"), " \t\r\n"))
+	return []byte(strings.TrimRight(strings.Join(kept, "\n"), " \t\n"))
 }
 
 func (p *Pack) validate() error {
