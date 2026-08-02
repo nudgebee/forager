@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"net/netip"
 	"os"
 	"path/filepath"
 	"sync"
@@ -49,6 +50,13 @@ type Config struct {
 	// PackDir caches verified packs on disk, keyed by version.
 	PackDir string `json:"pack_dir"`
 
+	// MaxRatePPS caps sweep probe rate regardless of what a request asks for.
+	MaxRatePPS int `json:"max_rate_pps"`
+
+	// LDAP configures the directory this datasource can query. Empty host
+	// means this datasource does not serve discovery_ldap.
+	LDAP ldapConfig `json:"ldap"`
+
 	// KnownHostsFile enables SSH host key verification against an OpenSSH
 	// known_hosts file. When set, a host whose key is absent or changed is
 	// refused. Discovery finds hosts whose keys we have not seen before, so
@@ -69,6 +77,9 @@ type Proxy struct {
 	packPubKey   ed25519.PublicKey
 	allowedNets  []*net.IPNet
 	allowedHosts []string
+
+	ldapCfg        ldapConfig
+	ldapConfigured bool
 
 	packs map[int]*Pack // version → verified pack
 }
@@ -115,6 +126,14 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if err := p.parseAllowedCIDRs(cfg.AllowedCIDRs); err != nil {
 		return fmt.Errorf("discovery: parsing allowed_cidrs: %w", err)
 	}
+
+	// Directory credentials arrive alongside SSH ones; the bind DN and
+	// password are kept off the Config struct so they cannot be serialized
+	// back out with the rest of the configuration.
+	p.ldapCfg = cfg.LDAP
+	p.ldapCfg.BindDN = creds["ldap_bind_dn"]
+	p.ldapCfg.BindPass = creds["ldap_bind_password"]
+	p.ldapConfigured = cfg.LDAP.Host != ""
 
 	packKey := cfg.PackPublicKey
 	if packKey == "" {
@@ -184,6 +203,9 @@ func applyConfigDefaults(cfg *Config) {
 	}
 	if cfg.MaxOutputBytes <= 0 {
 		cfg.MaxOutputBytes = defaultMaxOutputBytes
+	}
+	if cfg.MaxRatePPS <= 0 || cfg.MaxRatePPS > maxRatePPS {
+		cfg.MaxRatePPS = maxRatePPS
 	}
 }
 
@@ -275,9 +297,119 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 	switch req.Action {
 	case "discovery_inventory":
 		return p.handleInventory(ctx, req)
+	case "discovery_sweep":
+		return p.handleSweep(ctx, req)
+	case "discovery_ldap":
+		return p.handleLDAP(ctx, req)
 	default:
 		return nil, fmt.Errorf("unknown discovery action: %s", req.Action)
 	}
+}
+
+// handleSweep finds hosts that are up. It never authenticates and never
+// collects package data — a sweep answers "what is here", and
+// discovery_inventory answers "what is on it".
+func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
+	p.mu.RLock()
+	maxRate := p.cfg.MaxRatePPS
+	configuredCIDRs := p.allowedNets
+	p.mu.RUnlock()
+
+	cfg, err := parseSweepParams(req.Params, maxRate)
+	if err != nil {
+		return nil, fmt.Errorf("discovery_sweep: %w", err)
+	}
+
+	// Sweeping is the most intrusive thing this module does, so scope is
+	// enforced twice: the server picks the CIDRs, and the forager refuses any
+	// that fall outside what its datasource was configured for. A compromised
+	// or buggy server cannot turn a segment collector into a general scanner.
+	if len(configuredCIDRs) > 0 {
+		for _, requested := range cfg.cidrs {
+			if !prefixWithinAny(requested, configuredCIDRs) {
+				return nil, fmt.Errorf("discovery_sweep: %s is outside this datasource's allowed_cidrs", requested)
+			}
+		}
+	}
+
+	result, err := runSweep(ctx, cfg)
+	if err != nil {
+		return nil, fmt.Errorf("discovery_sweep: %w", err)
+	}
+
+	p.logger.Info("discovery sweep complete",
+		"cidrs", result.CIDRs,
+		"scanned", result.Scanned,
+		"excluded", result.Excluded,
+		"found", len(result.Hosts),
+		"rate_pps", result.RatePPS,
+		"duration", time.Duration(result.DurationS*float64(time.Second)).Round(time.Millisecond),
+	)
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("discovery_sweep: marshalling results: %w", err)
+	}
+	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
+}
+
+// handleLDAP lists computer objects from the configured directory.
+func (p *Proxy) handleLDAP(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
+	p.mu.RLock()
+	cfg := p.ldapCfg
+	configured := p.ldapConfigured
+	p.mu.RUnlock()
+
+	if !configured {
+		return nil, fmt.Errorf("discovery_ldap: no directory configured on this datasource")
+	}
+
+	if baseDN, ok := req.Params["base_dn"].(string); ok && baseDN != "" {
+		cfg.BaseDN = baseDN
+	}
+	if cfg.BaseDN == "" {
+		return nil, fmt.Errorf("discovery_ldap: base_dn is required")
+	}
+
+	activeWithin := defaultActiveWithinD
+	if v, ok := intParam(req.Params, "active_within_days"); ok && v > 0 {
+		activeWithin = v
+	}
+
+	result, err := runLDAPDiscovery(ctx, cfg, activeWithin)
+	if err != nil {
+		return nil, fmt.Errorf("discovery_ldap: %w", err)
+	}
+
+	p.logger.Info("discovery ldap complete",
+		"base_dn", result.BaseDN,
+		"returned", result.Returned,
+		"skipped_stale", result.SkippedStale,
+		"duration", time.Duration(result.DurationS*float64(time.Second)).Round(time.Millisecond),
+	)
+
+	data, err := json.Marshal(result)
+	if err != nil {
+		return nil, fmt.Errorf("discovery_ldap: marshalling results: %w", err)
+	}
+	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
+}
+
+// prefixWithinAny reports whether requested is contained by one of the
+// configured prefixes.
+func prefixWithinAny(requested netip.Prefix, configured []*net.IPNet) bool {
+	for _, allowed := range configured {
+		ones, _ := allowed.Mask.Size()
+		allowedAddr, ok := netip.AddrFromSlice(allowed.IP.To4())
+		if !ok {
+			continue
+		}
+		allowedPrefix := netip.PrefixFrom(allowedAddr, ones)
+		if allowedPrefix.Contains(requested.Addr()) && requested.Bits() >= allowedPrefix.Bits() {
+			return true
+		}
+	}
+	return false
 }
 
 // InventoryResponse is what the server receives. content_pack_version travels
