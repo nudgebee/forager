@@ -203,7 +203,17 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 		return "", "", fmt.Errorf("stderr pipe: %w", err)
 	}
 
-	if err := session.Start(cmd); err != nil {
+	// Commands originate from a content pack whose Ed25519 signature was
+	// verified before this point: handleInventory -> resolvePack ->
+	// verifyPack -> ParseAndVerify, which refuses both an unsigned pack and
+	// any pack when no public key is configured. Executing pack commands is
+	// the module's purpose, and the signature is the control that makes it
+	// safe — an attacker able to inject an ActionRequest still cannot run
+	// anything without the pack signing key.
+	//
+	// Static analysis flags request data reaching an exec sink because it
+	// cannot model signature verification as a sanitizer.
+	if err := session.Start(cmd); err != nil { // codeql[go/command-injection]
 		return "", "", fmt.Errorf("start: %w", err)
 	}
 

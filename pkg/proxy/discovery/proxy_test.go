@@ -186,6 +186,49 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 	}
 }
 
+// The security of this module rests on one invariant: no command reaches a
+// host unless it came from a pack whose signature verified. This test pins
+// that invariant against future refactors — the paths into execution are
+// handleInventory -> resolvePack -> verifyPack, and every one of them must
+// refuse rather than degrade.
+func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
+	_, priv := packPubKeyB64(t)
+	otherPubB64, _ := packPubKeyB64(t)
+
+	cases := []struct {
+		name string
+		cfg  map[string]any
+		pack string
+	}{
+		{"no key configured", map[string]any{}, signPack(t, validBody, priv)},
+		{"unsigned pack", map[string]any{"pack_public_key": otherPubB64}, validBody},
+		{"signed by another key", map[string]any{"pack_public_key": otherPubB64}, signPack(t, validBody, priv)},
+		{"version with no cache or pack_dir", map[string]any{"pack_public_key": otherPubB64}, ""},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			p, _ := newTestProxy(t, tc.cfg, map[string]string{
+				"username": "nudgebee-ro", "password": "x",
+			})
+
+			params := map[string]any{"targets": []any{"10.0.1.5"}}
+			if tc.pack != "" {
+				params["content_pack"] = tc.pack
+			} else {
+				params["content_pack_version"] = 3
+			}
+
+			if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+				Action: "discovery_inventory",
+				Params: params,
+			}); err == nil {
+				t.Fatalf("commands would have executed without a verified pack: %s", tc.name)
+			}
+		})
+	}
+}
+
 func TestHandleInventory_ValidatesParams(t *testing.T) {
 	pubB64, _ := packPubKeyB64(t)
 	p, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64}, map[string]string{
