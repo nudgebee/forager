@@ -19,12 +19,12 @@ func FuzzParsePublicKey(f *testing.F) {
 	f.Add("")
 
 	f.Fuzz(func(t *testing.T, s string) {
-		key, err := parsePublicKey(s)
+		key, err := ParsePublicKey(s)
 		if err != nil {
 			return
 		}
 		if len(key) != ed25519.PublicKeySize {
-			t.Fatalf("parsePublicKey accepted a %d-byte key, want %d", len(key), ed25519.PublicKeySize)
+			t.Fatalf("ParsePublicKey accepted a %d-byte key, want %d", len(key), ed25519.PublicKeySize)
 		}
 	})
 }

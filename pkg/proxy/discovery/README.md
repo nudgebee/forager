@@ -1,0 +1,88 @@
+# discovery proxy
+
+Collects OS and package inventory from VMs in the forager's network segment
+over SSH. Nothing is installed on the target hosts: their "agent" is the sshd
+and package manager the OS already ships.
+
+Part of Phase 0 VM discovery — see `docs/design/vm-discovery-phase0.md`.
+
+## Why the commands live outside the binary
+
+The forager carries no per-distro logic. Collection commands ship as a
+versioned, Ed25519-signed **content pack**; the binary verifies the signature,
+evaluates each collector's `when` guard against facts probed from the host,
+and runs the surviving commands verbatim. Adding a distro or fixing a command
+is a new pack version, not an agent release — which is the whole point, since
+fleet-wide agent upgrades are exactly what customers refuse to sign up for.
+
+Output is returned raw. Parsing happens server-side, so a parser bug is fixed
+by deploying the server, never by touching hosts.
+
+## Action
+
+`discovery_inventory`
+
+| Param | Type | Notes |
+|---|---|---|
+| `targets` | `[]string` | Hosts to inventory. Must fall within `allowed_cidrs`. |
+| `content_pack` | `string` | Inline signed pack. Request-scoped; never cached. |
+| `content_pack_version` | `int` | Alternative to inline: loads and caches from `pack_dir`. |
+| `concurrency` | `int` | Optional per-request override, clamped to the module max. |
+
+Response:
+
+```json
+{"content_pack_version": 3,
+ "targets": [
+   {"host": "10.0.1.15", "status": "ok",
+    "facts": {"os_family": "debian", "os_major": "22", "arch": "x86_64"},
+    "collectors": {"pkgs-dpkg": "acl\t2.3.1-1\tamd64\n..."},
+    "duration_seconds": 1.4},
+   {"host": "10.0.1.16", "status": "ssh-auth-failed", "error": "..."}
+ ]}
+```
+
+Per-target statuses (`ok`, `ssh-refused`, `ssh-auth-failed`, `timeout`,
+`error`) map onto the server's coverage states and gap reasons. **One host
+failing never fails the batch** — "which hosts could we not reach, and why"
+is the product question Phase 0 answers, so failures are data, not errors.
+
+## Configuration
+
+Pushed from the server alongside credentials; the forager holds no schedule
+and no target list of its own.
+
+| Key | Default | Notes |
+|---|---|---|
+| `port` | 22 | |
+| `concurrency` | 25 | Clamped to 200. |
+| `host_timeout_seconds` | 120 | Whole-host budget. |
+| `command_timeout_seconds` | 60 | Per collector. |
+| `dial_timeout_seconds` | 10 | |
+| `max_output_bytes` | 4 MiB | Per command, stdout and stderr each. |
+| `allowed_cidrs` | none | Segment scope. Empty means unrestricted. |
+| `pack_public_key` | — | Required; without it no pack can be trusted, so nothing runs. |
+| `pack_dir` | — | Cache directory for packs fetched by version. |
+
+Credentials (`username` plus `private_key` or `password`) arrive through
+`pkg/secrets`, local or cloud-push. They never appear in logs or responses.
+
+## Pack format
+
+See `docs/content-packs/linux-inventory-example.yaml` for a documented
+example. Guard facts are `os_family`, `os_id`, `os_major`, `arch`; guards
+support `==`/`!=` against a quoted literal, joined by `&&`/`||`.
+
+The guard language is deliberately minimal and must stay that way. It is not
+an expression evaluator: anything richer becomes a sandbox-escape surface in
+a binary whose job is running signed content against production hosts.
+
+## Known gaps
+
+- **Host keys are not verified.** Discovered hosts have unknown keys on first
+  contact and rotate when re-imaged. Collection is read-only under an
+  unprivileged credential, but pinning keys to the server-side asset record
+  is the right long-term fix.
+- Sweep, LDAP, and hypervisor discovery actions are separate tickets
+  (nudgebee/forager#114, #115); this module currently implements inventory only.
+- The production pack, its CI signing, and pin/ring rollout are #116.
