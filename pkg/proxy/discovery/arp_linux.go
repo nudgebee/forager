@@ -23,9 +23,10 @@ func readARPTable() map[string]string {
 
 	table := make(map[string]string)
 	scanner := bufio.NewScanner(f)
-	if scanner.Scan() {
-		// header: IP address  HW type  Flags  HW address  Mask  Device
-	}
+
+	// Discard the header: "IP address  HW type  Flags  HW address  Mask  Device"
+	scanner.Scan()
+
 	for scanner.Scan() {
 		fields := strings.Fields(scanner.Text())
 		if len(fields) < 4 {
