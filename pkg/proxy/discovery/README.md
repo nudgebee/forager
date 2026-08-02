@@ -25,9 +25,14 @@ by deploying the server, never by touching hosts.
 | Param | Type | Notes |
 |---|---|---|
 | `targets` | `[]string` | Hosts to inventory. Must fall within `allowed_cidrs`. |
-| `content_pack` | `string` | Inline signed pack. Request-scoped; never cached. |
-| `content_pack_version` | `int` | Alternative to inline: loads and caches from `pack_dir`. |
+| `content_pack_version` | `int` | Which pack to run. Loaded from `pack_dir`, verified, then cached. |
 | `concurrency` | `int` | Optional per-request override, clamped to the module max. |
+
+A request **selects** a pack by version; it cannot carry one. Pack bodies
+reach `pack_dir` through the distribution pipeline, never through an action —
+so no part of an action payload is ever executed. A pack whose declared
+version differs from the one requested is refused, since mislabelled results
+would corrupt server-side correlation.
 
 Response:
 
@@ -62,7 +67,7 @@ and no target list of its own.
 | `max_output_bytes` | 4 MiB | Per command, stdout and stderr each. |
 | `allowed_cidrs` | none | Segment scope. Empty means unrestricted. |
 | `pack_public_key` | — | Required; without it no pack can be trusted, so nothing runs. |
-| `pack_dir` | — | Cache directory for packs fetched by version. |
+| `pack_dir` | — | Directory holding signed packs, named `linux-inventory-v<N>.yaml`. Required to run inventory. |
 | `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified and unknown/changed keys are refused. |
 
 Credentials (`username` plus `private_key` or `password`) arrive through

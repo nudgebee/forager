@@ -4,7 +4,9 @@
 # pack. The real linux-inventory pack, its full OS matrix, CI signing, and the
 # pin/ring rollout pipeline are P6 (nudgebee/forager#116).
 #
-# The forager verifies `signature` against its configured pack public key,
+# Packs live in the forager's configured pack_dir as linux-inventory-v<N>.yaml
+# and are selected by version in the action request; a request can never carry
+# a pack body. The forager verifies `signature` against its configured key,
 # evaluates each collector's `when` guard against facts probed from the host,
 # and runs the surviving commands verbatim. It parses none of the output:
 # parsers live server-side so a parser fix never requires an agent release.

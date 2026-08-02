@@ -367,21 +367,21 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
 }
 
-// resolvePack returns a verified pack: either inline in the request, or a
-// cached one by version. Packs are verified once at load; only verified packs
-// enter the cache.
+// resolvePack returns a verified pack for the requested version.
+//
+// A request selects a pack by version; it cannot carry the pack itself.
+// Accepting pack bodies inline would put executable content on the request
+// path, and while the signature check would still gate execution, keeping
+// commands sourced from locally cached, already-verified files removes that
+// exposure entirely. Packs reach pack_dir through the distribution pipeline,
+// not through actions.
 func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
-	// An inline pack is used for this request only and never enters the
-	// version cache: two validly signed packs could declare the same version,
-	// and a request-scoped one must not shadow the published pack for later
-	// version-only requests.
-	if raw, ok := params["content_pack"].(string); ok && raw != "" {
-		return p.verifyPack([]byte(raw))
-	}
-
 	version, ok := intParam(params, "content_pack_version")
 	if !ok {
-		return nil, fmt.Errorf("content_pack or content_pack_version is required")
+		return nil, fmt.Errorf("content_pack_version is required")
+	}
+	if version <= 0 {
+		return nil, fmt.Errorf("content_pack_version must be positive, got %d", version)
 	}
 
 	p.mu.RLock()

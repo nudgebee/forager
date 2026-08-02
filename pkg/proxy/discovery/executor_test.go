@@ -434,6 +434,43 @@ func TestRunInventory_HostTimeout(t *testing.T) {
 	}
 }
 
+// Exceeding the cap must return truncated output promptly. Stopping at the
+// limit without draining leaves the remote blocked on a full channel window,
+// so the command never exits and the collector fails on timeout instead of
+// returning the data we already have.
+func TestRunInventory_OverCapOutputTruncatesWithoutStalling(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"cat /etc/os-release": ubuntuOSRelease,
+		// Well past the SSH channel window, so an undrained pipe would block.
+		"dpkg-query -W": strings.Repeat("pkg\t1.0-1\tamd64\n", 300_000),
+	})
+
+	cfg := testExecConfig(srv.port(), 2)
+	cfg.maxOutputBytes = 4096
+	cfg.commandTimeout = 3 * time.Second
+	cfg.hostTimeout = 6 * time.Second
+
+	start := time.Now()
+	results := runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), cfg)
+	elapsed := time.Since(start)
+
+	r := results[0]
+	if r.Status != StatusOK {
+		t.Fatalf("status = %s (%s), want ok", r.Status, r.Error)
+	}
+	got := r.Collected["pkgs-dpkg"]
+	if got == "" {
+		t.Fatal("over-cap collector returned nothing; it stalled instead of truncating")
+	}
+	if len(got) > cfg.maxOutputBytes {
+		t.Errorf("collected %d bytes, want <= %d", len(got), cfg.maxOutputBytes)
+	}
+	if elapsed >= cfg.commandTimeout {
+		t.Errorf("took %s — hit the command timeout rather than truncating", elapsed)
+	}
+}
+
 func TestRunInventory_OutputIsCapped(t *testing.T) {
 	huge := strings.Repeat("x", 100_000)
 	srv := newFakeSSHServer(t, map[string]string{
