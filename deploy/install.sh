@@ -80,17 +80,38 @@ download_binary() {
     fi
     log "Downloading forager from ${url}..."
 
+    # Download into a private directory rather than a fixed /tmp path.
+    #
+    # Writing to /tmp/<name> fails when a file of that name already exists
+    # owned by another user: fs.protected_regular=1 (the default on modern
+    # distros) stops even root opening it for writing inside a world-writable
+    # sticky directory. curl surfaces that as a bare "error 23" with no
+    # indication of the cause, and a leftover file from a previous manual
+    # install is enough to trigger it.
+    local tmpdir
+    tmpdir="$(mktemp -d)" || { err "Could not create a temporary directory"; exit 1; }
+    trap 'rm -rf "${tmpdir}"' EXIT
+
+    local tmpbin="${tmpdir}/${BINARY_NAME}"
+
     if command -v curl &>/dev/null; then
-        curl -fsSL -o "/tmp/${BINARY_NAME}" "$url"
+        curl -fsSL -o "$tmpbin" "$url"
     elif command -v wget &>/dev/null; then
-        wget -q -O "/tmp/${BINARY_NAME}" "$url"
+        wget -q -O "$tmpbin" "$url"
     else
         err "Neither curl nor wget found. Install one and retry."
         exit 1
     fi
 
-    chmod +x "/tmp/${BINARY_NAME}"
-    mv "/tmp/${BINARY_NAME}" "${INSTALL_DIR}/${BINARY_NAME}"
+    # A truncated or error-page download would otherwise be installed and
+    # only fail later, when the service refuses to start.
+    if [ ! -s "$tmpbin" ]; then
+        err "Downloaded file is empty — check ${url}"
+        exit 1
+    fi
+
+    chmod +x "$tmpbin"
+    mv "$tmpbin" "${INSTALL_DIR}/${BINARY_NAME}"
     log "Installed binary to ${INSTALL_DIR}/${BINARY_NAME}"
 }
 

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"nudgebee/forager/pkg/config"
@@ -218,6 +221,12 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		logger.Info("credentials resolved from secret provider", "name", ds.Name, "source", credSource)
 	}
 
+	creds, err := resolveKeyFiles(creds)
+	if err != nil {
+		logger.Error("failed to read credential file", "name", ds.Name, "err", err)
+		return
+	}
+
 	if err := p.Configure(cfg, creds); err != nil {
 		logger.Error("failed to configure datasource", "name", ds.Name, "err", err)
 		return
@@ -289,4 +298,57 @@ func setIfPositive(m map[string]any, key string, value int) {
 	if value > 0 {
 		m[key] = value
 	}
+}
+
+// resolveKeyFiles expands `*_file` credential entries by reading the named
+// file into the corresponding credential.
+//
+// Proxies take key material, not paths, so without this a private key has to
+// be inlined into the config — which puts it in values files and anywhere
+// they are copied. A path lets Kubernetes mount a Secret and the agent read
+// it, leaving the key out of configuration entirely.
+//
+// The map is copied rather than mutated: it comes from parsed config that
+// may be shared, and quietly rewriting a caller's map is a poor trade for
+// saving an allocation.
+func resolveKeyFiles(creds map[string]string) (map[string]string, error) {
+	const suffix = "_file"
+
+	var toResolve []string
+	for k := range creds {
+		if strings.HasSuffix(k, suffix) && creds[k] != "" {
+			toResolve = append(toResolve, k)
+		}
+	}
+	if len(toResolve) == 0 {
+		return creds, nil
+	}
+
+	out := make(map[string]string, len(creds))
+	for k, v := range creds {
+		out[k] = v
+	}
+
+	for _, fileKey := range toResolve {
+		target := strings.TrimSuffix(fileKey, suffix)
+
+		// An explicit inline value wins: silently overwriting it with file
+		// contents would make the effective credential depend on map
+		// iteration order.
+		if out[target] != "" {
+			return nil, fmt.Errorf("both %s and %s are set; provide one", target, fileKey)
+		}
+
+		data, err := os.ReadFile(out[fileKey])
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", fileKey, err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil, fmt.Errorf("%s is empty: %s", fileKey, out[fileKey])
+		}
+
+		out[target] = string(data)
+		delete(out, fileKey)
+	}
+	return out, nil
 }
