@@ -1,0 +1,102 @@
+# values-discovery.yaml.example
+#
+# A forager acting as a VM discovery node for one network segment. Nothing is
+# installed on the VMs it discovers — it sweeps the segment, optionally asks a
+# directory what it knows about, and collects package inventory over SSH.
+#
+#   helm install forager-discovery oci://ghcr.io/nudgebee/charts/forager \
+#     -f values-discovery.yaml \
+#     --set forager.accessKey=... --set forager.accessSecret=...
+#
+# Run this as its own release rather than adding a discovery datasource to a
+# forager that already serves databases: different credentials, different blast
+# radius, and a sweep misconfiguration should not be able to disturb something
+# that works.
+
+forager:
+  relayURL: wss://relay.nudgebee.com/register
+  signingPublicKey: ''
+
+  datasources:
+    - type: discovery
+      name: segment-a
+
+      # Scope: every CIDR this node may ever touch, for sweeping and for
+      # inventory. A request naming anything outside this is refused, so one
+      # bad request cannot turn a segment collector into a general scanner.
+      # Bare addresses are allowed and mean a single host.
+      allowed_hosts:
+        - 10.0.1.0/24
+
+      discovery:
+        # Verifies content packs. Without it discovery_inventory refuses to
+        # run — an unverified pack is indistinguishable from a hostile one.
+        pack_public_key: ''
+
+        # Directory holding signed packs as linux-inventory-v<N>.yaml. Mount
+        # it read-only via extraVolumes below.
+        pack_dir: /etc/nudgebee/packs
+
+        # Optional: verify SSH host keys against a known_hosts file. Off by
+        # default because discovery finds hosts whose keys we have not seen
+        # and which change when a VM is re-imaged. Set it if you can supply
+        # host keys — the residual risk otherwise is a spoofed host feeding
+        # us false inventory.
+        # known_hosts_file: /etc/nudgebee/known_hosts
+
+        # Ceiling on sweep probe rate, whatever a request asks for. The
+        # default of 1000 is a safety limit, not a target; the per-request
+        # default is 100. Lower it for fragile or monitored networks.
+        max_rate_pps: 100
+
+        # Concurrent SSH sessions during inventory.
+        concurrency: 25
+
+        # Optional: Active Directory, which knows machines exist even when
+        # they are switched off or firewalled — something a sweep can never
+        # see. Bind credentials go in the credentials block below, not here.
+        # ldap:
+        #   host: dc.corp.local
+        #   base_dn: dc=corp,dc=local
+        #   start_tls: true
+
+      credential_source: local
+      credentials:
+        # Read-only SSH user that exists on the target VMs. Omit these
+        # entirely for a sweep-only node — sweeping needs no credentials, and
+        # inventing unused ones only invites their reuse later.
+        username: nudgebee-ro
+        private_key: |
+          -----BEGIN OPENSSH PRIVATE KEY-----
+          ...
+          -----END OPENSSH PRIVATE KEY-----
+        # ldap_bind_dn: CN=svc-nudgebee,OU=Service Accounts,DC=corp,DC=local
+        # ldap_bind_password: ''
+
+# Mount the signed content pack. Until the publish pipeline exists (#116),
+# create this from a hand-signed pack:
+#   kubectl create configmap forager-packs \
+#     --from-file=linux-inventory-v1.yaml=./linux-inventory-v1.yaml
+extraVolumes:
+  - name: packs
+    configMap:
+      name: forager-packs
+
+extraVolumeMounts:
+  - name: packs
+    mountPath: /etc/nudgebee/packs
+    readOnly: true
+
+# Sweeping needs no elevated privileges: MACs come from reading the kernel
+# neighbour cache after probing, not from sending ARP frames, so no
+# CAP_NET_RAW and no host networking.
+securityContext:
+  allowPrivilegeEscalation: false
+  runAsNonRoot: true
+  capabilities:
+    drop: ['ALL']
+
+# Before pointing this at a customer network, allowlist the pod's egress IP in
+# their IDS. An unannounced sweep looks exactly like an attacker, and a bare
+# TCP connect still makes sshd log "Did not receive identification string",
+# which some fail2ban configurations act on.
