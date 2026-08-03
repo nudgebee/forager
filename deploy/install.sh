@@ -90,7 +90,11 @@ download_binary() {
     # install is enough to trigger it.
     local tmpdir
     tmpdir="$(mktemp -d)" || { err "Could not create a temporary directory"; exit 1; }
-    trap 'rm -rf "${tmpdir}"' EXIT
+    # Double-quoted so ${tmpdir} expands now. Single quotes defer expansion
+    # to when the trap fires, by which point this function has returned and
+    # its local is out of scope — the trap would run `rm -rf ""` and leave
+    # the directory behind on every successful install.
+    trap "rm -rf \"${tmpdir}\"" EXIT
 
     local tmpbin="${tmpdir}/${BINARY_NAME}"
 

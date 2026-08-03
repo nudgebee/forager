@@ -347,7 +347,16 @@ func resolveKeyFiles(creds map[string]string) (map[string]string, error) {
 			return nil, fmt.Errorf("%s is empty: %s", fileKey, out[fileKey])
 		}
 
-		out[target] = string(data)
+		// Strip trailing newlines only.
+		//
+		// `echo secret > file` and most editors append one, and passing it
+		// through would fail authentication for a reason that looks nothing
+		// like a stray byte. Trimming all whitespace would be worse: a
+		// password may legitimately begin or end with a space, and silently
+		// altering it swaps one baffling auth failure for another. Newlines
+		// are the case that actually bites, and the only one where the
+		// intent is unambiguous.
+		out[target] = string(bytes.TrimRight(data, "\r\n"))
 		delete(out, fileKey)
 	}
 	return out, nil

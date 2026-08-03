@@ -16,6 +16,9 @@ func TestResolveKeyFiles(t *testing.T) {
 	if err := os.WriteFile(keyPath, []byte(keyMaterial), 0o600); err != nil {
 		t.Fatalf("writing key: %v", err)
 	}
+	// The trailing newline is stripped; a real OpenSSH key still parses
+	// without it (verified against ssh.ParsePrivateKey).
+	wantKey := strings.TrimRight(keyMaterial, "\n")
 
 	got, err := resolveKeyFiles(map[string]string{
 		"username":         "nudgebee-ro",
@@ -25,8 +28,8 @@ func TestResolveKeyFiles(t *testing.T) {
 		t.Fatalf("resolving: %v", err)
 	}
 
-	if got["private_key"] != keyMaterial {
-		t.Errorf("private_key = %q, want the file contents", got["private_key"])
+	if got["private_key"] != wantKey {
+		t.Errorf("private_key = %q, want %q", got["private_key"], wantKey)
 	}
 	if _, present := got["private_key_file"]; present {
 		t.Error("private_key_file survived resolution; proxies would see an unknown credential")
@@ -93,6 +96,46 @@ func TestResolveKeyFiles_Errors(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if _, err := resolveKeyFiles(map[string]string{"private_key_file": path}); err == nil {
 				t.Fatalf("accepted %s", name)
+			}
+		})
+	}
+}
+
+// `echo secret > file` and most editors append a newline; passing it through
+// fails authentication for a reason that looks nothing like a stray byte.
+// But whitespace a user actually typed is not ours to remove.
+func TestResolveKeyFiles_TrimsTrailingNewlinesOnly(t *testing.T) {
+	dir := t.TempDir()
+
+	cases := []struct {
+		name     string
+		contents string
+		want     string
+	}{
+		{"trailing LF", "s3cret\n", "s3cret"},
+		{"trailing CRLF", "s3cret\r\n", "s3cret"},
+		{"several trailing newlines", "s3cret\n\n\n", "s3cret"},
+		{"no trailing newline", "s3cret", "s3cret"},
+		// A password may legitimately begin or end with a space; trimming it
+		// swaps one baffling auth failure for another.
+		{"significant trailing space", "s3cret \n", "s3cret "},
+		{"significant leading space", " s3cret\n", " s3cret"},
+		// Key material is multi-line and its internal newlines must survive.
+		{"multi-line key", "-----BEGIN-----\nabc\ndef\n-----END-----\n", "-----BEGIN-----\nabc\ndef\n-----END-----"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := filepath.Join(dir, strings.ReplaceAll(tc.name, " ", "_"))
+			if err := os.WriteFile(path, []byte(tc.contents), 0o600); err != nil {
+				t.Fatalf("writing: %v", err)
+			}
+			got, err := resolveKeyFiles(map[string]string{"password_file": path})
+			if err != nil {
+				t.Fatalf("resolving: %v", err)
+			}
+			if got["password"] != tc.want {
+				t.Errorf("password = %q, want %q", got["password"], tc.want)
 			}
 		})
 	}
