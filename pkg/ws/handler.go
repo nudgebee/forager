@@ -52,6 +52,19 @@ var signedActions = map[string]bool{
 
 	// Config test — creates temporary proxy to test connectivity
 	"test_datasource_config": true,
+
+	// Discovery — inventory executes commands on remote hosts over SSH, the
+	// same capability as ssh_command above. The commands themselves come
+	// from a signature-verified content pack, but the targets do not: an
+	// unsigned action lets a caller choose which hosts we connect to.
+	//
+	// Sweep sends probes across a network segment. Its scope is bounded by
+	// allowed_cidrs, but triggering one is not harmless — an unexpected scan
+	// reads as an attack originating from our agent, and some IDS and
+	// fail2ban configurations act on it.
+	"discovery_sweep":     true,
+	"discovery_ldap":      true,
+	"discovery_inventory": true,
 }
 
 // Handler dispatches incoming relay messages to the appropriate proxy module.
