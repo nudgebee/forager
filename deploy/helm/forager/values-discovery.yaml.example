@@ -66,10 +66,15 @@ forager:
         # entirely for a sweep-only node — sweeping needs no credentials, and
         # inventing unused ones only invites their reuse later.
         username: nudgebee-ro
-        private_key: |
-          -----BEGIN OPENSSH PRIVATE KEY-----
-          ...
-          -----END OPENSSH PRIVATE KEY-----
+
+        # Prefer private_key_file over an inline key: it lets Kubernetes
+        # mount a Secret and keeps the key out of values files entirely.
+        # Setting both is an error rather than a silent precedence rule.
+        private_key_file: /etc/nudgebee/ssh/id_ed25519
+        # private_key: |
+        #   -----BEGIN OPENSSH PRIVATE KEY-----
+        #   ...
+        #   -----END OPENSSH PRIVATE KEY-----
         # ldap_bind_dn: CN=svc-nudgebee,OU=Service Accounts,DC=corp,DC=local
         # ldap_bind_password: ''
 
