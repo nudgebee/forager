@@ -10,6 +10,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -102,25 +103,29 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	applyConfigDefaults(&cfg)
 	p.cfg = cfg
 
-	username := creds["username"]
-	if username == "" {
-		return fmt.Errorf("discovery: ssh username is required")
-	}
-	authMethods, err := buildAuthMethods(creds)
-	if err != nil {
-		return fmt.Errorf("discovery: %w", err)
-	}
+	// SSH credentials are optional: sweeping and directory queries need none.
+	// Requiring them up front would force an operator standing up a
+	// sweep-only datasource to invent credentials that are never used, which
+	// is a bad habit to build into a values file. A datasource without them
+	// simply cannot serve discovery_inventory, and says so when asked.
+	p.sshConfig = nil
+	if username := creds["username"]; username != "" {
+		authMethods, err := buildAuthMethods(creds)
+		if err != nil {
+			return fmt.Errorf("discovery: %w", err)
+		}
 
-	hostKeyCallback, err := p.hostKeyCallback(cfg)
-	if err != nil {
-		return fmt.Errorf("discovery: %w", err)
-	}
+		hostKeyCallback, err := p.hostKeyCallback(cfg)
+		if err != nil {
+			return fmt.Errorf("discovery: %w", err)
+		}
 
-	p.sshConfig = &ssh.ClientConfig{
-		User:            username,
-		Auth:            authMethods,
-		HostKeyCallback: hostKeyCallback,
-		Timeout:         time.Duration(cfg.DialTimeoutS) * time.Second,
+		p.sshConfig = &ssh.ClientConfig{
+			User:            username,
+			Auth:            authMethods,
+			HostKeyCallback: hostKeyCallback,
+			Timeout:         time.Duration(cfg.DialTimeoutS) * time.Second,
+		}
 	}
 
 	if err := p.parseAllowedCIDRs(cfg.AllowedCIDRs); err != nil {
@@ -498,7 +503,7 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	p.mu.RUnlock()
 
 	if sshCfg == nil {
-		return nil, fmt.Errorf("discovery_inventory: proxy not configured")
+		return nil, fmt.Errorf("discovery_inventory: this datasource has no ssh credentials configured")
 	}
 
 	// Out-of-scope targets are rejected as results, not as a batch error: the
@@ -603,19 +608,59 @@ func (p *Proxy) verifyPack(raw []byte) (*Pack, error) {
 	return ParseAndVerify(raw, pubKey)
 }
 
-// HealthCheck reports configuration validity. There is no single endpoint to
-// probe: this datasource's targets are a whole network segment.
+// HealthCheck reports whether this datasource can serve at least one action.
+// There is no single endpoint to probe — its target is a whole network
+// segment — so health here means "configured to do something useful".
+//
+// A datasource may legitimately serve only some actions: sweeping needs no
+// credentials, and inventory needs both SSH credentials and a pack key. The
+// error names what is missing so a half-configured datasource is diagnosable
+// from the health report rather than only when an action fails.
 func (p *Proxy) HealthCheck(ctx context.Context) error {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
 
+	var missing []string
 	if p.sshConfig == nil {
-		return fmt.Errorf("discovery proxy not configured")
+		missing = append(missing, "ssh credentials")
 	}
 	if p.packPubKey == nil {
-		return fmt.Errorf("no pack public key configured: content packs cannot be verified")
+		missing = append(missing, "pack_public_key")
+	}
+	if p.cfg.PackDir == "" {
+		missing = append(missing, "pack_dir")
+	}
+
+	// Sweeping needs nothing configured beyond scope, so a datasource is only
+	// unhealthy if it cannot do that either.
+	if len(missing) > 0 && len(p.allowedNets) == 0 && len(p.allowedHosts) == 0 {
+		return fmt.Errorf("discovery datasource is unconfigured: no allowed_cidrs, and inventory is missing %s",
+			strings.Join(missing, ", "))
 	}
 	return nil
+}
+
+// Actions reports which discovery actions this datasource can currently
+// serve. Surfaced in metadata so the server can route work to a datasource
+// that can actually do it, rather than discovering the gap on failure.
+func (p *Proxy) Actions() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	actions := []string{"discovery_sweep"}
+	if p.ldapConfigured {
+		actions = append(actions, "discovery_ldap")
+	}
+	if p.sshConfig != nil && p.packPubKey != nil {
+		actions = append(actions, "discovery_inventory")
+	}
+	return actions
+}
+
+// CollectMetadata satisfies proxy.MetadataCollector so the supported actions
+// reach the server alongside the datasource inventory.
+func (p *Proxy) CollectMetadata(ctx context.Context) (map[string]any, error) {
+	return map[string]any{"actions": p.Actions()}, nil
 }
 
 func (p *Proxy) Close() error {
