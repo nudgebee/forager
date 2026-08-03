@@ -249,7 +249,19 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 		t.Fatalf("inventory failed: %v", err)
 	}
 
-	if strings.Contains(resp.Data, secret) {
+	// Serialize the whole response rather than naming a field. Asserting on
+	// resp.Data alone is how this check silently died once already: the
+	// payload moved to resp.Result and the assertion kept passing against an
+	// empty string, testing nothing.
+	whole, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshalling response: %v", err)
+	}
+	if !strings.Contains(string(whole), "192.168.99.5") {
+		t.Fatal("response does not contain the expected payload; the check would be vacuous")
+	}
+
+	if strings.Contains(string(whole), secret) {
 		t.Error("credential appeared in the action response")
 	}
 	if strings.Contains(logBuf.String(), secret) {
