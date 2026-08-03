@@ -55,15 +55,61 @@ func writePackDir(t *testing.T, body string, priv ed25519.PrivateKey, version in
 	return dir
 }
 
-func TestConfigure_RequiresCredentials(t *testing.T) {
-	p := New(slog.New(slog.DiscardHandler))
-
-	if err := p.Configure(map[string]any{}, map[string]string{}); err == nil {
-		t.Fatal("configure accepted empty credentials")
+// SSH credentials are optional: a sweep-only datasource needs none, and
+// demanding them would force an operator to invent credentials that are never
+// used. But a username with no auth method is a mistake, not a choice.
+func TestConfigure_CredentialsOptionalButCoherent(t *testing.T) {
+	sweepOnly := New(slog.New(slog.DiscardHandler))
+	if err := sweepOnly.Configure(map[string]any{"allowed_cidrs": []any{"10.0.1.0/24"}}, map[string]string{}); err != nil {
+		t.Fatalf("sweep-only datasource rejected for having no ssh credentials: %v", err)
 	}
-	if err := p.Configure(map[string]any{}, map[string]string{"username": "x"}); err == nil {
+	if got := sweepOnly.Actions(); !containsAction(got, "discovery_sweep") {
+		t.Errorf("actions = %v, want discovery_sweep", got)
+	}
+	if got := sweepOnly.Actions(); containsAction(got, "discovery_inventory") {
+		t.Errorf("actions = %v, want no inventory without credentials", got)
+	}
+
+	half := New(slog.New(slog.DiscardHandler))
+	if err := half.Configure(map[string]any{}, map[string]string{"username": "x"}); err == nil {
 		t.Fatal("configure accepted a username with no auth method")
 	}
+}
+
+// The set of actions a datasource can serve depends on what was configured,
+// and is reported so the server can route work to a datasource that can do
+// it rather than finding out when an action fails.
+func TestActions_ReflectConfiguration(t *testing.T) {
+	pubB64, priv := packPubKeyB64(t)
+
+	full, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs":   []any{"10.0.1.0/24"},
+		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
+		"ldap":            map[string]any{"host": "dc.corp.local", "base_dn": "dc=corp,dc=local"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	for _, want := range []string{"discovery_sweep", "discovery_ldap", "discovery_inventory"} {
+		if !containsAction(full.Actions(), want) {
+			t.Errorf("actions = %v, want %s", full.Actions(), want)
+		}
+	}
+
+	noPack, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs": []any{"10.0.1.0/24"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+	if containsAction(noPack.Actions(), "discovery_inventory") {
+		t.Errorf("actions = %v, want no inventory without a pack key", noPack.Actions())
+	}
+}
+
+func containsAction(actions []string, want string) bool {
+	for _, a := range actions {
+		if a == want {
+			return true
+		}
+	}
+	return false
 }
 
 // A pack we cannot verify must not run. Without a key configured there is no
@@ -364,21 +410,26 @@ func TestHandleRequest_UnknownAction(t *testing.T) {
 func TestHealthCheck(t *testing.T) {
 	pubB64, _ := packPubKeyB64(t)
 
+	// Nothing configured at all: cannot serve any action.
 	unconfigured := New(slog.New(slog.DiscardHandler))
 	if err := unconfigured.HealthCheck(context.Background()); err == nil {
 		t.Error("unconfigured proxy reported healthy")
 	}
 
-	noKey, _ := newTestProxy(t, map[string]any{}, map[string]string{
-		"username": "nudgebee-ro", "password": "x",
-	})
-	if err := noKey.HealthCheck(context.Background()); err == nil {
-		t.Error("proxy without a pack key reported healthy")
+	// Scope but no credentials is a legitimate sweep-only datasource.
+	sweepOnly, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs": []any{"10.0.1.0/24"},
+	}, map[string]string{})
+	if err := sweepOnly.HealthCheck(context.Background()); err != nil {
+		t.Errorf("sweep-only datasource reported unhealthy: %v", err)
 	}
 
-	ready, _ := newTestProxy(t, map[string]any{"pack_public_key": pubB64}, map[string]string{
-		"username": "nudgebee-ro", "password": "x",
-	})
+	// Fully configured for inventory.
+	_, priv := packPubKeyB64(t)
+	ready, _ := newTestProxy(t, map[string]any{
+		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
 	if err := ready.HealthCheck(context.Background()); err != nil {
 		t.Errorf("configured proxy reported unhealthy: %v", err)
 	}

@@ -152,6 +152,7 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		if len(ds.AllowedHosts) > 0 {
 			cfg["allowed_cidrs"] = ds.AllowedHosts
 		}
+		applyDiscoveryConfig(cfg, ds.Discovery)
 		p = proxydiscovery.New(logger.With("datasource", ds.Name))
 	case "mongodb":
 		proxyType = "mongo-proxy"
@@ -230,4 +231,62 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		CredentialSource: credSource,
 	}
 	registry.Register(entry.ID, entry, p)
+}
+
+// applyDiscoveryConfig copies the discovery block from local YAML into the
+// datasource config the proxy consumes. Only non-zero values are set, so the
+// proxy's own defaults still apply to anything left out.
+//
+// In production this config is pushed from the server; this path exists so a
+// discovery datasource can also be stood up from a values file.
+func applyDiscoveryConfig(cfg map[string]any, d *config.DiscoveryDatasource) {
+	if d == nil {
+		return
+	}
+
+	setIfNotEmpty(cfg, "pack_public_key", d.PackPublicKey)
+	setIfNotEmpty(cfg, "pack_dir", d.PackDir)
+	setIfNotEmpty(cfg, "known_hosts_file", d.KnownHostsFile)
+
+	setIfPositive(cfg, "port", d.Port)
+	setIfPositive(cfg, "concurrency", d.Concurrency)
+	setIfPositive(cfg, "host_timeout_seconds", d.HostTimeoutS)
+	setIfPositive(cfg, "command_timeout_seconds", d.CommandTimeS)
+	setIfPositive(cfg, "dial_timeout_seconds", d.DialTimeoutS)
+	setIfPositive(cfg, "max_output_bytes", d.MaxOutputBytes)
+	setIfPositive(cfg, "max_rate_pps", d.MaxRatePPS)
+
+	if d.LDAP == nil || d.LDAP.Host == "" {
+		return
+	}
+	ldap := map[string]any{"host": d.LDAP.Host}
+	setIfPositive(ldap, "port", d.LDAP.Port)
+	setIfPositive(ldap, "timeout_seconds", d.LDAP.TimeoutS)
+	setIfPositive(ldap, "max_results", d.LDAP.MaxResults)
+	setIfNotEmpty(ldap, "base_dn", d.LDAP.BaseDN)
+	if d.LDAP.PageSize > 0 {
+		ldap["page_size"] = d.LDAP.PageSize
+	}
+	if d.LDAP.TLS {
+		ldap["tls"] = true
+	}
+	if d.LDAP.StartTLS {
+		ldap["start_tls"] = true
+	}
+	if d.LDAP.SkipVer {
+		ldap["insecure_skip_verify"] = true
+	}
+	cfg["ldap"] = ldap
+}
+
+func setIfNotEmpty(m map[string]any, key, value string) {
+	if value != "" {
+		m[key] = value
+	}
+}
+
+func setIfPositive(m map[string]any, key string, value int) {
+	if value > 0 {
+		m[key] = value
+	}
 }
