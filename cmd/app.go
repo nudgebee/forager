@@ -9,6 +9,7 @@ import (
 	"nudgebee/forager/pkg/config"
 	"nudgebee/forager/pkg/proxy"
 	proxydb "nudgebee/forager/pkg/proxy/db"
+	proxydiscovery "nudgebee/forager/pkg/proxy/discovery"
 	proxyhttp "nudgebee/forager/pkg/proxy/http"
 	proxykafka "nudgebee/forager/pkg/proxy/kafka"
 	proxymcp "nudgebee/forager/pkg/proxy/mcp"
@@ -146,6 +147,12 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 			cfg["allowed_hosts"] = ds.AllowedHosts
 		}
 		p = proxyssh.New(logger.With("datasource", ds.Name))
+	case "discovery":
+		proxyType = "discovery-proxy"
+		if len(ds.AllowedHosts) > 0 {
+			cfg["allowed_cidrs"] = ds.AllowedHosts
+		}
+		p = proxydiscovery.New(logger.With("datasource", ds.Name))
 	case "mongodb":
 		proxyType = "mongo-proxy"
 		p = proxymongo.New(logger.With("datasource", ds.Name))

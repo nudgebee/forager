@@ -1,0 +1,106 @@
+# Example inventory content pack.
+#
+# This is a reference for the format the forager executes — NOT the production
+# pack. The real linux-inventory pack, its full OS matrix, CI signing, and the
+# pin/ring rollout pipeline are P6 (nudgebee/forager#116).
+#
+# Packs live in the forager's configured pack_dir as linux-inventory-v<N>.yaml
+# and are selected by version in the action request; a request can never carry
+# a pack body. The forager verifies `signature` against its configured key,
+# evaluates each collector's `when` guard against facts probed from the host,
+# and runs the surviving commands verbatim. It parses none of the output:
+# parsers live server-side so a parser fix never requires an agent release.
+#
+# Facts available to `when` guards (probed before the pack runs):
+#   os_family  rhel | debian | suse | alpine
+#   os_id      ubuntu, centos, rocky, sles, ...
+#   os_major   major version, e.g. "9"
+#   arch       x86_64, aarch64
+#
+# Guards support == and != against a quoted literal, joined by && and ||.
+# A guard naming an unknown fact fails the pack at load time; a guard whose
+# fact could not be probed skips that collector and reports why.
+
+version: 1
+kind: inventory
+
+collectors:
+  # --- identity: the merge keys the server reconciles assets on -------------
+  - id: machine-id
+    cmd: cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null
+
+  # Readable by root on most distros; absent or empty otherwise. The server
+  # falls back to machine-id, so failure here is not fatal.
+  - id: smbios-uuid
+    cmd: cat /sys/class/dmi/id/product_uuid 2>/dev/null
+
+  - id: hostname
+    cmd: hostname -f 2>/dev/null || hostname
+
+  - id: net-links
+    cmd: ip -o link 2>/dev/null
+
+  # --- os ------------------------------------------------------------------
+  - id: os-release
+    cmd: cat /etc/os-release
+
+  - id: kernel
+    cmd: uname -r -m
+
+  # --- packages ------------------------------------------------------------
+  # Version strings are kept verbatim, including epoch and release suffix:
+  # backport-aware CVE matching (epic 2) resolves against vendor advisories,
+  # where "5.14.0-362.8.1.el9_3" and "5.14.0" are entirely different answers.
+  - id: pkgs-rpm
+    when: os_family == "rhel" || os_family == "suse"
+    cmd: rpm -qa --qf '%{NAME}\t%{EPOCH}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{INSTALLTIME}\n'
+
+  - id: pkgs-dpkg
+    when: os_family == "debian"
+    cmd: dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n'
+
+  - id: pkgs-apk
+    when: os_family == "alpine"
+    cmd: apk info -v
+
+  # --- patch channel binding ----------------------------------------------
+  # Collected in phase 0 because a lapsed subscription or dead repo means the
+  # host cannot be patched at all — that belongs in the coverage report now,
+  # not as a surprise when patching ships.
+  - id: sub-rhsm
+    when: os_id == "rhel"
+    cmd: subscription-manager status 2>/dev/null; subscription-manager identity 2>/dev/null
+
+  - id: sub-pro
+    when: os_id == "ubuntu"
+    cmd: pro status --format json 2>/dev/null
+
+  - id: sub-scc
+    when: os_family == "suse"
+    cmd: SUSEConnect --status-text 2>/dev/null
+
+  - id: repos-rpm
+    when: os_family == "rhel"
+    cmd: dnf repolist 2>/dev/null || yum repolist -q 2>/dev/null
+
+  - id: repos-apt
+    when: os_family == "debian"
+    cmd: cat /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null
+
+  - id: repos-apk
+    when: os_family == "alpine"
+    cmd: cat /etc/apk/repositories 2>/dev/null
+
+  # --- reboot pending ------------------------------------------------------
+  - id: reboot-debian
+    when: os_family == "debian"
+    cmd: test -f /var/run/reboot-required && echo yes || echo no
+
+  - id: reboot-rhel
+    when: os_family == "rhel"
+    cmd: dnf needs-restarting -r >/dev/null 2>&1; echo "rc=$?"
+
+# Signature covers this document with the signature line removed, base64
+# Ed25519. Produced by the publish pipeline; this example is unsigned and will
+# be rejected by the forager, which is the intended behaviour for a sample.
+signature: ""

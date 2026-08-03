@@ -62,7 +62,7 @@ func NewVerifier(publicKeyStr string, logger *slog.Logger) (*Verifier, error) {
 		return v, nil
 	}
 
-	pubKey, err := parsePublicKey(publicKeyStr)
+	pubKey, err := ParsePublicKey(publicKeyStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid signing_public_key: %w", err)
 	}
@@ -73,8 +73,8 @@ func NewVerifier(publicKeyStr string, logger *slog.Logger) (*Verifier, error) {
 	return v, nil
 }
 
-// parsePublicKey tries OpenSSH authorized_keys format, PEM (PKIX), then raw base64.
-func parsePublicKey(s string) (ed25519.PublicKey, error) {
+// ParsePublicKey tries OpenSSH authorized_keys format, PEM (PKIX), then raw base64.
+func ParsePublicKey(s string) (ed25519.PublicKey, error) {
 	s = strings.TrimSpace(s)
 
 	// Try OpenSSH format (ssh-ed25519 AAAA... comment)
