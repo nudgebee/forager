@@ -250,6 +250,24 @@ the content pack):
   `/sys/class/dmi/id/product_uuid` (root) with `dmidecode -s
   system-uuid` fallback if sudo-permitted — degrade gracefully to
   machine-id only; hostname/FQDN; MACs (`ip -o link`).
+
+  **Verified on the AWS testbed (2026-08-03):** `product_uuid` is mode
+  `-r--------` root-only on stock Linux, so an unprivileged
+  `nudgebee-ro` gets **nothing** — SMBIOS UUID is unavailable in the
+  default credential model, not merely sometimes. `product_serial` is
+  root-only too. `board_asset_tag` *is* world-readable and on EC2
+  carries the instance id, so cloud VMs still yield a strong
+  identifier.
+
+  This has a consequence for §8.2 that is easy to miss: a hypervisor
+  record (source 1) knows a VM's SMBIOS UUID, and an SSH record
+  (source 5) knows its machine-id. On-prem, with no sudo, **they share
+  no strong identifier** — so the two sources cannot be merged on one,
+  and every VM would appear twice. The narrow sudoers entry for
+  `dmidecode` is therefore not the optional nicety §10 implies; it is
+  what makes hypervisor↔SSH reconciliation possible at all. Either
+  require it, or accept that on-prem merging leans on corroborated
+  weak identifiers, which §8.2 currently forbids. Decide before P4.
 - **OS:** `/etc/os-release` (ID, VERSION_ID, PRETTY_NAME),
   `uname -r -m`.
 - **Packages:** per family above. Version strings kept **verbatim**
