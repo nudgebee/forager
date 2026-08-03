@@ -300,7 +300,7 @@ func TestHandleSweep_AllowsCIDRWithinScope(t *testing.T) {
 	}
 
 	var result SweepResult
-	if err := json.Unmarshal([]byte(resp.Data), &result); err != nil {
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
 		t.Fatalf("parsing response: %v", err)
 	}
 	if result.RatePPS != defaultRatePPS {

@@ -47,6 +47,14 @@ Finds hosts that are up, by plain TCP connect across the requested CIDRs.
 
 Returns per responder: IP, open ports, MAC (local segment only), reverse DNS.
 
+Discovery actions return their payload in `result` as structured JSON,
+parsed once. Older actions use `data`, a string holding double-encoded
+JSON — that field exists because some actions return things that are not
+JSON at all (HTTP bodies, raw MCP bytes) and because every existing
+consumer decodes it as a string. An action populates exactly one of the
+two: setting both would double a payload that reaches megabytes for a
+real package inventory.
+
 Safety properties, which are requirements rather than tuning:
 
 - **Only well-formed TCP connects.** No raw or crafted packets — the malformed
