@@ -116,25 +116,32 @@ sort of traffic that upsets older equipment.
 
 ## The choice we'd like your opinion on
 
-To avoid counting a machine twice, we need something that identifies it
-uniquely. There are two candidates:
+The same machine can be seen twice: once by your virtualisation
+platform, and once when we log into it. To show it once, we need
+something that tells us both sightings are the same box.
 
-- A machine ID file, which any user can read.
-- A hardware ID from the virtual BIOS, which on Linux only an
-  administrator can read.
+Three identifiers are in play, and they are not the same thing:
 
-Your virtualisation platform reports the hardware ID. Our read-only
-login can only get the machine ID. So if we rely on those alone, we
-can't tell that the machine VMware calls X is the same one we logged
-into, and it gets counted twice.
+- **Machine ID.** A random string written when the OS was installed,
+  for example `ec2403e319a2f3f0ae53a05e3daf084b`. Any user can read
+  it. Your virtualisation platform has never heard of it.
+- **Hardware ID.** The virtual BIOS serial number, set when the VM was
+  created. Your virtualisation platform knows every VM by this. On
+  Linux only an administrator can read it, so our read-only login
+  cannot.
+- **MAC address.** The hardware address of a network card, for example
+  `02:4d:07:48:c4:87`. Both sides can see this one.
 
-Three ways to handle it:
+So the platform knows the hardware ID, we know the machine ID, and
+neither recognises the other's. Three ways to bridge that:
 
 1. Let the read-only user run one extra command that reads the hardware
-   ID. Gives an accurate count. Costs one narrow permission on each
+   ID. Exact match, no guessing. Costs one narrow permission on each
    machine.
-2. Match on hostname and IP instead. Nothing to set up, but less
-   reliable, since IPs get reused.
+2. Match on MAC address, plus hostname and IP as a cross-check. Nothing
+   to set up. Usually right, but not guaranteed: a machine can have
+   several network cards, and a cloned VM can end up sharing a MAC with
+   the machine it was cloned from.
 3. Live with duplicates and merge them in the interface. Nothing to set
    up, but the machine count is approximate.
 
