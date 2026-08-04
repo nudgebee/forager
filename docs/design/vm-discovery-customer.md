@@ -32,8 +32,9 @@ inventoried.
 The collector does three things:
 
 1. Probes the network to see which addresses respond.
-2. Asks your virtualisation platform and Active Directory what they
-   know about.
+2. Asks your virtualisation platform what machines exist, including ones
+   that are switched off. If your Linux servers are joined to an Active
+   Directory domain, it can ask that too.
 3. Logs into each machine over SSH with a read-only account you create,
    and runs read-only commands: list installed packages, read the OS
    version, check whether a reboot is pending.
@@ -75,7 +76,10 @@ You want to find that out during an inventory, not during an incident.
   affects one of the limitations below.
 - Roughly how many machines, and how many separate networks? This sets
   how fast we scan and how many collectors you need.
-- Do you use Active Directory?
+- Are your Linux servers joined to an Active Directory domain? Most
+  aren't, and if yours aren't, AD won't help here. AD holds a record
+  for each domain-joined machine, which is useful when it applies, but
+  it is normally Windows machines that are joined rather than Linux.
 - Roughly what proportion is Windows? We're doing Linux first, but a
   large Windows estate would change that.
 - Which Linux distributions, and are any of them old? See the note on
@@ -89,8 +93,9 @@ You want to find that out during an inventory, not during an incident.
    give you the commands.
 2. A read-only account on your virtualisation platform. View
    permissions only.
-3. A read-only Active Directory account, if you want us to use it. An
-   ordinary user account, no group memberships.
+3. A read-only Active Directory account, but only if your Linux
+   machines are domain-joined. An ordinary user account, no group
+   memberships.
 4. One small VM per network to run the collector on. It needs outbound
    internet on port 443. It needs no inbound access at all.
 
@@ -148,7 +153,7 @@ Working, and tested against real machines:
 
 - Finding machines on a network
 - Reading the full package list over SSH on both major Linux families
-- Reading Active Directory
+- Reading Active Directory, for domain-joined machines
 - Running as a service, talking to us securely
 
 Not built yet:
