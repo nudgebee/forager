@@ -1,50 +1,48 @@
-# VM Discovery — how it works, and what we need from you
+# VM Discovery
 
-Draft for discussion. This is a joint build: some of it is ours, some
-only you can do, and one choice we should make together.
+Draft for discussion. Some of this we build, some of it only you can
+set up, and there's one choice we'd like your opinion on.
 
----
+## What it does
 
-## 1. What this solves
+Finds the machines on your network and lists the software installed on
+each one, so that patching has something accurate to work from.
 
-Before you can patch anything, you have to know what you have. Most
-teams have a list somewhere, and most of those lists are wrong.
+For any machine it can't check, it says which machine and why. That
+part is deliberate. An inventory that silently skips 50 machines is
+harder to trust than one that reports 50 gaps.
 
-We want to answer three questions honestly: how many machines you have,
-what is installed on each, and — for anything we could not check — why
-not. The third matters as much as the others. A tool reporting "400
-machines, all healthy" while quietly missing 50 is worse than one that
-says "we found 450, we could not get into 50, here is why."
+## How it works
 
-## 2. How it works
-
-**Nothing is installed on your machines.**
-
-You run one small program — the collector — on a single machine in each
-network. It looks around the network to see what is there, asks your
-virtualisation platform and Active Directory what they know about, and
-logs into each machine over SSH using a read-only account you create.
+You run one small program on a single machine in each network. We call
+it the collector. Nothing gets installed on the machines being
+inventoried.
 
 ```
-        ┌── one collector per network ──┐
-        │  · finds machines             │
-        │  · logs in over SSH           │
-        └──────────┬────────────────────┘
+        ┌── collector (one per network) ──┐
+        │  finds machines                 │
+        │  logs in over SSH               │
+        └──────────┬──────────────────────┘
                    │  SSH, read-only
        ┌───────────┼───────────┐
        ▼           ▼           ▼
     your VM     your VM     your VM
 ```
 
-The commands it runs are ones your own administrators would type — list
-the installed packages, read the OS version. Nothing is changed,
-written, or restarted.
+The collector does three things:
 
-Installing software on hundreds of machines is a project in itself, and
-keeping it updated is a permanent cost. One collector per network is
-something you can approve, place, and watch.
+1. Probes the network to see which addresses respond.
+2. Asks your virtualisation platform and Active Directory what they
+   know about.
+3. Logs into each machine over SSH with a read-only account you create,
+   and runs read-only commands: list installed packages, read the OS
+   version, check whether a reboot is pending.
 
-## 3. What you get
+Nothing is written, changed or restarted on your machines.
+
+## What you get
+
+A per-network summary:
 
 ```
 Found: 412 machines
@@ -56,111 +54,124 @@ Cannot inventory 32:
    8  login rejected
    6  not seen for two weeks
    4  powered off
-   2  operating system we do not support yet
-   1  running an OS with no security updates available
+   2  operating system we don't support yet
+   1  no security updates available for this OS
 ```
 
-Plus, per machine: name, operating system, the full list of installed
-software with exact versions, and whether it is still receiving
-security updates from its vendor.
+And per machine: name, operating system, every installed package with
+its exact version, and whether the machine is still entitled to
+security updates.
 
-That last field is worth the attention. A machine whose vendor
-subscription has lapsed, or which runs an OS past end-of-life, **cannot
-be patched at all** — better to know now than while trying to fix an
-urgent vulnerability.
+That last one is easy to overlook. If a machine's vendor subscription
+has lapsed, or it runs an OS past end of life, no patch exists for it.
+You want to find that out during an inventory, not during an incident.
 
-## 4. What we need from you
+## What we need from you
 
-### Answers
+### Questions
 
-| Question | Why it matters |
-|---|---|
-| Which virtualisation platform — VMware, Proxmox, Hyper-V, plain KVM, or a mix? | We build support for yours first; see the first limit in section 6 |
-| Roughly how many machines, across how many networks? | Sets scanning pace and how many collectors you need |
-| Do you use Active Directory? | It knows machines exist even when they are unreachable |
-| Roughly what share is Windows? | We support Linux first; a large Windows estate changes our order of work |
-| Which Linux distributions, and any very old ones? | Changes what we can promise — see section 3 |
+- Which virtualisation platform do you run: VMware, Proxmox, Hyper-V,
+  plain KVM, or a mix? We'll build support for yours first. It also
+  affects one of the limitations below.
+- Roughly how many machines, and how many separate networks? This sets
+  how fast we scan and how many collectors you need.
+- Do you use Active Directory?
+- Roughly what proportion is Windows? We're doing Linux first, but a
+  large Windows estate would change that.
+- Which Linux distributions, and are any of them old? See the note on
+  end of life above.
 
-### Access
+### Access you'd need to set up
 
-1. **A read-only login on the machines** — a user (we suggest
-   `nudgebee-ro`) with an SSH key, able to run read-only commands and
-   nothing else. Normally pushed with whatever tool you already use to
-   manage machines. We will give you the exact commands.
-2. **A read-only account on your virtualisation platform** — view
+1. A read-only user on each machine (we suggest `nudgebee-ro`) with an
+   SSH key. It only needs to run read-only commands. You'd normally
+   push this with whatever you already use to manage machines. We'll
+   give you the commands.
+2. A read-only account on your virtualisation platform. View
    permissions only.
-3. **A read-only Active Directory account**, if you want us to use it.
-   An ordinary user, no special groups.
-4. **One small VM per network** to run the collector. Outbound internet
-   on port 443, no incoming access at all.
+3. A read-only Active Directory account, if you want us to use it. An
+   ordinary user account, no group memberships.
+4. One small VM per network to run the collector on. It needs outbound
+   internet on port 443. It needs no inbound access at all.
 
-### Permission to look
+### Before we scan anything
 
-Scanning a network looks exactly like an attack, because technically it
-is the same activity. Before we start:
+Network scanning looks like an attack to security tooling, so:
 
-- **Your security team needs to expect it**, and to allow the
-  collector's address in your intrusion detection. Without this, the
-  first scan becomes a security incident.
-- **Agree which address ranges** we may look at, and which we must not
-  touch — printers, industrial controllers, medical devices, anything
-  fragile.
-- **Agree when.** Scanning can be restricted to specific hours.
+- Your security team needs to know, and to allow the collector's
+  address in your intrusion detection. Otherwise the first scan
+  becomes an incident.
+- We need to agree which address ranges are in scope, and which are
+  off limits. Printers, industrial controllers and medical devices are
+  the usual exclusions.
+- We can restrict scanning to particular hours if you'd prefer.
 
-We scan gently by design: ordinary connections only, at a slow rate you
-control, with none of the unusual traffic that can upset older
-equipment.
+The scan itself uses ordinary connections at a rate you set, not the
+sort of traffic that upsets older equipment.
 
-## 5. The decision we need from you
+## The choice we'd like your opinion on
 
-To avoid listing a machine twice, we need something that uniquely
-identifies it. There are two candidates: a **machine ID** file, readable
-by an ordinary user, and a **hardware ID** from the virtual BIOS, which
-on Linux only an administrator can read.
+To avoid counting a machine twice, we need something that identifies it
+uniquely. There are two candidates:
+
+- A machine ID file, which any user can read.
+- A hardware ID from the virtual BIOS, which on Linux only an
+  administrator can read.
 
 Your virtualisation platform reports the hardware ID. Our read-only
-login can only read the machine ID. With just those two, we cannot tell
-that "the machine VMware calls X" and "the machine we logged into" are
-the same box — so it appears twice.
+login can only get the machine ID. So if we rely on those alone, we
+can't tell that the machine VMware calls X is the same one we logged
+into, and it gets counted twice.
 
-| Option | Result | Cost |
-|---|---|---|
-| Allow the read-only user to run one extra command that reads the hardware ID | Accurate count | One small permission per machine |
-| Match on name and network address instead | No setup | Less reliable; addresses get reused and we would occasionally be wrong |
-| Accept duplicates, merge them in the interface | No setup | The machine count is approximate |
+Three ways to handle it:
 
-We lean towards the first, but your estimate of the effort should
-decide it.
+1. Let the read-only user run one extra command that reads the hardware
+   ID. Gives an accurate count. Costs one narrow permission on each
+   machine.
+2. Match on hostname and IP instead. Nothing to set up, but less
+   reliable, since IPs get reused.
+3. Live with duplicates and merge them in the interface. Nothing to set
+   up, but the machine count is approximate.
 
-Two smaller ones, both with sensible defaults you can change: how often
-we look (daily for new machines, weekly for software), and whether any
-categories of data must not leave your network. The collector reads
-machine names, operating systems and software lists — not your files,
-databases, or application data.
+We'd pick the first, but it depends how much work that permission is in
+your environment, which you'd know better than us.
 
-## 6. Where we actually are
+Two smaller things, both defaults you can change: how often we look
+(daily for new machines, weekly for software), and whether any of this
+data shouldn't leave your network. The collector reads machine names,
+OS versions and package lists. It doesn't read files, databases or
+application data.
 
-**Working now, tested on real machines:** finding machines on a
-network; reading the full installed-software list over SSH on both
-major Linux families; reading Active Directory; running as a service
-and communicating securely.
+## Where this actually is
 
-**Not built yet:** storing the results and showing them to you — the
-next and largest piece; reading your virtualisation platform, which we
-build once you tell us which one; automatic scheduling, so it runs by
-itself; Windows; and matching software against known vulnerabilities,
-which is the following phase and needs this one to be right first.
+Working, and tested against real machines:
 
-**Limits we are not hiding:**
+- Finding machines on a network
+- Reading the full package list over SSH on both major Linux families
+- Reading Active Directory
+- Running as a service, talking to us securely
 
-- A machine that is switched off cannot be seen by anything that looks
-  at a network. It stays invisible until we connect to your
-  virtualisation platform.
-- A machine we cannot log into can still be found and counted, but not
-  inventoried. It appears in the report with the reason.
+Not built yet:
 
-## 7. Next step
+- Storing the results and showing them to you. This is the next piece
+  of work and the largest.
+- Reading your virtualisation platform. We build this once you tell us
+  which one you have.
+- Scheduling, so it runs on its own rather than on request.
+- Windows.
+- Matching packages against known vulnerabilities. That's the next
+  phase and it depends on this one being right.
 
-Pick one network to try — ideally a small one whose contents you
-already know. The first run is only useful if you can check the result
-against what you believe is there.
+## What it can't do
+
+- A machine that's switched off can't be found by anything that looks
+  at a network. It stays invisible until we can read your
+  virtualisation platform, which is the only thing that knows about it.
+- A machine we can't log into gets found and counted, but not
+  inventoried. It shows in the report with the reason.
+
+## Suggested next step
+
+Pick one network to start with, ideally a small one where you already
+know roughly what's there. The first run is only useful if you can
+check the answer against something.
