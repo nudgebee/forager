@@ -124,6 +124,33 @@ Per-target statuses (`ok`, `ssh-refused`, `ssh-auth-failed`, `timeout`,
 failing never fails the batch** — "which hosts could we not reach, and why"
 is the product question Phase 0 answers, so failures are data, not errors.
 
+## Running it without a relay
+
+Discovery can be run straight from the command line, with no agent identity,
+no relay and no server. This is how to evaluate it, reproduce a customer's
+result on their own machine, or work on it from a clone of this repo.
+
+```
+nudgebee-forager sweep --cidr 10.0.1.0/24 --ports 22
+
+nudgebee-forager pack keygen                      # prints a keypair
+nudgebee-forager pack sign ./pack.yaml --key <private>
+nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5 \
+  --user nudgebee-ro --key ~/.ssh/id_ed25519 \
+  --pack ./pack.yaml --pack-key <public>
+```
+
+Results go to stdout as JSON; logs go to stderr, so output pipes into `jq`.
+
+These call the same proxy the agent calls, through the same exported API, so
+they exercise the real path rather than a parallel one.
+
+Two things are deliberately not relaxed. Pack signatures are still verified —
+`pack keygen` and `pack sign` exist so that staying strict is practical, rather
+than offering a flag to skip verification that would end up in a production
+config. And `--cidr` is required for inventory as well as sweep, so a mistyped
+target is refused rather than contacted.
+
 ## Configuration
 
 Pushed from the server alongside credentials; the forager holds no schedule
