@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -28,7 +29,22 @@ type ActionResponse struct {
 	StatusCode int    `json:"status_code"`
 	RequestID  string `json:"request_id"`
 	Action     string `json:"action,omitempty"`
-	Data       string `json:"data,omitempty"`
+
+	// Data carries the payload as an opaque string. It is a string because
+	// some actions return things that are not JSON at all — an HTTP response
+	// body, raw MCP bytes — and because every existing consumer decodes it
+	// as one. Actions that return JSON therefore double-encode it here, and
+	// callers parse twice.
+	Data string `json:"data,omitempty"`
+
+	// Result carries a structured payload as JSON, parsed once by the
+	// caller. New actions should set this instead of Data.
+	//
+	// Both fields exist because changing Data's type would alter the wire
+	// shape for every action and break consumers in lockstep, for the sake
+	// of one Unmarshal. Setting both would instead double the payload —
+	// a package inventory is megabytes — so an action populates exactly one.
+	Result json.RawMessage `json:"result,omitempty"`
 }
 
 // Proxy is the interface that all proxy modules must implement.

@@ -367,7 +367,7 @@ func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*pro
 	if err != nil {
 		return nil, fmt.Errorf("discovery_sweep: marshalling results: %w", err)
 	}
-	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
+	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Result: data}, nil
 }
 
 // handleLDAP lists computer objects from the configured directory.
@@ -409,7 +409,7 @@ func (p *Proxy) handleLDAP(ctx context.Context, req *proxy.ActionRequest) (*prox
 	if err != nil {
 		return nil, fmt.Errorf("discovery_ldap: marshalling results: %w", err)
 	}
-	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
+	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Result: data}, nil
 }
 
 // partitionTargetsByScope splits targets into those inside this datasource's
@@ -548,7 +548,7 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	if err != nil {
 		return nil, fmt.Errorf("discovery_inventory: marshalling results: %w", err)
 	}
-	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Data: string(data)}, nil
+	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Result: data}, nil
 }
 
 // resolvePack returns a verified pack for the requested version.

@@ -180,7 +180,7 @@ func TestHandleInventory_RejectsOutOfScopeTargets(t *testing.T) {
 	}
 
 	var out InventoryResponse
-	if err := json.Unmarshal([]byte(resp.Data), &out); err != nil {
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
 		t.Fatalf("parsing response: %v", err)
 	}
 	if len(out.Targets) != 1 {
@@ -216,7 +216,7 @@ func TestHandleInventory_ReportsPackVersion(t *testing.T) {
 	}
 
 	var out InventoryResponse
-	if err := json.Unmarshal([]byte(resp.Data), &out); err != nil {
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
 		t.Fatalf("parsing response: %v", err)
 	}
 	if out.ContentPackVersion != 3 {
@@ -249,7 +249,19 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 		t.Fatalf("inventory failed: %v", err)
 	}
 
-	if strings.Contains(resp.Data, secret) {
+	// Serialize the whole response rather than naming a field. Asserting on
+	// resp.Data alone is how this check silently died once already: the
+	// payload moved to resp.Result and the assertion kept passing against an
+	// empty string, testing nothing.
+	whole, err := json.Marshal(resp)
+	if err != nil {
+		t.Fatalf("marshalling response: %v", err)
+	}
+	if !strings.Contains(string(whole), "192.168.99.5") {
+		t.Fatal("response does not contain the expected payload; the check would be vacuous")
+	}
+
+	if strings.Contains(string(whole), secret) {
 		t.Error("credential appeared in the action response")
 	}
 	if strings.Contains(logBuf.String(), secret) {
@@ -582,5 +594,49 @@ func TestPartitionTargetsByScope_PreservesOrder(t *testing.T) {
 		if rejected[i].Host != wantRejected[i] {
 			t.Errorf("rejected[%d] = %s, want %s", i, rejected[i].Host, wantRejected[i])
 		}
+	}
+}
+
+// Discovery returns JSON, so it populates Result and callers parse once.
+// Data stays empty: setting both would double a payload that is megabytes
+// for a real package inventory.
+func TestDiscoveryActionsReturnStructuredResult(t *testing.T) {
+	pubB64, priv := packPubKeyB64(t)
+	p, _ := newTestProxy(t, map[string]any{
+		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
+		"allowed_cidrs":   []any{"127.0.0.0/30"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	cases := []struct {
+		action string
+		params map[string]any
+	}{
+		{"discovery_sweep", map[string]any{"cidrs": []any{"127.0.0.0/30"}, "ports": []any{float64(1)}, "timeout_ms": float64(100)}},
+		{"discovery_inventory", map[string]any{"targets": []any{"192.168.99.5"}, "content_pack_version": float64(3)}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.action, func(t *testing.T) {
+			resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+				Action: tc.action, Params: tc.params,
+			})
+			if err != nil {
+				t.Fatalf("%s: %v", tc.action, err)
+			}
+
+			if resp.Data != "" {
+				t.Errorf("Data is set as well as Result, doubling the payload: %q", resp.Data)
+			}
+			if len(resp.Result) == 0 {
+				t.Fatal("Result is empty")
+			}
+
+			// The point of the change: one parse, not two.
+			var out map[string]any
+			if err := json.Unmarshal(resp.Result, &out); err != nil {
+				t.Fatalf("Result is not directly parseable JSON: %v", err)
+			}
+		})
 	}
 }
