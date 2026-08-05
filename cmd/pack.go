@@ -26,7 +26,18 @@ import (
 func splitPositional(args []string) (positional []string, flags []string) {
 	for i := 0; i < len(args); i++ {
 		a := args[i]
-		if strings.HasPrefix(a, "-") {
+
+		// "--" ends flag parsing by convention; everything after it is
+		// positional, including things that look like flags.
+		if a == "--" {
+			positional = append(positional, args[i+1:]...)
+			break
+		}
+
+		// A bare "-" conventionally means stdin or stdout, so it is a value
+		// rather than a flag. Treating it as one would also make it swallow
+		// the next argument.
+		if strings.HasPrefix(a, "-") && a != "-" {
 			flags = append(flags, a)
 			// A flag written as "--key X" consumes the next argument, unless
 			// it was written as "--key=X".

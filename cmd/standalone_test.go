@@ -131,3 +131,96 @@ func TestParsePorts(t *testing.T) {
 		}
 	}
 }
+
+// "--" ends flag parsing and a bare "-" is a value, both by long-standing
+// convention. Getting either wrong silently loses an argument.
+func TestSplitPositional_CLIConventions(t *testing.T) {
+	cases := []struct {
+		name           string
+		args           []string
+		wantPositional []string
+		wantFlags      []string
+	}{
+		{"double dash ends flags", []string{"--key", "K", "--", "-weird-name.yaml"},
+			[]string{"-weird-name.yaml"}, []string{"--key", "K"}},
+		{"double dash with several positionals", []string{"--", "a.yaml", "-b.yaml"},
+			[]string{"a.yaml", "-b.yaml"}, nil},
+		{"bare dash is a value", []string{"-", "--key", "K"},
+			[]string{"-"}, []string{"--key", "K"}},
+		{"bare dash is not consumed by a preceding flag", []string{"--out", "-"},
+			[]string{"-"}, []string{"--out"}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pos, flags := splitPositional(tc.args)
+			if strings.Join(pos, ",") != strings.Join(tc.wantPositional, ",") {
+				t.Errorf("positional = %v, want %v", pos, tc.wantPositional)
+			}
+			if strings.Join(flags, ",") != strings.Join(tc.wantFlags, ",") {
+				t.Errorf("flags = %v, want %v", flags, tc.wantFlags)
+			}
+		})
+	}
+}
+
+// The pack version has to be read the way YAML defines it, not by matching
+// text. `version : 3` is valid YAML and means the same thing, but a
+// HasPrefix("version:") scan misses it entirely and reports the pack as
+// having no version at all.
+func TestStagePack_ReadsVersionAsYAMLNotText(t *testing.T) {
+	cases := map[string]string{
+		"plain":              "version: 3\nkind: inventory\ncollectors: []\n",
+		"space before colon": "version : 3\nkind: inventory\ncollectors: []\n",
+		"tab before colon":   "version\t: 3\nkind: inventory\ncollectors: []\n",
+		"after another key":  "kind: inventory\nversion: 3\ncollectors: []\n",
+		"quoted key":         "\"version\": 3\nkind: inventory\ncollectors: []\n",
+	}
+
+	for name, body := range cases {
+		t.Run(name, func(t *testing.T) {
+			dir := t.TempDir()
+			pack := filepath.Join(dir, "p.yaml")
+			if err := os.WriteFile(pack, []byte(body), 0o600); err != nil {
+				t.Fatalf("writing: %v", err)
+			}
+
+			stagedDir, version, err := stagePack(pack)
+			if err != nil {
+				t.Fatalf("staging %s: %v", name, err)
+			}
+			defer func() { _ = os.RemoveAll(stagedDir) }()
+
+			if version != 3 {
+				t.Errorf("version = %d, want 3", version)
+			}
+		})
+	}
+}
+
+// The staged copy is a temporary directory the caller owns; leaking one per
+// invocation would litter the host.
+func TestCmdInventory_RemovesStagedPack(t *testing.T) {
+	before, _ := filepath.Glob(filepath.Join(os.TempDir(), "forager-pack-*"))
+
+	dir := t.TempDir()
+	pack := filepath.Join(dir, "p.yaml")
+	if err := os.WriteFile(pack, []byte("version: 1\nkind: inventory\ncollectors: []\n"), 0o600); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+	key := filepath.Join(dir, "k")
+	if err := os.WriteFile(key, []byte("not-a-real-key"), 0o600); err != nil {
+		t.Fatalf("writing: %v", err)
+	}
+
+	// Fails at configure time (the key is not parseable), which is the point:
+	// cleanup must happen on the error path too.
+	_ = cmdInventory([]string{
+		"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1",
+		"--pack", pack, "--pack-key", "AAAA", "--key", key,
+	})
+
+	after, _ := filepath.Glob(filepath.Join(os.TempDir(), "forager-pack-*"))
+	if len(after) > len(before) {
+		t.Errorf("staged pack directories leaked: %d before, %d after", len(before), len(after))
+	}
+}

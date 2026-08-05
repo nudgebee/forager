@@ -23,6 +23,8 @@ import (
 	"strings"
 	"time"
 
+	"gopkg.in/yaml.v3"
+
 	"nudgebee/forager/pkg/proxy"
 	proxydiscovery "nudgebee/forager/pkg/proxy/discovery"
 )
@@ -194,6 +196,8 @@ func cmdInventory(args []string) error {
 	if err != nil {
 		return err
 	}
+	// The staged copy is ours and nothing else reads it after this call.
+	defer func() { _ = os.RemoveAll(packDir) }()
 
 	creds := map[string]string{"username": *user}
 	if *keyFile != "" {
@@ -237,17 +241,20 @@ func stagePack(path string) (dir string, version int, err error) {
 		return "", 0, fmt.Errorf("reading --pack: %w", err)
 	}
 
-	for _, line := range strings.Split(string(raw), "\n") {
-		if strings.HasPrefix(line, "version:") {
-			if _, err := fmt.Sscanf(strings.TrimSpace(line), "version: %d", &version); err != nil {
-				return "", 0, fmt.Errorf("pack has an unreadable version line: %q", line)
-			}
-			break
-		}
+	// Parse the YAML rather than scanning for a "version:" line. Line
+	// scanning matches indented occurrences inside multi-line commands or
+	// comments, and a regex anchored at column 0 still only approximates the
+	// structure. The parser knows it.
+	var head struct {
+		Version int `yaml:"version"`
 	}
-	if version <= 0 {
-		return "", 0, fmt.Errorf("pack does not declare a version")
+	if err := yaml.Unmarshal(raw, &head); err != nil {
+		return "", 0, fmt.Errorf("pack is not valid YAML: %w", err)
 	}
+	if head.Version <= 0 {
+		return "", 0, fmt.Errorf("pack does not declare a positive version")
+	}
+	version = head.Version
 
 	dir, err = os.MkdirTemp("", "forager-pack-")
 	if err != nil {
