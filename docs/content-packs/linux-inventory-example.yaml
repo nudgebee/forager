@@ -21,7 +21,7 @@
 # A guard naming an unknown fact fails the pack at load time; a guard whose
 # fact could not be probed skips that collector and reports why.
 
-version: 1
+version: 2
 kind: inventory
 
 collectors:
@@ -51,17 +51,50 @@ collectors:
   # Version strings are kept verbatim, including epoch and release suffix:
   # backport-aware CVE matching (epic 2) resolves against vendor advisories,
   # where "5.14.0-362.8.1.el9_3" and "5.14.0" are entirely different answers.
+  #
+  # Three fields below exist solely for that matching and are easy to mistake
+  # for noise, so: vendor advisories are published against the SOURCE package,
+  # not the installed binary one. A host with openssl-libs installed is patched
+  # by an advisory filed against openssl, and without SOURCERPM the two never
+  # meet. Measured on a live RHEL 9 host: 51 findings with it, 0 without —
+  # not fewer findings, none at all. The same applies to deb (libssl3 ->
+  # openssl) via source:Package.
   - id: pkgs-rpm
     when: os_family == "rhel" || os_family == "suse"
-    cmd: rpm -qa --qf '%{NAME}\t%{EPOCH}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{INSTALLTIME}\n'
+    # EPOCHNUM, not EPOCH: EPOCH renders "(none)" when a package has no epoch,
+    # which every consumer then has to special-case. EPOCHNUM renders 0.
+    #
+    # MODULARITYLABEL identifies the AppStream module stream on RHEL 8+
+    # ("postgresql:12:8040020210708095149:9f9e2e7e"). Fixes apply only within
+    # the stream the host actually runs, so without it a postgresql:12 host is
+    # told to install fixes shipped in the 13/15/16 streams: 127 findings
+    # instead of the correct 35.
+    #
+    # The --querytags guard is not defensive padding. rpm before 4.14 does not
+    # know that tag, and on an unknown tag rpm prints "error: incorrect format:
+    # unknown tag" and emits NOTHING AT ALL — while still exiting 0. Naming the
+    # tag unconditionally therefore returns an empty package list for every
+    # RHEL/CentOS 7 host, and does it silently, which is far worse than the gap
+    # it was added to close. Verified on centos:7 (rpm 4.11.3) and ubi8 (4.14.3).
+    # Exit status cannot be used to detect this, so the tag list is consulted
+    # first; the else-branch keeps the empty field so both branches emit the
+    # same eight-column shape and the server parser needs one format, not two.
+    cmd: 'if rpm --querytags 2>/dev/null | grep -q MODULARITYLABEL; then rpm -qa --qf ''%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t%{MODULARITYLABEL}\t%{INSTALLTIME}\n''; else rpm -qa --qf ''%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t\t%{INSTALLTIME}\n''; fi'
 
   - id: pkgs-dpkg
     when: os_family == "debian"
-    cmd: dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n'
+    # source:Package is populated for every package, matching the binary name
+    # when they do not differ (bash -> bash) and differing where it matters
+    # (libssl3 -> openssl, libc6 -> glibc).
+    cmd: dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\t${source:Package}\t${source:Version}\n'
 
   - id: pkgs-apk
     when: os_family == "alpine"
-    cmd: apk info -v
+    # The installed database rather than `apk info -v`, which prints only
+    # name-version. Alpine's secdb is keyed on the origin package, and origin
+    # is carried in the database's "o:" field — unavailable from apk info at
+    # any verbosity.
+    cmd: cat /lib/apk/db/installed 2>/dev/null
 
   # --- patch channel binding ----------------------------------------------
   # Collected in phase 0 because a lapsed subscription or dead repo means the
