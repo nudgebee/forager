@@ -96,7 +96,8 @@ Notes worth knowing:
 - On the target, `nudgebee-ro` needs only an SSH key and permission to run
   read-only commands. Nothing is written or changed.
 
-Run `./forager help` for the full list.
+Full flag reference, output shapes and troubleshooting are in
+[docs/cli.md](docs/cli.md). `./forager help` lists the commands.
 
 ## Install
 
@@ -209,6 +210,9 @@ docker build -t forager .   # local Docker image (with Oracle support)
 
 ## Documentation
 
+- [Running discovery from the CLI](docs/cli.md) — sweep, inventory and
+  content packs without a relay, with flags, output shapes and what the
+  common failures mean.
 - [Architecture](docs/architecture.md) — overview and request flow.
 - [Configuration](docs/configuration.md) — config file, env vars, secret
   providers.
