@@ -36,6 +36,69 @@ module by datasource ID, and returns responses. No inbound ports needed.
 See [docs/architecture.md](docs/architecture.md) for the full request
 flow and connection lifecycle.
 
+## Try VM discovery without setting anything up
+
+Discovery finds machines on a network and lists the packages installed on
+each, over SSH, with nothing installed on the machines themselves. You can
+run it straight from the binary — no account, no relay, no config file.
+
+```bash
+# macOS (arm64); swap for your platform from the releases page
+curl -fsSL -o forager \
+  https://github.com/nudgebee/forager/releases/download/v0.1.4-rc.5/nudgebee-forager-darwin-arm64
+chmod +x forager
+
+# What is on this network?
+./forager sweep --cidr 192.168.1.0/24 --ports 22
+```
+
+```json
+{
+  "addresses_scanned": 254,
+  "hosts": [
+    {"ip": "192.168.1.50", "open_ports": [22], "mac": "aa:bb:cc:dd:ee:ff",
+     "rdns": "web-01.lan", "sources": ["tcp", "arp"]}
+  ]
+}
+```
+
+To list installed packages you need two things: a read-only SSH login on the
+target, and a signed content pack — the file that says which commands to run.
+Packs are signed so the agent never runs collection commands it cannot
+attribute, which is why there is no flag to skip verification.
+
+```bash
+# Make a key and sign the example pack
+PRIV=$(./forager pack keygen)          # public key is printed to stderr
+./forager pack sign docs/content-packs/linux-inventory-example.yaml --key "$PRIV"
+
+# Collect from a host you can SSH into
+./forager inventory \
+  --cidr 192.168.1.0/24 \
+  --targets 192.168.1.50 \
+  --user nudgebee-ro --key ~/.ssh/id_ed25519 \
+  --pack docs/content-packs/linux-inventory-example.yaml \
+  --pack-key <public key from keygen>
+```
+
+Results go to stdout as JSON and logs to stderr, so output pipes into `jq`.
+`mac` appears only for hosts on the same network segment, and `rdns` only
+when reverse DNS resolves — a host missing either is normal, not an error.
+
+Notes worth knowing:
+
+- `--cidr` is required for both commands. It bounds what can be contacted, so
+  a mistyped target is refused rather than reached.
+- Scanning a network looks like an attack to security tooling. On anything
+  you do not own, tell whoever runs intrusion detection first.
+- `--rate-pps` defaults to 100 and can be lowered. Sweeps use ordinary TCP
+  connections, not crafted packets.
+- On the target, `nudgebee-ro` needs only an SSH key and permission to run
+  read-only commands. Nothing is written or changed.
+
+Full flag reference, output shapes and troubleshooting are in
+[docs/cli.md](docs/cli.md). `./forager help` lists the commands.
+
 ## Install
 
 ### Linux
@@ -147,6 +210,9 @@ docker build -t forager .   # local Docker image (with Oracle support)
 
 ## Documentation
 
+- [Running discovery from the CLI](docs/cli.md) — sweep, inventory and
+  content packs without a relay, with flags, output shapes and what the
+  common failures mean.
 - [Architecture](docs/architecture.md) — overview and request flow.
 - [Configuration](docs/configuration.md) — config file, env vars, secret
   providers.
