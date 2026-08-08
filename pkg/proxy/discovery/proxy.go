@@ -689,7 +689,12 @@ func (p *Proxy) packVersions() []int {
 
 	entries, err := os.ReadDir(packDir)
 	if err != nil {
-		p.logger.Warn("discovery: cannot list pack_dir for metadata", "err", err)
+		// A configured-but-not-yet-created pack_dir is a normal fresh-install
+		// state (packs arrive via the distribution pipeline) — don't warn on
+		// every metadata cycle for it.
+		if !os.IsNotExist(err) {
+			p.logger.Warn("discovery: cannot list pack_dir for metadata", "err", err)
+		}
 		return nil
 	}
 
