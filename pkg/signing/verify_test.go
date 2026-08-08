@@ -405,3 +405,44 @@ func TestSignAndVerify_RoundTrip(t *testing.T) {
 		t.Fatalf("Verify: %v", err)
 	}
 }
+
+func TestVerify_ConcurrentReplay(t *testing.T) {
+	pub, priv := generateTestKeypair()
+	v, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	signer := testSigner(t, priv)
+	msg := []byte(`{"action":"db_query","datasource_id":"ds-1","params":{"query":"SELECT 1"}}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	const goroutines = 20
+	errCh := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			errCh <- v.Verify(signed)
+		}()
+	}
+
+	successCount := 0
+	replayCount := 0
+	for i := 0; i < goroutines; i++ {
+		err := <-errCh
+		if err == nil {
+			successCount++
+		} else {
+			replayCount++
+		}
+	}
+
+	if successCount != 1 {
+		t.Fatalf("expected exactly 1 verification success, got %d", successCount)
+	}
+	if replayCount != goroutines-1 {
+		t.Fatalf("expected %d replay rejections, got %d", goroutines-1, replayCount)
+	}
+}
