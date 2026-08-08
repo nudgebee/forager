@@ -175,11 +175,6 @@ func (v *Verifier) Verify(msg []byte) error {
 		return fmt.Errorf("signature verification failed: signed_at %s is outside allowed window (±%s)", env.SignedAt, maxTimestampSkew)
 	}
 
-	// Check replay
-	if v.isReplayedNonce(env.Nonce) {
-		return fmt.Errorf("signature verification failed: nonce %s already seen (replay attack)", env.Nonce)
-	}
-
 	// Decode signature
 	sigBytes, err := base64.StdEncoding.DecodeString(env.Signature)
 	if err != nil {
@@ -196,8 +191,11 @@ func (v *Verifier) Verify(msg []byte) error {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Record nonce after successful verification
-	v.recordNonce(env.Nonce)
+	// Atomically check and record nonce after successful signature verification (anti-replay)
+	if v.checkAndRecordNonce(env.Nonce) {
+		return fmt.Errorf("signature verification failed: nonce %s already seen (replay attack)", env.Nonce)
+	}
+
 	return nil
 }
 
@@ -248,24 +246,18 @@ func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-func (v *Verifier) isReplayedNonce(nonce string) bool {
+func (v *Verifier) checkAndRecordNonce(nonce string) bool {
 	v.nonceMu.Lock()
 	defer v.nonceMu.Unlock()
 
 	if _, seen := v.seenNonces[nonce]; seen {
 		return true
 	}
-	return false
-}
-
-func (v *Verifier) recordNonce(nonce string) {
-	v.nonceMu.Lock()
-	defer v.nonceMu.Unlock()
 
 	v.seenNonces[nonce] = time.Now()
 
-	// Evict old nonces if map is too large
-	if len(v.seenNonces) > maxNonces {
+	// Evict old nonces if map is too large (rate-limited to once every 100 additions)
+	if len(v.seenNonces) > maxNonces && len(v.seenNonces)%100 == 0 {
 		cutoff := time.Now().Add(-maxTimestampSkew * 2)
 		for n, t := range v.seenNonces {
 			if t.Before(cutoff) {
@@ -273,6 +265,7 @@ func (v *Verifier) recordNonce(nonce string) {
 			}
 		}
 	}
+	return false
 }
 
 func absDuration(d time.Duration) time.Duration {
