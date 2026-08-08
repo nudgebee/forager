@@ -10,6 +10,9 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -658,9 +661,60 @@ func (p *Proxy) Actions() []string {
 }
 
 // CollectMetadata satisfies proxy.MetadataCollector so the supported actions
-// reach the server alongside the datasource inventory.
+// reach the server alongside the datasource inventory. pack_versions lists
+// the content pack versions present in pack_dir so the server can pick a
+// version to pin in discovery_inventory requests (content_pack_version is a
+// required request param with no "latest" default). Presence means the file
+// exists — signature verification still happens at execution time.
 func (p *Proxy) CollectMetadata(ctx context.Context) (map[string]any, error) {
-	return map[string]any{"actions": p.Actions()}, nil
+	meta := map[string]any{"actions": p.Actions()}
+	if versions := p.packVersions(); len(versions) > 0 {
+		meta["pack_versions"] = versions
+	}
+	return meta, nil
+}
+
+// packVersionPattern matches cached pack filenames (linux-inventory-v<N>.yaml),
+// mirroring the path resolvePack reads.
+var packVersionPattern = regexp.MustCompile(`^linux-inventory-v(\d+)\.yaml$`)
+
+// packVersions lists content pack versions available in pack_dir, ascending.
+func (p *Proxy) packVersions() []int {
+	p.mu.RLock()
+	packDir := p.cfg.PackDir
+	p.mu.RUnlock()
+	if packDir == "" {
+		return nil
+	}
+
+	entries, err := os.ReadDir(packDir)
+	if err != nil {
+		// A configured-but-not-yet-created pack_dir is a normal fresh-install
+		// state (packs arrive via the distribution pipeline) — don't warn on
+		// every metadata cycle for it.
+		if !os.IsNotExist(err) {
+			p.logger.Warn("discovery: cannot list pack_dir for metadata", "err", err)
+		}
+		return nil
+	}
+
+	var versions []int
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		m := packVersionPattern.FindStringSubmatch(e.Name())
+		if m == nil {
+			continue
+		}
+		v, err := strconv.Atoi(m[1])
+		if err != nil || v <= 0 {
+			continue
+		}
+		versions = append(versions, v)
+	}
+	sort.Ints(versions)
+	return versions
 }
 
 func (p *Proxy) Close() error {
