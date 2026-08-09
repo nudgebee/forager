@@ -278,6 +278,9 @@ func sortHosts(hosts map[string]*SweepHost) []SweepHost {
 	}
 	items := make([]sweepHostAddr, 0, len(hosts))
 	for _, h := range hosts {
+		if h == nil {
+			continue
+		}
 		addr, err := netip.ParseAddr(h.IP)
 		if err != nil {
 			items = append(items, sweepHostAddr{host: h})

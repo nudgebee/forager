@@ -467,3 +467,20 @@ func BenchmarkSweepResultSorting(b *testing.B) {
 		_ = sortHosts(hosts)
 	}
 }
+
+func TestSortHosts_HandlesNilHostPointers(t *testing.T) {
+	hosts := map[string]*SweepHost{
+		"10.0.0.2": {IP: "10.0.0.2"},
+		"10.0.0.1": nil,
+		"10.0.0.3": {IP: "10.0.0.3"},
+	}
+
+	sorted := sortHosts(hosts)
+	if len(sorted) != 2 {
+		t.Fatalf("expected 2 non-nil hosts, got %d", len(sorted))
+	}
+	if sorted[0].IP != "10.0.0.2" || sorted[1].IP != "10.0.0.3" {
+		t.Errorf("unexpected sorted IPs: %v", sorted)
+	}
+}
+
