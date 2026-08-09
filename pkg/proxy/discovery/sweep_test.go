@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -465,37 +464,6 @@ func BenchmarkSweepResultSorting(b *testing.B) {
 
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
-		type sweepHostAddr struct {
-			host *SweepHost
-			addr netip.Addr
-		}
-		items := make([]sweepHostAddr, 0, len(hosts))
-		for _, h := range hosts {
-			addr, err := netip.ParseAddr(h.IP)
-			if err != nil {
-				items = append(items, sweepHostAddr{host: h})
-				continue
-			}
-			items = append(items, sweepHostAddr{host: h, addr: addr})
-		}
-		sort.Slice(items, func(i, j int) bool {
-			iValid := items[i].addr.IsValid()
-			jValid := items[j].addr.IsValid()
-			if !iValid && !jValid {
-				return items[i].host.IP < items[j].host.IP
-			}
-			if !iValid {
-				return false
-			}
-			if !jValid {
-				return true
-			}
-			return items[i].addr.Less(items[j].addr)
-		})
-		out := make([]SweepHost, len(items))
-		for i, item := range items {
-			out[i] = *item.host
-		}
-		_ = out
+		_ = sortHosts(hosts)
 	}
 }

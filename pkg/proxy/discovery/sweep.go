@@ -141,41 +141,7 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 	enrichFromARP(hosts)
 	enrichRDNS(ctx, hosts)
 
-	// Pre-parse IP addresses once to avoid O(N log N) string parses in sort comparator.
-	// Store pointers (*SweepHost) to keep sweepHostAddr small (32 bytes instead of 120 bytes)
-	// and eliminate struct copying overhead during sort.Slice swaps.
-	type sweepHostAddr struct {
-		host *SweepHost
-		addr netip.Addr
-	}
-	items := make([]sweepHostAddr, 0, len(hosts))
-	for _, h := range hosts {
-		addr, err := netip.ParseAddr(h.IP)
-		if err != nil {
-			items = append(items, sweepHostAddr{host: h})
-			continue
-		}
-		items = append(items, sweepHostAddr{host: h, addr: addr})
-	}
-	sort.Slice(items, func(i, j int) bool {
-		iValid := items[i].addr.IsValid()
-		jValid := items[j].addr.IsValid()
-		if !iValid && !jValid {
-			return items[i].host.IP < items[j].host.IP
-		}
-		if !iValid {
-			return false
-		}
-		if !jValid {
-			return true
-		}
-		return items[i].addr.Less(items[j].addr)
-	})
-
-	out := make([]SweepHost, len(items))
-	for i, item := range items {
-		out[i] = *item.host
-	}
+	out := sortHosts(hosts)
 
 	cidrStrings := make([]string, len(cfg.cidrs))
 	for i, c := range cfg.cidrs {
@@ -300,6 +266,45 @@ func trimTrailingDot(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
+}
+
+// sortHosts converts the host map into an IP-sorted slice of SweepHost.
+// Pre-parses IP addresses once into netip.Addr to avoid O(N log N) string parses in sort comparator.
+// Stores pointers (*SweepHost) to keep sweepHostAddr small (32 bytes) and avoid struct copying overhead.
+func sortHosts(hosts map[string]*SweepHost) []SweepHost {
+	type sweepHostAddr struct {
+		host *SweepHost
+		addr netip.Addr
+	}
+	items := make([]sweepHostAddr, 0, len(hosts))
+	for _, h := range hosts {
+		addr, err := netip.ParseAddr(h.IP)
+		if err != nil {
+			items = append(items, sweepHostAddr{host: h})
+			continue
+		}
+		items = append(items, sweepHostAddr{host: h, addr: addr})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		iValid := items[i].addr.IsValid()
+		jValid := items[j].addr.IsValid()
+		if !iValid && !jValid {
+			return items[i].host.IP < items[j].host.IP
+		}
+		if !iValid {
+			return false
+		}
+		if !jValid {
+			return true
+		}
+		return items[i].addr.Less(items[j].addr)
+	})
+
+	out := make([]SweepHost, len(items))
+	for i, item := range items {
+		out[i] = *item.host
+	}
+	return out
 }
 
 // parseSweepParams validates an action's parameters and clamps them to the
