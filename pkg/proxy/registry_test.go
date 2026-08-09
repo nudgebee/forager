@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"fmt"
 	"sort"
 	"sync"
 	"testing"
@@ -156,4 +157,34 @@ func TestRegistry_ConcurrentAccess(t *testing.T) {
 
 	wg.Wait()
 	// No race detector failures = pass
+}
+
+func TestRegistry_HealthReportConcurrent(t *testing.T) {
+	r := NewRegistry()
+
+	// Register 5 fake proxies with mock health checks
+	for i := 1; i <= 5; i++ {
+		id := fmt.Sprintf("ds-%d", i)
+		entry := DatasourceEntry{
+			ID:        id,
+			Type:      "postgresql",
+			ProxyType: "db-proxy",
+			Name:      fmt.Sprintf("DB %d", i),
+		}
+		r.Register(id, entry, &fakeProxy{proxyType: "db-proxy"})
+	}
+
+	report := r.HealthReport(context.Background())
+	if len(report) != 5 {
+		t.Fatalf("expected 5 health report entries, got %d", len(report))
+	}
+
+	for id, h := range report {
+		if h.Status != "healthy" {
+			t.Errorf("expected status 'healthy' for %s, got %s", id, h.Status)
+		}
+		if h.ProxyType != "db-proxy" {
+			t.Errorf("expected proxy_type 'db-proxy' for %s, got %s", id, h.ProxyType)
+		}
+	}
 }

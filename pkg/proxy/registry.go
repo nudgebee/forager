@@ -149,50 +149,64 @@ type DatasourceHealth struct {
 	LastCheck string `json:"last_check"` // RFC3339
 }
 
-// HealthReport runs health checks on all registered datasources and returns a map
+// HealthReport runs health checks on all registered datasources concurrently and returns a map
 // of datasource ID → health status. Used for periodic reporting to the cloud.
 func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth {
 	r.mu.RLock()
-	ids := make([]string, 0, len(r.proxies))
-	for id := range r.proxies {
-		ids = append(ids, id)
+	type target struct {
+		id    string
+		proxy Proxy
+		cfg   DatasourceEntry
+	}
+	targets := make([]target, 0, len(r.proxies))
+	for id, p := range r.proxies {
+		if cfg, ok := r.configs[id]; ok {
+			targets = append(targets, target{id: id, proxy: p, cfg: cfg})
+		}
 	}
 	r.mu.RUnlock()
 
-	report := make(map[string]DatasourceHealth, len(ids))
-	now := time.Now().UTC().Format(time.RFC3339)
-
-	for _, id := range ids {
-		r.mu.RLock()
-		p, pOk := r.proxies[id]
-		cfg, cOk := r.configs[id]
-		r.mu.RUnlock()
-
-		if !pOk || !cOk {
-			continue
-		}
-
-		health := DatasourceHealth{
-			Type:      cfg.Type,
-			ProxyType: cfg.ProxyType,
-			Name:      cfg.Name,
-			LastCheck: now,
-		}
-
-		checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-		err := p.HealthCheck(checkCtx)
-		cancel()
-
-		if err != nil {
-			health.Status = "error"
-			health.Error = err.Error()
-		} else {
-			health.Status = "healthy"
-		}
-
-		report[id] = health
+	if len(targets) == 0 {
+		return make(map[string]DatasourceHealth)
 	}
 
+	report := make(map[string]DatasourceHealth, len(targets))
+	now := time.Now().UTC().Format(time.RFC3339)
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
+	// Run health checks concurrently to prevent a single slow or timing-out
+	// datasource from blocking the health status of other datasources.
+	for _, t := range targets {
+		wg.Add(1)
+		go func(t target) {
+			defer wg.Done()
+
+			health := DatasourceHealth{
+				Type:      t.cfg.Type,
+				ProxyType: t.cfg.ProxyType,
+				Name:      t.cfg.Name,
+				LastCheck: now,
+			}
+
+			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			err := t.proxy.HealthCheck(checkCtx)
+
+			if err != nil {
+				health.Status = "error"
+				health.Error = err.Error()
+			} else {
+				health.Status = "healthy"
+			}
+
+			mu.Lock()
+			report[t.id] = health
+			mu.Unlock()
+		}(t)
+	}
+
+	wg.Wait()
 	return report
 }
 
