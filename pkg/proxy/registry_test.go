@@ -188,4 +188,3 @@ func TestRegistry_HealthReportConcurrent(t *testing.T) {
 		}
 	}
 }
-
