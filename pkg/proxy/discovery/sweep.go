@@ -141,11 +141,31 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 	enrichFromARP(hosts)
 	enrichRDNS(ctx, hosts)
 
-	out := make([]SweepHost, 0, len(hosts))
-	for _, h := range hosts {
-		out = append(out, *h)
+	// Pre-parse IP addresses once to avoid O(N log N) string parses in sort comparator
+	type sweepHostAddr struct {
+		host SweepHost
+		addr netip.Addr
 	}
-	sort.Slice(out, func(i, j int) bool { return compareIPs(out[i].IP, out[j].IP) })
+	items := make([]sweepHostAddr, 0, len(hosts))
+	for _, h := range hosts {
+		addr, err := netip.ParseAddr(h.IP)
+		if err != nil {
+			items = append(items, sweepHostAddr{host: *h})
+			continue
+		}
+		items = append(items, sweepHostAddr{host: *h, addr: addr})
+	}
+	sort.Slice(items, func(i, j int) bool {
+		if !items[i].addr.IsValid() || !items[j].addr.IsValid() {
+			return items[i].host.IP < items[j].host.IP
+		}
+		return items[i].addr.Less(items[j].addr)
+	})
+
+	out := make([]SweepHost, len(items))
+	for i, item := range items {
+		out[i] = item.host
+	}
 
 	cidrStrings := make([]string, len(cfg.cidrs))
 	for i, c := range cfg.cidrs {
@@ -270,15 +290,6 @@ func trimTrailingDot(s string) string {
 		return s[:len(s)-1]
 	}
 	return s
-}
-
-func compareIPs(a, b string) bool {
-	aa, errA := netip.ParseAddr(a)
-	bb, errB := netip.ParseAddr(b)
-	if errA != nil || errB != nil {
-		return a < b
-	}
-	return aa.Less(bb)
 }
 
 // parseSweepParams validates an action's parameters and clamps them to the

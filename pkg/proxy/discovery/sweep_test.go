@@ -3,8 +3,10 @@ package discovery
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/netip"
+	"sort"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -451,5 +453,41 @@ func TestRunSweep_MoreWorkersDoNotExceedRateCap(t *testing.T) {
 	if elapsed < minDuration {
 		t.Errorf("%d workers swept %d addresses in %s — faster than the %d pps cap allows (min %s)",
 			cfg.workers, result.Scanned, elapsed, ratePPS, minDuration)
+	}
+}
+
+func BenchmarkSweepResultSorting(b *testing.B) {
+	hosts := make(map[string]*SweepHost, 1000)
+	for i := 0; i < 1000; i++ {
+		ip := fmt.Sprintf("10.0.%d.%d", i/256, i%256)
+		hosts[ip] = &SweepHost{IP: ip}
+	}
+
+	b.ResetTimer()
+	for n := 0; n < b.N; n++ {
+		type sweepHostAddr struct {
+			host SweepHost
+			addr netip.Addr
+		}
+		items := make([]sweepHostAddr, 0, len(hosts))
+		for _, h := range hosts {
+			addr, err := netip.ParseAddr(h.IP)
+			if err != nil {
+				items = append(items, sweepHostAddr{host: *h})
+				continue
+			}
+			items = append(items, sweepHostAddr{host: *h, addr: addr})
+		}
+		sort.Slice(items, func(i, j int) bool {
+			if !items[i].addr.IsValid() || !items[j].addr.IsValid() {
+				return items[i].host.IP < items[j].host.IP
+			}
+			return items[i].addr.Less(items[j].addr)
+		})
+		out := make([]SweepHost, len(items))
+		for i, item := range items {
+			out[i] = item.host
+		}
+		_ = out
 	}
 }
