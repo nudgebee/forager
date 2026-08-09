@@ -466,17 +466,17 @@ func BenchmarkSweepResultSorting(b *testing.B) {
 	b.ResetTimer()
 	for n := 0; n < b.N; n++ {
 		type sweepHostAddr struct {
-			host SweepHost
+			host *SweepHost
 			addr netip.Addr
 		}
 		items := make([]sweepHostAddr, 0, len(hosts))
 		for _, h := range hosts {
 			addr, err := netip.ParseAddr(h.IP)
 			if err != nil {
-				items = append(items, sweepHostAddr{host: *h})
+				items = append(items, sweepHostAddr{host: h})
 				continue
 			}
-			items = append(items, sweepHostAddr{host: *h, addr: addr})
+			items = append(items, sweepHostAddr{host: h, addr: addr})
 		}
 		sort.Slice(items, func(i, j int) bool {
 			if !items[i].addr.IsValid() || !items[j].addr.IsValid() {
@@ -486,7 +486,7 @@ func BenchmarkSweepResultSorting(b *testing.B) {
 		})
 		out := make([]SweepHost, len(items))
 		for i, item := range items {
-			out[i] = item.host
+			out[i] = *item.host
 		}
 		_ = out
 	}

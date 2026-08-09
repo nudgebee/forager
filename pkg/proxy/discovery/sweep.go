@@ -141,19 +141,21 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 	enrichFromARP(hosts)
 	enrichRDNS(ctx, hosts)
 
-	// Pre-parse IP addresses once to avoid O(N log N) string parses in sort comparator
+	// Pre-parse IP addresses once to avoid O(N log N) string parses in sort comparator.
+	// Store pointers (*SweepHost) to keep sweepHostAddr small (32 bytes instead of 120 bytes)
+	// and eliminate struct copying overhead during sort.Slice swaps.
 	type sweepHostAddr struct {
-		host SweepHost
+		host *SweepHost
 		addr netip.Addr
 	}
 	items := make([]sweepHostAddr, 0, len(hosts))
 	for _, h := range hosts {
 		addr, err := netip.ParseAddr(h.IP)
 		if err != nil {
-			items = append(items, sweepHostAddr{host: *h})
+			items = append(items, sweepHostAddr{host: h})
 			continue
 		}
-		items = append(items, sweepHostAddr{host: *h, addr: addr})
+		items = append(items, sweepHostAddr{host: h, addr: addr})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		if !items[i].addr.IsValid() || !items[j].addr.IsValid() {
@@ -164,7 +166,7 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 
 	out := make([]SweepHost, len(items))
 	for i, item := range items {
-		out[i] = item.host
+		out[i] = *item.host
 	}
 
 	cidrStrings := make([]string, len(cfg.cidrs))
