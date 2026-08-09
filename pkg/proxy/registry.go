@@ -182,10 +182,6 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		go func(t target) {
 			defer wg.Done()
 
-			if ctx.Err() != nil {
-				return
-			}
-
 			health := DatasourceHealth{
 				Type:      t.cfg.Type,
 				ProxyType: t.cfg.ProxyType,
