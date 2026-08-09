@@ -158,8 +158,16 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 		items = append(items, sweepHostAddr{host: h, addr: addr})
 	}
 	sort.Slice(items, func(i, j int) bool {
-		if !items[i].addr.IsValid() || !items[j].addr.IsValid() {
+		iValid := items[i].addr.IsValid()
+		jValid := items[j].addr.IsValid()
+		if !iValid && !jValid {
 			return items[i].host.IP < items[j].host.IP
+		}
+		if !iValid {
+			return false
+		}
+		if !jValid {
+			return true
 		}
 		return items[i].addr.Less(items[j].addr)
 	})
