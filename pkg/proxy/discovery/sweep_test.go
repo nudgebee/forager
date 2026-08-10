@@ -483,4 +483,3 @@ func TestSortHosts_HandlesNilHostPointers(t *testing.T) {
 		t.Errorf("unexpected sorted IPs: %v", sorted)
 	}
 }
-

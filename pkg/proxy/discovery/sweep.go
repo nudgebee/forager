@@ -281,24 +281,20 @@ func sortHosts(hosts map[string]*SweepHost) []SweepHost {
 		if h == nil {
 			continue
 		}
-		addr, err := netip.ParseAddr(h.IP)
-		if err != nil {
-			items = append(items, sweepHostAddr{host: h})
-			continue
-		}
+		// A parse failure yields the zero Addr, which reports IsValid() == false,
+		// so the comparator below can sort unparseable IPs to the end without
+		// branching on the error here.
+		addr, _ := netip.ParseAddr(h.IP)
 		items = append(items, sweepHostAddr{host: h, addr: addr})
 	}
 	sort.Slice(items, func(i, j int) bool {
 		iValid := items[i].addr.IsValid()
 		jValid := items[j].addr.IsValid()
-		if !iValid && !jValid {
-			return items[i].host.IP < items[j].host.IP
+		if iValid != jValid {
+			return iValid
 		}
 		if !iValid {
-			return false
-		}
-		if !jValid {
-			return true
+			return items[i].host.IP < items[j].host.IP
 		}
 		return items[i].addr.Less(items[j].addr)
 	})
