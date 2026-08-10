@@ -640,3 +640,48 @@ func TestDiscoveryActionsReturnStructuredResult(t *testing.T) {
 		})
 	}
 }
+
+// The server needs to know what each collector covers. Without it a scheduler
+// must be told the ranges separately and can drift out of step with the agent,
+// and the coverage report has no denominator to work from.
+func TestCollectMetadata_ReportsScope(t *testing.T) {
+	pubB64, priv := packPubKeyB64(t)
+	p, _ := newTestProxy(t, map[string]any{
+		"allowed_cidrs":   []any{"10.0.1.0/24", "10.0.2.5", "db.corp.local"},
+		"pack_public_key": pubB64,
+		"pack_dir":        writePackDir(t, validBody, priv, 3),
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	meta, err := p.CollectMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("collecting metadata: %v", err)
+	}
+
+	scope, ok := meta["allowed_cidrs"].([]string)
+	if !ok {
+		t.Fatalf("allowed_cidrs missing or wrong type: %#v", meta["allowed_cidrs"])
+	}
+
+	got := strings.Join(scope, ",")
+	for _, want := range []string{"10.0.1.0/24", "10.0.2.5/32", "db.corp.local"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("scope %v is missing %s", scope, want)
+		}
+	}
+}
+
+// An unrestricted datasource reports no scope rather than an empty list, so
+// the server can tell "covers everything" from "covers nothing".
+func TestCollectMetadata_OmitsScopeWhenUnrestricted(t *testing.T) {
+	p, _ := newTestProxy(t, map[string]any{}, map[string]string{
+		"username": "nudgebee-ro", "password": "x",
+	})
+
+	meta, err := p.CollectMetadata(context.Background())
+	if err != nil {
+		t.Fatalf("collecting metadata: %v", err)
+	}
+	if _, present := meta["allowed_cidrs"]; present {
+		t.Errorf("unrestricted datasource reported a scope: %#v", meta["allowed_cidrs"])
+	}
+}
