@@ -1,11 +1,12 @@
 package discovery
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -141,11 +142,7 @@ func runSweep(ctx context.Context, cfg sweepConfig) (*SweepResult, error) {
 	enrichFromARP(hosts)
 	enrichRDNS(ctx, hosts)
 
-	out := make([]SweepHost, 0, len(hosts))
-	for _, h := range hosts {
-		out = append(out, *h)
-	}
-	sort.Slice(out, func(i, j int) bool { return compareIPs(out[i].IP, out[j].IP) })
+	out := sortHosts(hosts)
 
 	cidrStrings := make([]string, len(cfg.cidrs))
 	for i, c := range cfg.cidrs {
@@ -272,13 +269,48 @@ func trimTrailingDot(s string) string {
 	return s
 }
 
-func compareIPs(a, b string) bool {
-	aa, errA := netip.ParseAddr(a)
-	bb, errB := netip.ParseAddr(b)
-	if errA != nil || errB != nil {
-		return a < b
+// sortHosts converts the host map into an IP-sorted slice of SweepHost.
+// Pre-parses IP addresses once into netip.Addr to avoid O(N log N) string parses in sort comparator.
+// Stores pointers (*SweepHost) to keep sweepHostAddr small (32 bytes) and avoid struct copying overhead.
+func sortHosts(hosts map[string]*SweepHost) []SweepHost {
+	type sweepHostAddr struct {
+		host *SweepHost
+		addr netip.Addr
 	}
-	return aa.Less(bb)
+	items := make([]sweepHostAddr, 0, len(hosts))
+	for _, h := range hosts {
+		if h == nil {
+			continue
+		}
+		// A parse failure yields the zero Addr, which reports IsValid() == false,
+		// so the comparator below can sort unparseable IPs to the end without
+		// branching on the error here.
+		addr, _ := netip.ParseAddr(h.IP)
+		items = append(items, sweepHostAddr{host: h, addr: addr})
+	}
+	// slices.SortFunc avoids the reflection and interface boxing that sort.Slice
+	// pays on every comparison.
+	slices.SortFunc(items, func(a, b sweepHostAddr) int {
+		aValid := a.addr.IsValid()
+		bValid := b.addr.IsValid()
+		if aValid != bValid {
+			// Unparseable IPs sort to the end.
+			if aValid {
+				return -1
+			}
+			return 1
+		}
+		if !aValid {
+			return cmp.Compare(a.host.IP, b.host.IP)
+		}
+		return a.addr.Compare(b.addr)
+	})
+
+	out := make([]SweepHost, len(items))
+	for i, item := range items {
+		out[i] = *item.host
+	}
+	return out
 }
 
 // parseSweepParams validates an action's parameters and clamps them to the
