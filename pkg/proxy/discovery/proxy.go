@@ -671,7 +671,33 @@ func (p *Proxy) CollectMetadata(ctx context.Context) (map[string]any, error) {
 	if versions := p.packVersions(); len(versions) > 0 {
 		meta["pack_versions"] = versions
 	}
+	if scope := p.scope(); len(scope) > 0 {
+		meta["allowed_cidrs"] = scope
+	}
 	return meta, nil
+}
+
+// scope reports the CIDRs this datasource will accept work for.
+//
+// Without it the server knows a discovery datasource exists but not what it
+// covers, which breaks two things downstream. A scheduler has to be told the
+// ranges separately, so server and agent can disagree — the server asks for a
+// sweep the agent refuses as out of scope, and the refusal looks like a bug in
+// discovery rather than a configuration mismatch. And the coverage report cannot be
+// computed at all: "how many machines are there" needs the intended
+// denominator, not just whatever happened to answer.
+func (p *Proxy) scope() []string {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+
+	out := make([]string, 0, len(p.allowedNets)+len(p.allowedHosts))
+	for _, n := range p.allowedNets {
+		out = append(out, n.String())
+	}
+	// Bare hostnames are kept as configured; they are resolved per request
+	// rather than at configure time, so there is no address to report.
+	out = append(out, p.allowedHosts...)
+	return out
 }
 
 // packVersionPattern matches cached pack filenames (linux-inventory-v<N>.yaml),
