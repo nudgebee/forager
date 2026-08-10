@@ -483,3 +483,25 @@ func TestSortHosts_HandlesNilHostPointers(t *testing.T) {
 		t.Errorf("unexpected sorted IPs: %v", sorted)
 	}
 }
+
+func TestSortHosts_UnparseableIPsSortLast(t *testing.T) {
+	hosts := map[string]*SweepHost{
+		"10.0.0.2":     {IP: "10.0.0.2"},
+		"10.0.0.1":     nil,
+		"invalid-ip-b": {IP: "invalid-ip-b"},
+		"10.0.0.10":    {IP: "10.0.0.10"},
+		"invalid-ip-a": {IP: "invalid-ip-a"},
+	}
+
+	sorted := sortHosts(hosts)
+	// Valid IPs first in numeric order, then unparseable ones lexicographically.
+	want := []string{"10.0.0.2", "10.0.0.10", "invalid-ip-a", "invalid-ip-b"}
+	if len(sorted) != len(want) {
+		t.Fatalf("expected %d non-nil hosts, got %d", len(want), len(sorted))
+	}
+	for i, exp := range want {
+		if sorted[i].IP != exp {
+			t.Errorf("at index %d: want %q, got %q", i, exp, sorted[i].IP)
+		}
+	}
+}

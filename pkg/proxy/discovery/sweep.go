@@ -1,11 +1,12 @@
 package discovery
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net"
 	"net/netip"
-	"sort"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -287,16 +288,22 @@ func sortHosts(hosts map[string]*SweepHost) []SweepHost {
 		addr, _ := netip.ParseAddr(h.IP)
 		items = append(items, sweepHostAddr{host: h, addr: addr})
 	}
-	sort.Slice(items, func(i, j int) bool {
-		iValid := items[i].addr.IsValid()
-		jValid := items[j].addr.IsValid()
-		if iValid != jValid {
-			return iValid
+	// slices.SortFunc avoids the reflection and interface boxing that sort.Slice
+	// pays on every comparison.
+	slices.SortFunc(items, func(a, b sweepHostAddr) int {
+		aValid := a.addr.IsValid()
+		bValid := b.addr.IsValid()
+		if aValid != bValid {
+			// Unparseable IPs sort to the end.
+			if aValid {
+				return -1
+			}
+			return 1
 		}
-		if !iValid {
-			return items[i].host.IP < items[j].host.IP
+		if !aValid {
+			return cmp.Compare(a.host.IP, b.host.IP)
 		}
-		return items[i].addr.Less(items[j].addr)
+		return a.addr.Compare(b.addr)
 	})
 
 	out := make([]SweepHost, len(items))
