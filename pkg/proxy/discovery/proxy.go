@@ -333,6 +333,9 @@ func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*pro
 	p.mu.RLock()
 	maxRate := p.cfg.MaxRatePPS
 	configuredCIDRs := p.allowedNets
+	sshCfg := p.sshConfig
+	sshPort := p.cfg.Port
+	concurrency := p.cfg.Concurrency
 	p.mu.RUnlock()
 
 	cfg, err := parseSweepParams(req.Params, maxRate)
@@ -355,6 +358,26 @@ func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*pro
 	result, err := runSweep(ctx, cfg)
 	if err != nil {
 		return nil, fmt.Errorf("discovery_sweep: %w", err)
+	}
+
+	// Best-effort cloud-instance-identity probe for whatever this sweep just
+	// found — a no-op when this datasource has no SSH credentials configured
+	// (sweep-only datasources keep today's behavior exactly). This is the
+	// strongest signal the server has for matching a swept host against an
+	// existing cloud-collector-synced asset, so it belongs on the sweep
+	// response itself rather than waiting on a separate discovery_inventory
+	// round that may never run.
+	if sshCfg != nil {
+		identityCfg := execConfig{
+			port:            sshPort,
+			concurrency:     concurrency,
+			hostTimeout:     cloudIdentityHostTimeout,
+			commandTimeout:  cloudIdentityCommandTimeout,
+			maxOutputBytes:  cloudIdentityMaxOutputBytes,
+			dialTimeout:     cloudIdentityDialTimeout,
+			sshClientConfig: sshCfg,
+		}
+		enrichCloudIdentity(ctx, result.Hosts, identityCfg)
 	}
 
 	p.logger.Info("discovery sweep complete",
