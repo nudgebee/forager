@@ -33,6 +33,13 @@ type SweepHost struct {
 	RDNS      string   `json:"rdns,omitempty"`
 	OpenPorts []int    `json:"open_ports,omitempty"`
 	Sources   []string `json:"sources"` // tcp, arp
+
+	// CloudIdentity is cloudIdentityProbeCmd's raw, unparsed output (see
+	// cloud_identity.go) when this datasource has SSH credentials configured
+	// and the host answered on the SSH port — empty otherwise (no
+	// credentials, host unreachable/not SSH, or a non-cloud host that timed
+	// out on every provider's metadata service).
+	CloudIdentity string `json:"cloud_identity,omitempty"`
 }
 
 // SweepResult is the response to a discovery_sweep action.

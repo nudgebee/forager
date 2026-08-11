@@ -87,6 +87,15 @@ func TestCmdSweep_RequiresCIDR(t *testing.T) {
 	}
 }
 
+// --key and --password-env both name an auth method; accepting both silently
+// picking one would surprise whichever one lost.
+func TestCmdSweep_RejectsBothKeyAndPasswordEnv(t *testing.T) {
+	err := cmdSweep([]string{"--cidr", "10.0.0.0/24", "--key", "/dev/null", "--password-env", "SSH_PW"})
+	if err == nil {
+		t.Fatal("accepted both --key and --password-env")
+	}
+}
+
 // The pack version comes from the file so the caller does not have to repeat
 // it, and a mismatch would make the proxy refuse the pack.
 func TestStagePack(t *testing.T) {

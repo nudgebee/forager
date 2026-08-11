@@ -32,10 +32,14 @@ Results print to stdout as JSON, logs to stderr, so output pipes into `jq`.
 ## sweep — what is on this network
 
 Probes every address in a range and reports what answered. No credentials
-needed, and nothing is read from the machines themselves.
+needed, and nothing is read from the machines themselves — unless `--user`
+is paired with `--key`/`--password-env`, in which case each host that
+answers on the SSH port also gets a cloud-instance-identity probe (AWS/GCP/
+Azure instance metadata, read over SSH — see `pkg/proxy/discovery/cloud_identity.go`).
 
 ```bash
 ./forager sweep --cidr 192.168.1.0/24 --ports 22
+./forager sweep --cidr 192.168.1.0/24 --user nudgebee-ro --key ~/.ssh/id_ed25519
 ```
 
 | Flag | Default | |
@@ -45,6 +49,10 @@ needed, and nothing is read from the machines themselves.
 | `--rate-pps` | `100` | Probes per second |
 | `--timeout-ms` | `1000` | Per-probe timeout |
 | `--exclude` | | Addresses or CIDRs to skip entirely |
+| `--user` | `nudgebee-ro` | SSH username for the cloud-identity probe |
+| `--key` | | Path to SSH private key — enables the cloud-identity probe |
+| `--password-env` | | Env var holding the SSH password, instead of `--key` — enables the cloud-identity probe |
+| `--ssh-port` | `22` | Port the cloud-identity probe connects on |
 | `-v` | | Log progress to stderr |
 
 ```json
@@ -56,7 +64,8 @@ needed, and nothing is read from the machines themselves.
   "duration_seconds": 3.2,
   "hosts": [
     {"ip": "192.168.1.50", "open_ports": [22], "mac": "aa:bb:cc:dd:ee:ff",
-     "rdns": "web-01.lan", "sources": ["tcp", "arp"]}
+     "rdns": "web-01.lan", "sources": ["tcp", "arp"],
+     "cloud_identity": "provider=aws\ninstance_id=i-0aab26d051729d673\nregion=us-east-1\npublic_ip=54.1.2.3\n"}
   ]
 }
 ```
@@ -64,7 +73,11 @@ needed, and nothing is read from the machines themselves.
 `mac` appears only for hosts on the same network segment — anything reached
 through a router will not have one, and neither will the machine you are
 running from, since a host does not ARP for its own address. `rdns` appears
-only when reverse DNS resolves. Neither absence is an error.
+only when reverse DNS resolves. `cloud_identity` appears only when SSH
+credentials were supplied, the host answered on the SSH port, and it's
+actually running on a cloud whose metadata service answered — a bare-metal
+host, a non-SSH host, or a run with no `--user`/`--key` all leave it absent.
+None of these are errors.
 
 `addresses_scanned` excludes the network and broadcast addresses, so a `/24`
 scans 254 rather than 256.
