@@ -64,7 +64,8 @@ Run as an agent (default):
   nudgebee-forager --config /etc/nudgebee/forager.yaml
 
 Run discovery directly, without a relay or an account:
-  nudgebee-forager sweep     --cidr 10.0.1.0/24 [--ports 22] [--rate-pps 100]
+  nudgebee-forager sweep     --cidr 10.0.1.0/24 [--ports 22] [--rate-pps 100] \
+                             [--user nudgebee-ro --key ~/.ssh/id_ed25519]
   nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5,10.0.1.6 \
                              --user nudgebee-ro --key ~/.ssh/id_ed25519 \
                              --pack ./linux-inventory-v2.yaml --pack-key <base64>
@@ -129,12 +130,22 @@ func cmdSweep(args []string) error {
 	ratePPS := fs.Int("rate-pps", 100, "probes per second")
 	timeoutMs := fs.Int("timeout-ms", 1000, "per-probe timeout")
 	exclude := fs.String("exclude", "", "comma-separated addresses or CIDRs to skip")
+	// SSH credentials are optional here, unlike inventory: a sweep with none
+	// still reports presence/MAC/RDNS, just without the cloud-identity probe
+	// (see pkg/proxy/discovery/cloud_identity.go) that needs to log in.
+	user := fs.String("user", "nudgebee-ro", "SSH username, enables the cloud-identity probe when set alongside --key/--password-env")
+	keyFile := fs.String("key", "", "path to SSH private key, enables the cloud-identity probe")
+	passwordEnv := fs.String("password-env", "", "environment variable holding the SSH password, enables the cloud-identity probe")
+	sshPort := fs.Int("ssh-port", 22, "SSH port the cloud-identity probe connects on")
 	verbose := fs.Bool("v", false, "log progress to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
 	if *cidr == "" {
 		return fmt.Errorf("--cidr is required")
+	}
+	if *keyFile != "" && *passwordEnv != "" {
+		return fmt.Errorf("--key and --password-env are mutually exclusive")
 	}
 
 	portList, err := parsePorts(*ports)
@@ -152,12 +163,32 @@ func cmdSweep(args []string) error {
 		params["exclusions"] = toAnySlice(splitList(*exclude))
 	}
 
+	creds := map[string]string{}
+	if *keyFile != "" || *passwordEnv != "" {
+		creds["username"] = *user
+		if *keyFile != "" {
+			key, err := os.ReadFile(*keyFile)
+			if err != nil {
+				return fmt.Errorf("reading --key: %w", err)
+			}
+			creds["private_key"] = string(key)
+		}
+		if *passwordEnv != "" {
+			pw := os.Getenv(*passwordEnv)
+			if pw == "" {
+				return fmt.Errorf("environment variable %s is empty", *passwordEnv)
+			}
+			creds["password"] = pw
+		}
+	}
+
 	// The swept CIDR is also the scope ceiling, so a standalone run cannot
 	// reach further than what was asked for.
 	return runAction(map[string]any{
 		"allowed_cidrs": []any{*cidr},
 		"max_rate_pps":  float64(*ratePPS),
-	}, map[string]string{}, "discovery_sweep", params, *verbose)
+		"port":          float64(*sshPort),
+	}, creds, "discovery_sweep", params, *verbose)
 }
 
 func cmdInventory(args []string) error {
