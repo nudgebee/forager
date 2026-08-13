@@ -62,6 +62,10 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 	}
 
 	// Verify signature for all incoming messages (fail-closed, secure by default)
+	if h.verifier == nil {
+		h.logger.Error("verifier is not initialized", "request_id", envelope.RequestID)
+		return h.buildErrorResponse(envelope.RequestID, 500, "internal server error: verifier not initialized"), nil
+	}
 	if err := h.verifier.Verify(msg); err != nil {
 		h.logger.Error("message signature verification failed",
 			"action", effectiveAction,
