@@ -21,7 +21,7 @@ import (
 )
 
 // signedActions are actions that require signature verification when signing is enabled.
-// All actions that can modify state or execute commands should be listed here.
+// All actions that can modify state, query data, or execute commands should be listed here.
 var signedActions = map[string]bool{
 	// Config sync — can push arbitrary datasources including RCE via MCP stdio
 	"datasource_config_sync": true,
@@ -43,25 +43,40 @@ var signedActions = map[string]bool{
 	// MCP — arbitrary JSON-RPC to local processes
 	"mcp_request": true,
 
-	// MongoDB — arbitrary queries/aggregations
-	"mongo_query":     true,
-	"mongo_aggregate": true,
+	// MongoDB — queries, aggregations, server/db status and collection info
+	"mongo_query":            true,
+	"mongo_aggregate":        true,
+	"mongo_server_status":    true,
+	"mongo_repl_status":      true,
+	"mongo_collection_stats": true,
+	"mongo_current_ops":      true,
+	"mongo_db_stats":         true,
+	"mongo_list_databases":   true,
+	"mongo_list_collections": true,
 
-	// Redis — arbitrary command execution
-	"redis_command": true,
+	// Redis — commands, info, slowlog, client list, memory stats
+	"redis_command":        true,
+	"redis_info":           true,
+	"redis_info_section":   true,
+	"redis_slowlog":        true,
+	"redis_client_list":    true,
+	"redis_memory_stats":   true,
+	"redis_cluster_info":   true,
+	"redis_keyspace_stats": true,
+
+	// Kafka — lag, groups, topics, brokers, offsets
+	"kafka_consumer_lag":            true,
+	"kafka_consumer_groups":         true,
+	"kafka_consumer_group_describe": true,
+	"kafka_topics":                  true,
+	"kafka_topic_describe":          true,
+	"kafka_brokers":                 true,
+	"kafka_topic_offsets":           true,
 
 	// Config test — creates temporary proxy to test connectivity
 	"test_datasource_config": true,
 
-	// Discovery — inventory executes commands on remote hosts over SSH, the
-	// same capability as ssh_command above. The commands themselves come
-	// from a signature-verified content pack, but the targets do not: an
-	// unsigned action lets a caller choose which hosts we connect to.
-	//
-	// Sweep sends probes across a network segment. Its scope is bounded by
-	// allowed_cidrs, but triggering one is not harmless — an unexpected scan
-	// reads as an attack originating from our agent, and some IDS and
-	// fail2ban configurations act on it.
+	// Discovery — inventory, sweep, ldap
 	"discovery_sweep":     true,
 	"discovery_ldap":      true,
 	"discovery_inventory": true,

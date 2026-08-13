@@ -303,3 +303,49 @@ func TestHandler_BuildErrorResponse(t *testing.T) {
 		t.Fatalf("expected req-123, got %s", r.RequestID)
 	}
 }
+
+func TestHandler_SignedActionsEnforcement(t *testing.T) {
+	// Create verifier with a dummy public key to enable signature verification
+	dummyKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG5e/k5wQ5l5X+5b5W5d5e5f5g5h5i5j5k5l5m5n5o5 test@test"
+	verifier, err := signing.NewVerifier(dummyKey, testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	h := &Handler{
+		registry: proxy.NewRegistry(),
+		verifier: verifier,
+		logger:   testLogger(),
+	}
+
+	actionsToTest := []string{
+		"kafka_consumer_groups",
+		"kafka_topics",
+		"mongo_server_status",
+		"mongo_list_databases",
+		"redis_info",
+		"redis_client_list",
+	}
+
+	for _, action := range actionsToTest {
+		msg := map[string]any{
+			"action":     action,
+			"request_id": "req-sig-test",
+		}
+		data, _ := json.Marshal(msg)
+
+		resp, err := h.HandleMessage(context.Background(), data)
+		if err != nil {
+			t.Fatalf("HandleMessage for action %s failed: %v", action, err)
+		}
+
+		var r proxy.ActionResponse
+		if err := json.Unmarshal(resp, &r); err != nil {
+			t.Fatalf("unmarshal response for action %s: %v", action, err)
+		}
+
+		if r.StatusCode != 403 {
+			t.Errorf("action %s expected 403 for unsigned message, got %d", action, r.StatusCode)
+		}
+	}
+}
