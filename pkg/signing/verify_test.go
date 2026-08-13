@@ -522,3 +522,29 @@ func TestSignAndVerify_LegacyAction_AntiTamper(t *testing.T) {
 		t.Fatal("expected verification error for tampered legacy action request params")
 	}
 }
+
+func TestSignAndVerify_LegacyAction_EmptyActionField_AntiTamper(t *testing.T) {
+	pub, priv := generateTestKeypair()
+	v, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	signer := testSigner(t, priv)
+	// Message with empty action field but legacy body format
+	msg := []byte(`{"action":"","body":{"action_name":"db_query","action_params":{"datasource_id":"ds-1"}}}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	if err := v.Verify(signed); err != nil {
+		t.Fatalf("Verify valid legacy action request with empty action failed: %v", err)
+	}
+
+	// Tamper with action_params
+	tampered := strings.Replace(string(signed), "ds-1", "ds-2", 1)
+	if err := v.Verify([]byte(tampered)); err == nil {
+		t.Fatal("expected verification error for tampered legacy action request params when action field is empty")
+	}
+}

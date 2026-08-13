@@ -134,20 +134,22 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	if actionRaw, ok := raw["action"]; ok {
 		_ = json.Unmarshal(actionRaw, &action)
 	}
-	// For legacy format, try body.action_name
-	if action == "" {
-		if bodyRaw, ok := raw["body"]; ok {
-			var body map[string]json.RawMessage
-			if json.Unmarshal(bodyRaw, &body) == nil {
-				if actionNameRaw, ok := body["action_name"]; ok {
-					_ = json.Unmarshal(actionNameRaw, &action)
-				}
+	// For legacy format, check body.action_name
+	isLegacyAction := false
+	if bodyRaw, ok := raw["body"]; ok {
+		var body struct {
+			ActionName string `json:"action_name"`
+		}
+		if json.Unmarshal(bodyRaw, &body) == nil && body.ActionName != "" {
+			isLegacyAction = true
+			if action == "" {
+				action = body.ActionName
 			}
 		}
 	}
 
 	fields := DefaultSigningFields
-	if _, ok := raw["action"]; !ok && action != "" {
+	if isLegacyAction {
 		// Legacy action request format: fields live inside top-level body object
 		fields = []string{"body"}
 	} else if f, ok := SigningFields[action]; ok {
