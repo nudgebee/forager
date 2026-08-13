@@ -68,9 +68,7 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 			"request_id", envelope.RequestID,
 			"err", err,
 		)
-		if h.verifier.Enabled() {
-			return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
-		}
+		return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
 	}
 
 	switch envelope.Action {
