@@ -147,7 +147,10 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	}
 
 	fields := DefaultSigningFields
-	if f, ok := SigningFields[action]; ok {
+	if _, ok := raw["action"]; !ok && action != "" {
+		// Legacy action request format: fields live inside top-level body object
+		fields = []string{"body"}
+	} else if f, ok := SigningFields[action]; ok {
 		fields = f
 	} else if action == "" {
 		// Legacy HTTP proxy request format (no action field, has url)
