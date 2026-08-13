@@ -15,7 +15,7 @@ func signPack(t *testing.T, body string, priv ed25519.PrivateKey) string {
 	return body + "\nsignature: " + base64.StdEncoding.EncodeToString(sig) + "\n"
 }
 
-func testKeys(t *testing.T) (ed25519.PublicKey, ed25519.PrivateKey) {
+func testKeys(t testing.TB) (ed25519.PublicKey, ed25519.PrivateKey) {
 	t.Helper()
 	pub, priv, err := ed25519.GenerateKey(nil)
 	if err != nil {
@@ -312,5 +312,25 @@ func TestParseAndVerify_SignatureLineInjectionIsRejected(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func BenchmarkParseFacts(b *testing.B) {
+	probe := "NAME=\"Ubuntu\"\nVERSION=\"22.04.3 LTS\"\nID=ubuntu\nID_LIKE=debian\nVERSION_ID=\"22.04\"\n---\nx86_64"
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_ = parseFacts(probe)
+	}
+}
+
+func BenchmarkParseAndVerify(b *testing.B) {
+	pub, priv := testKeys(b)
+	body := "version: 1\nkind: inventory\ncollectors:\n  - id: a\n    cmd: \"echo hi\"\n"
+	sig := ed25519.Sign(priv, SignedBytes([]byte(body)))
+	doc := []byte(body + "signature: " + base64.StdEncoding.EncodeToString(sig) + "\n")
+
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		_, _ = ParseAndVerify(doc, pub)
 	}
 }

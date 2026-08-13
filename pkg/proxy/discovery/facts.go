@@ -59,24 +59,26 @@ func parseOSRelease(s string) map[string]string {
 	return kv
 }
 
+// osFamilyByID maps distro IDs to package tooling families. Pre-allocated at
+// package scope to avoid heap allocations and map construction on every invocation.
+var osFamilyByID = map[string]string{
+	"rhel": "rhel", "centos": "rhel", "rocky": "rhel", "almalinux": "rhel",
+	"ol": "rhel", "oracle": "rhel", "amzn": "rhel", "fedora": "rhel",
+	"debian": "debian", "ubuntu": "debian", "linuxmint": "debian", "raspbian": "debian",
+	"sles": "suse", "sled": "suse", "opensuse": "suse",
+	"opensuse-leap": "suse", "opensuse-tumbleweed": "suse",
+	"alpine": "alpine",
+}
+
 // osFamily maps a distro ID to the family whose package tooling it uses.
 // ID_LIKE is the fallback so derivatives we have never heard of still land in
 // the right family — the common case for the RHEL rebuilds these fleets run.
 func osFamily(id, idLike string) string {
-	byID := map[string]string{
-		"rhel": "rhel", "centos": "rhel", "rocky": "rhel", "almalinux": "rhel",
-		"ol": "rhel", "oracle": "rhel", "amzn": "rhel", "fedora": "rhel",
-		"debian": "debian", "ubuntu": "debian", "linuxmint": "debian", "raspbian": "debian",
-		"sles": "suse", "sled": "suse", "opensuse": "suse",
-		"opensuse-leap": "suse", "opensuse-tumbleweed": "suse",
-		"alpine": "alpine",
-	}
-
-	if fam, ok := byID[id]; ok {
+	if fam, ok := osFamilyByID[id]; ok {
 		return fam
 	}
 	for _, like := range strings.Fields(idLike) {
-		if fam, ok := byID[like]; ok {
+		if fam, ok := osFamilyByID[like]; ok {
 			return fam
 		}
 		// SUSE ships ID_LIKE="suse opensuse" on some releases.

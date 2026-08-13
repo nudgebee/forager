@@ -49,9 +49,11 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 		return nil, fmt.Errorf("pack too large: %d bytes (max %d)", len(raw), maxPackBytes)
 	}
 
-	// Checked before parsing: the signature covers the document minus these
-	// lines, so their count is part of what makes the signature meaningful.
-	if n := countSignatureLines(raw); n != 1 {
+	// Checked before parsing: splitSignatureLine extracts the signed payload body
+	// and counts top-level signature lines in a single pass to avoid duplicate
+	// regex line parsing.
+	signedBody, n := splitSignatureLine(raw)
+	if n != 1 {
 		return nil, fmt.Errorf("pack must contain exactly one top-level signature line, found %d", n)
 	}
 
@@ -70,7 +72,7 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pack signature is not valid base64: %w", err)
 	}
-	if !ed25519.Verify(pubKey, SignedBytes(raw), sig) {
+	if !ed25519.Verify(pubKey, signedBody, sig) {
 		return nil, fmt.Errorf("pack signature verification failed")
 	}
 
