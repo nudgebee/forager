@@ -304,7 +304,7 @@ func TestHandler_BuildErrorResponse(t *testing.T) {
 	}
 }
 
-func TestHandler_SignedActionsEnforcement(t *testing.T) {
+func TestHandler_SignatureEnforcement_FailClosed(t *testing.T) {
 	// Create verifier with a dummy public key to enable signature verification
 	dummyKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG5e/k5wQ5l5X+5b5W5d5e5f5g5h5i5j5k5l5m5n5o5 test@test"
 	verifier, err := signing.NewVerifier(dummyKey, testLogger())
@@ -318,7 +318,20 @@ func TestHandler_SignedActionsEnforcement(t *testing.T) {
 		logger:   testLogger(),
 	}
 
-	for action := range signedActions {
+	// Verify signature enforcement for standard actions as well as unknown/unregistered future actions (fail-closed)
+	actionsToTest := []string{
+		"db_query",
+		"ssh_command",
+		"http_request",
+		"mcp_request",
+		"kafka_consumer_groups",
+		"mongo_server_status",
+		"redis_info",
+		"unknown_action",
+		"future_proxy_action",
+	}
+
+	for _, action := range actionsToTest {
 		msg := map[string]any{
 			"action":     action,
 			"request_id": "req-sig-test",

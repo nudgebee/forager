@@ -20,68 +20,6 @@ import (
 	"nudgebee/forager/pkg/signing"
 )
 
-// signedActions are actions that require signature verification when signing is enabled.
-// All actions that can modify state, query data, or execute commands should be listed here.
-var signedActions = map[string]bool{
-	// Config sync — can push arbitrary datasources including RCE via MCP stdio
-	"datasource_config_sync": true,
-
-	// Database — arbitrary SQL execution
-	"db_query":    true,
-	"db_execute":  true,
-	"db_metadata": true,
-
-	// SSH — arbitrary command execution, file read/write
-	"ssh_command":  true,
-	"ssh_upload":   true,
-	"ssh_download": true,
-	"ssh_list_dir": true,
-
-	// HTTP — SSRF, credential theft via redirect
-	"http_request": true,
-
-	// MCP — arbitrary JSON-RPC to local processes
-	"mcp_request": true,
-
-	// MongoDB — queries, aggregations, server/db status and collection info
-	"mongo_query":            true,
-	"mongo_aggregate":        true,
-	"mongo_server_status":    true,
-	"mongo_repl_status":      true,
-	"mongo_collection_stats": true,
-	"mongo_current_ops":      true,
-	"mongo_db_stats":         true,
-	"mongo_list_databases":   true,
-	"mongo_list_collections": true,
-
-	// Redis — commands, info, slowlog, client list, memory stats
-	"redis_command":        true,
-	"redis_info":           true,
-	"redis_info_section":   true,
-	"redis_slowlog":        true,
-	"redis_client_list":    true,
-	"redis_memory_stats":   true,
-	"redis_cluster_info":   true,
-	"redis_keyspace_stats": true,
-
-	// Kafka — lag, groups, topics, brokers, offsets
-	"kafka_consumer_lag":            true,
-	"kafka_consumer_groups":         true,
-	"kafka_consumer_group_describe": true,
-	"kafka_topics":                  true,
-	"kafka_topic_describe":          true,
-	"kafka_brokers":                 true,
-	"kafka_topic_offsets":           true,
-
-	// Config test — creates temporary proxy to test connectivity
-	"test_datasource_config": true,
-
-	// Discovery — inventory, sweep, ldap
-	"discovery_sweep":     true,
-	"discovery_ldap":      true,
-	"discovery_inventory": true,
-}
-
 // Handler dispatches incoming relay messages to the appropriate proxy module.
 type Handler struct {
 	registry   *proxy.Registry
@@ -123,26 +61,14 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 		effectiveAction = envelope.Body.ActionName
 	}
 
-	// Verify signature for actions that require it
-	if signedActions[effectiveAction] {
-		if err := h.verifier.Verify(msg); err != nil {
-			h.logger.Error("message signature verification failed",
-				"action", effectiveAction,
-				"request_id", envelope.RequestID,
-				"err", err,
-			)
-			if h.verifier.Enabled() {
-				return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
-			}
-		}
-	}
-	// Legacy HTTP proxy requests (no action field) also require verification when signing is enabled
-	if effectiveAction == "" && h.verifier.Enabled() {
-		if err := h.verifier.Verify(msg); err != nil {
-			h.logger.Error("unsigned legacy HTTP request rejected",
-				"request_id", envelope.RequestID,
-				"err", err,
-			)
+	// Verify signature for all incoming messages (fail-closed, secure by default)
+	if err := h.verifier.Verify(msg); err != nil {
+		h.logger.Error("message signature verification failed",
+			"action", effectiveAction,
+			"request_id", envelope.RequestID,
+			"err", err,
+		)
+		if h.verifier.Enabled() {
 			return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
 		}
 	}
