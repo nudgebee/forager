@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -444,5 +445,55 @@ func TestVerify_ConcurrentReplay(t *testing.T) {
 	}
 	if replayCount != goroutines-1 {
 		t.Fatalf("expected %d replay rejections, got %d", goroutines-1, replayCount)
+	}
+}
+
+func TestSignAndVerify_TestDatasourceConfig_AntiTamper(t *testing.T) {
+	pub, priv := generateTestKeypair()
+	v, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	signer := testSigner(t, priv)
+	msg := []byte(`{"action":"test_datasource_config","datasource":{"type":"postgresql","config":{"host":"localhost"}}}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	if err := v.Verify(signed); err != nil {
+		t.Fatalf("Verify valid test_datasource_config failed: %v", err)
+	}
+
+	// Tamper with datasource config payload
+	tampered := strings.Replace(string(signed), "localhost", "evil.com", 1)
+	if err := v.Verify([]byte(tampered)); err == nil {
+		t.Fatal("expected verification error for tampered test_datasource_config host")
+	}
+}
+
+func TestSignAndVerify_LegacyHTTP_AntiTamper(t *testing.T) {
+	pub, priv := generateTestKeypair()
+	v, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	signer := testSigner(t, priv)
+	msg := []byte(`{"method":"GET","url":"/api/v1/metrics","header":{},"body":""}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	if err := v.Verify(signed); err != nil {
+		t.Fatalf("Verify valid legacy HTTP request failed: %v", err)
+	}
+
+	// Tamper with URL
+	tampered := strings.Replace(string(signed), "/api/v1/metrics", "/api/v1/admin/delete", 1)
+	if err := v.Verify([]byte(tampered)); err == nil {
+		t.Fatal("expected verification error for tampered legacy HTTP request URL")
 	}
 }

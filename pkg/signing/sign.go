@@ -91,6 +91,9 @@ var SigningFields = map[string][]string{
 	// Config sync: what datasources are being configured
 	"datasource_config_sync": {"action", "account_id", "datasources"},
 
+	// Config test: temporary datasource configuration and credentials
+	"test_datasource_config": {"action", "datasource"},
+
 	// Action requests (new format): what action on which datasource with what params
 	"db_query":    {"action", "datasource_id", "params"},
 	"db_execute":  {"action", "datasource_id", "params"},
@@ -146,6 +149,11 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	fields := DefaultSigningFields
 	if f, ok := SigningFields[action]; ok {
 		fields = f
+	} else if action == "" {
+		// Legacy HTTP proxy request format (no action field, has url)
+		if _, ok := raw["url"]; ok {
+			fields = []string{"method", "url", "header", "body"}
+		}
 	}
 
 	// Extract the fields to sign
