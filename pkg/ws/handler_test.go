@@ -318,16 +318,7 @@ func TestHandler_SignedActionsEnforcement(t *testing.T) {
 		logger:   testLogger(),
 	}
 
-	actionsToTest := []string{
-		"kafka_consumer_groups",
-		"kafka_topics",
-		"mongo_server_status",
-		"mongo_list_databases",
-		"redis_info",
-		"redis_client_list",
-	}
-
-	for _, action := range actionsToTest {
+	for action := range signedActions {
 		msg := map[string]any{
 			"action":     action,
 			"request_id": "req-sig-test",
