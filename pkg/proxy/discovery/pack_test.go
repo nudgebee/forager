@@ -9,7 +9,7 @@ import (
 
 // signPack produces a signed pack document from a body (a pack without its
 // signature line), mirroring what the publish pipeline will do in CI.
-func signPack(t *testing.T, body string, priv ed25519.PrivateKey) string {
+func signPack(t testing.TB, body string, priv ed25519.PrivateKey) string {
 	t.Helper()
 	sig := ed25519.Sign(priv, SignedBytes([]byte(body)))
 	return body + "\nsignature: " + base64.StdEncoding.EncodeToString(sig) + "\n"
@@ -332,5 +332,20 @@ func BenchmarkParseAndVerify(b *testing.B) {
 	b.ResetTimer()
 	for i := 0; i < b.N; i++ {
 		_, _ = ParseAndVerify(doc, pub)
+	}
+}
+
+func BenchmarkPackSelect(b *testing.B) {
+	pub, priv := testKeys(b)
+	pack, err := ParseAndVerify([]byte(signPack(b, validBody, priv)), pub)
+	if err != nil {
+		b.Fatalf("verifying pack: %v", err)
+	}
+	facts := map[string]string{"os_family": "debian", "arch": "x86_64", "os_id": "ubuntu", "os_major": "22"}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = pack.Select(facts)
 	}
 }
