@@ -128,6 +128,21 @@ func TestHandler_HandleMessage_HTTPRequest_NoProxy(t *testing.T) {
 	}
 }
 
+func TestHandler_HandleMessage_HTTPRequest_StringBody(t *testing.T) {
+	h := newTestHandler(t)
+	msg := `{"method": "POST", "url": "/api/v1/metrics", "request_id": "req-str-body", "header": {}, "body": "raw-string-body"}`
+	resp, err := h.HandleMessage(context.Background(), []byte(msg))
+	if err != nil {
+		t.Fatalf("HandleMessage failed for HTTP request with string body: %v", err)
+	}
+
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 404 {
+		t.Fatalf("expected 404 for no http-proxy, got %d", r.StatusCode)
+	}
+}
+
 func TestHandler_ConfigSync_HTTPProxy(t *testing.T) {
 	h := newTestHandler(t)
 

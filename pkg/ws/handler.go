@@ -44,21 +44,23 @@ func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, sec
 // All requests use a unified format: {request_id, datasource_id, action, params, ...}
 func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error) {
 	var envelope struct {
-		Action       string `json:"action"`
-		RequestID    string `json:"request_id"`
-		DatasourceID string `json:"datasource_id"`
-		Body         struct {
-			ActionName string `json:"action_name"`
-		} `json:"body"`
+		Action       string          `json:"action"`
+		RequestID    string          `json:"request_id"`
+		DatasourceID string          `json:"datasource_id"`
+		Body         json.RawMessage `json:"body"`
 	}
 	if err := json.Unmarshal(msg, &envelope); err != nil {
 		return nil, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 
-	// Resolve the effective action — legacy messages use body.action_name
+	// Resolve the effective action — legacy action messages use body.action_name
 	effectiveAction := envelope.Action
-	if effectiveAction == "" {
-		effectiveAction = envelope.Body.ActionName
+	if effectiveAction == "" && len(envelope.Body) > 0 {
+		var body struct {
+			ActionName string `json:"action_name"`
+		}
+		_ = json.Unmarshal(envelope.Body, &body)
+		effectiveAction = body.ActionName
 	}
 
 	// Verify signature for all incoming messages (fail-closed, secure by default)
