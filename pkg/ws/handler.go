@@ -21,12 +21,12 @@ import (
 )
 
 // signedActions are actions that require signature verification when signing is enabled.
-// All actions that can modify state or execute commands should be listed here.
+// All actions that can modify state, execute commands, or query internal infrastructure should be listed here.
 var signedActions = map[string]bool{
 	// Config sync — can push arbitrary datasources including RCE via MCP stdio
 	"datasource_config_sync": true,
 
-	// Database — arbitrary SQL execution
+	// Database — arbitrary SQL execution & schema inspection
 	"db_query":    true,
 	"db_execute":  true,
 	"db_metadata": true,
@@ -43,12 +43,35 @@ var signedActions = map[string]bool{
 	// MCP — arbitrary JSON-RPC to local processes
 	"mcp_request": true,
 
-	// MongoDB — arbitrary queries/aggregations
-	"mongo_query":     true,
-	"mongo_aggregate": true,
+	// MongoDB — arbitrary queries, aggregations, server inspection & topology
+	"mongo_query":            true,
+	"mongo_aggregate":        true,
+	"mongo_server_status":    true,
+	"mongo_repl_status":      true,
+	"mongo_collection_stats": true,
+	"mongo_current_ops":      true,
+	"mongo_db_stats":         true,
+	"mongo_list_databases":   true,
+	"mongo_list_collections": true,
 
-	// Redis — arbitrary command execution
-	"redis_command": true,
+	// Redis — arbitrary command execution, slow logs, client lists & server info
+	"redis_command":        true,
+	"redis_info":           true,
+	"redis_info_section":   true,
+	"redis_slowlog":        true,
+	"redis_client_list":    true,
+	"redis_memory_stats":   true,
+	"redis_cluster_info":   true,
+	"redis_keyspace_stats": true,
+
+	// Kafka — cluster broker topology, topic metadata, offsets & consumer lag
+	"kafka_consumer_lag":           true,
+	"kafka_consumer_groups":        true,
+	"kafka_consumer_group_describe": true,
+	"kafka_topics":                 true,
+	"kafka_topic_describe":         true,
+	"kafka_brokers":                true,
+	"kafka_topic_offsets":          true,
 
 	// Config test — creates temporary proxy to test connectivity
 	"test_datasource_config": true,
@@ -108,8 +131,8 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 		effectiveAction = envelope.Body.ActionName
 	}
 
-	// Verify signature for actions that require it
-	if signedActions[effectiveAction] {
+	// Verify signature for actions that require it or whenever verification is enabled (defense in depth)
+	if signedActions[effectiveAction] || h.verifier.Enabled() {
 		if err := h.verifier.Verify(msg); err != nil {
 			h.logger.Error("message signature verification failed",
 				"action", effectiveAction,
@@ -119,16 +142,6 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 			if h.verifier.Enabled() {
 				return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
 			}
-		}
-	}
-	// Legacy HTTP proxy requests (no action field) also require verification when signing is enabled
-	if effectiveAction == "" && h.verifier.Enabled() {
-		if err := h.verifier.Verify(msg); err != nil {
-			h.logger.Error("unsigned legacy HTTP request rejected",
-				"request_id", envelope.RequestID,
-				"err", err,
-			)
-			return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
 		}
 	}
 

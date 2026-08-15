@@ -2,10 +2,15 @@ package ws
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"encoding/json"
 	"log/slog"
 	"os"
 	"testing"
+	"time"
+
+	"github.com/google/uuid"
 
 	"nudgebee/forager/pkg/proxy"
 	"nudgebee/forager/pkg/secrets"
@@ -303,3 +308,122 @@ func TestHandler_BuildErrorResponse(t *testing.T) {
 		t.Fatalf("expected req-123, got %s", r.RequestID)
 	}
 }
+
+func TestHandler_SignatureEnforcement(t *testing.T) {
+	pub, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatalf("ed25519.GenerateKey: %v", err)
+	}
+
+	verifier, err := signing.NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	if !verifier.Enabled() {
+		t.Fatal("verifier should be enabled")
+	}
+
+	registry := proxy.NewRegistry()
+	registry.Register("ds-kafka", proxy.DatasourceEntry{ID: "ds-kafka", ProxyType: "kafka-proxy"}, &fakeProxy{proxyType: "kafka-proxy"})
+	registry.Register("ds-mongo", proxy.DatasourceEntry{ID: "ds-mongo", ProxyType: "mongo-proxy"}, &fakeProxy{proxyType: "mongo-proxy"})
+	registry.Register("ds-redis", proxy.DatasourceEntry{ID: "ds-redis", ProxyType: "redis-proxy"}, &fakeProxy{proxyType: "redis-proxy"})
+
+	dir := t.TempDir()
+	credStore, _ := secrets.NewCloudPushStore(dir, "test-secret")
+	secretsMgr := secrets.NewManager(testLogger())
+	h := NewHandler(registry, credStore, secretsMgr, verifier, testLogger())
+
+	actionsToTest := []struct {
+		datasourceID string
+		action       string
+	}{
+		{"ds-kafka", "kafka_consumer_lag"},
+		{"ds-kafka", "kafka_topics"},
+		{"ds-kafka", "kafka_brokers"},
+		{"ds-mongo", "mongo_list_databases"},
+		{"ds-mongo", "mongo_current_ops"},
+		{"ds-mongo", "mongo_server_status"},
+		{"ds-redis", "redis_slowlog"},
+		{"ds-redis", "redis_client_list"},
+		{"ds-redis", "redis_info"},
+	}
+
+	for _, tc := range actionsToTest {
+		t.Run("Unsigned_"+tc.action, func(t *testing.T) {
+			unsignedMsg := map[string]any{
+				"request_id":    "req-" + tc.action,
+				"datasource_id": tc.datasourceID,
+				"action":        tc.action,
+				"params":        map[string]any{},
+			}
+			msgBytes, _ := json.Marshal(unsignedMsg)
+			respBytes, err := h.HandleMessage(context.Background(), msgBytes)
+			if err != nil {
+				t.Fatalf("HandleMessage failed: %v", err)
+			}
+
+			var resp proxy.ActionResponse
+			if err := json.Unmarshal(respBytes, &resp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if resp.StatusCode != 403 {
+				t.Errorf("action %s: expected 403 Forbidden for unsigned message, got %d", tc.action, resp.StatusCode)
+			}
+		})
+
+		t.Run("Signed_"+tc.action, func(t *testing.T) {
+			msgMap := map[string]any{
+				"request_id":    "req-signed-" + tc.action,
+				"datasource_id": tc.datasourceID,
+				"action":        tc.action,
+				"params":        map[string]any{},
+			}
+
+			signedPayloadMap := map[string]any{
+				"action":        tc.action,
+				"datasource_id": tc.datasourceID,
+				"params":        map[string]any{},
+			}
+			payloadBytes, _ := json.Marshal(signedPayloadMap)
+			msgMap["signed_payload"] = string(payloadBytes)
+			msgMap["signature"] = base64.StdEncoding.EncodeToString(ed25519.Sign(priv, payloadBytes))
+			msgMap["signed_at"] = time.Now().UTC().Format(time.RFC3339)
+			msgMap["nonce"] = uuid.NewString()
+
+			msgBytes, _ := json.Marshal(msgMap)
+			respBytes, err := h.HandleMessage(context.Background(), msgBytes)
+			if err != nil {
+				t.Fatalf("HandleMessage failed: %v", err)
+			}
+
+			var resp proxy.ActionResponse
+			if err := json.Unmarshal(respBytes, &resp); err != nil {
+				t.Fatalf("unmarshal response: %v", err)
+			}
+			if resp.StatusCode != 200 {
+				t.Errorf("action %s: expected 200 OK for signed message, got %d (%s)", tc.action, resp.StatusCode, resp.Data)
+			}
+		})
+	}
+
+	t.Run("Unsigned_UnknownAction_BlockedWhenVerifierEnabled", func(t *testing.T) {
+		unsignedMsg := map[string]any{
+			"request_id":    "req-unknown",
+			"datasource_id": "ds-redis",
+			"action":        "unregistered_custom_action",
+			"params":        map[string]any{},
+		}
+		msgBytes, _ := json.Marshal(unsignedMsg)
+		respBytes, err := h.HandleMessage(context.Background(), msgBytes)
+		if err != nil {
+			t.Fatalf("HandleMessage failed: %v", err)
+		}
+
+		var resp proxy.ActionResponse
+		_ = json.Unmarshal(respBytes, &resp)
+		if resp.StatusCode != 403 {
+			t.Errorf("expected 403 Forbidden for unsigned unknown action, got %d", resp.StatusCode)
+		}
+	})
+}
+
