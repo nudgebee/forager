@@ -1,3 +1,8 @@
+## 2026-08-15 - Enforce Complete Signature Verification on WebSocket Proxy Actions
+**Vulnerability:** An incomplete `signedActions` map in `pkg/ws/handler.go` omitted 21 proxy actions across Kafka (`kafka_consumer_lag`, `kafka_brokers`, etc.), MongoDB (`mongo_list_databases`, `mongo_current_ops`, etc.), and Redis (`redis_slowlog`, `redis_client_list`, etc.). Because verification logic only checked `signedActions[effectiveAction]`, unlisted actions bypassed cryptographic signature verification entirely, allowing unsigned messages to extract database queries, internal topology, and cluster metadata.
+**Learning:** Using an opt-in allowlist where unlisted actions default to unverified creates a fail-open hazard whenever new proxy capabilities or actions are added without updating the central map.
+**Prevention:** Register all proxy actions explicitly in `signedActions`, enforce fail-secure signature verification for all actions whenever verification is enabled (`h.verifier.Enabled()`), and maintain automated tests that assert every action touching external or internal infrastructure requires cryptographic signatures.
+
 ## 2026-08-08 - Atomic Nonce Verification for Replay Prevention
 **Vulnerability:** TOCTOU race condition in `pkg/signing/verify.go` allowed concurrent duplicate requests with identical nonces to bypass replay protection because `isReplayedNonce` checked nonces before `recordNonce` was called at the end of message verification.
 **Learning:** Checking nonces separately from recording them leaves a race condition window under concurrent load, and checking nonces before signature verification allows unauthenticated requests to pollute or query nonce tracking.

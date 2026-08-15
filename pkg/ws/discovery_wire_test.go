@@ -179,8 +179,15 @@ func TestEveryDiscoveryActionRequiresSignature(t *testing.T) {
 func TestActionsThatTouchRemoteSystemsAreSigned(t *testing.T) {
 	mustBeSigned := []string{
 		"ssh_command", "ssh_upload", "ssh_download", "ssh_list_dir",
-		"db_query", "db_execute",
-		"http_request", "mcp_request", "redis_command",
+		"db_query", "db_execute", "db_metadata",
+		"http_request", "mcp_request",
+		"mongo_query", "mongo_aggregate", "mongo_server_status", "mongo_repl_status",
+		"mongo_collection_stats", "mongo_current_ops", "mongo_db_stats",
+		"mongo_list_databases", "mongo_list_collections",
+		"redis_command", "redis_info", "redis_info_section", "redis_slowlog",
+		"redis_client_list", "redis_memory_stats", "redis_cluster_info", "redis_keyspace_stats",
+		"kafka_consumer_lag", "kafka_consumer_groups", "kafka_consumer_group_describe",
+		"kafka_topics", "kafka_topic_describe", "kafka_brokers", "kafka_topic_offsets",
 		"discovery_sweep", "discovery_ldap", "discovery_inventory",
 		"datasource_config_sync", "test_datasource_config",
 	}
