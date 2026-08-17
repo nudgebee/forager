@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -142,8 +143,13 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	c.logger.Info("connecting to relay", "url", c.relayURL)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.relayURL, header)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.relayURL, header)
 	if err != nil {
+		if resp != nil {
+			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+			resp.Body.Close() // nolint:errcheck
+			return fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
+		}
 		return fmt.Errorf("dial failed: %w", err)
 	}
 
