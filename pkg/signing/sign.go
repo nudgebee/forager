@@ -91,6 +91,9 @@ var SigningFields = map[string][]string{
 	// Config sync: what datasources are being configured
 	"datasource_config_sync": {"action", "account_id", "datasources"},
 
+	// Config test: temporary datasource configuration and credentials
+	"test_datasource_config": {"action", "datasource"},
+
 	// Action requests (new format): what action on which datasource with what params
 	"db_query":    {"action", "datasource_id", "params"},
 	"db_execute":  {"action", "datasource_id", "params"},
@@ -131,21 +134,31 @@ func (s *Signer) Sign(msg []byte) ([]byte, error) {
 	if actionRaw, ok := raw["action"]; ok {
 		_ = json.Unmarshal(actionRaw, &action)
 	}
-	// For legacy format, try body.action_name
-	if action == "" {
-		if bodyRaw, ok := raw["body"]; ok {
-			var body map[string]json.RawMessage
-			if json.Unmarshal(bodyRaw, &body) == nil {
-				if actionNameRaw, ok := body["action_name"]; ok {
-					_ = json.Unmarshal(actionNameRaw, &action)
-				}
+	// For legacy format, check body.action_name
+	isLegacyAction := false
+	if bodyRaw, ok := raw["body"]; ok {
+		var body struct {
+			ActionName string `json:"action_name"`
+		}
+		if json.Unmarshal(bodyRaw, &body) == nil && body.ActionName != "" {
+			isLegacyAction = true
+			if action == "" {
+				action = body.ActionName
 			}
 		}
 	}
 
 	fields := DefaultSigningFields
-	if f, ok := SigningFields[action]; ok {
+	if isLegacyAction {
+		// Legacy action request format: fields live inside top-level body object
+		fields = []string{"body"}
+	} else if f, ok := SigningFields[action]; ok {
 		fields = f
+	} else if action == "" {
+		// Legacy HTTP proxy request format (no action field, has url)
+		if _, ok := raw["url"]; ok {
+			fields = []string{"method", "url", "header", "body"}
+		}
 	}
 
 	// Extract the fields to sign

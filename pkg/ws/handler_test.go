@@ -128,6 +128,21 @@ func TestHandler_HandleMessage_HTTPRequest_NoProxy(t *testing.T) {
 	}
 }
 
+func TestHandler_HandleMessage_HTTPRequest_StringBody(t *testing.T) {
+	h := newTestHandler(t)
+	msg := `{"method": "POST", "url": "/api/v1/metrics", "request_id": "req-str-body", "header": {}, "body": "raw-string-body"}`
+	resp, err := h.HandleMessage(context.Background(), []byte(msg))
+	if err != nil {
+		t.Fatalf("HandleMessage failed for HTTP request with string body: %v", err)
+	}
+
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 404 {
+		t.Fatalf("expected 404 for no http-proxy, got %d", r.StatusCode)
+	}
+}
+
 func TestHandler_ConfigSync_HTTPProxy(t *testing.T) {
 	h := newTestHandler(t)
 
@@ -301,5 +316,55 @@ func TestHandler_BuildErrorResponse(t *testing.T) {
 	}
 	if r.RequestID != "req-123" {
 		t.Fatalf("expected req-123, got %s", r.RequestID)
+	}
+}
+
+func TestHandler_SignatureEnforcement_FailClosed(t *testing.T) {
+	// Create verifier with a dummy public key to enable signature verification
+	dummyKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG5e/k5wQ5l5X+5b5W5d5e5f5g5h5i5j5k5l5m5n5o5 test@test"
+	verifier, err := signing.NewVerifier(dummyKey, testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	h := &Handler{
+		registry: proxy.NewRegistry(),
+		verifier: verifier,
+		logger:   testLogger(),
+	}
+
+	// Verify signature enforcement for standard actions as well as unknown/unregistered future actions (fail-closed)
+	actionsToTest := []string{
+		"db_query",
+		"ssh_command",
+		"http_request",
+		"mcp_request",
+		"kafka_consumer_groups",
+		"mongo_server_status",
+		"redis_info",
+		"unknown_action",
+		"future_proxy_action",
+	}
+
+	for _, action := range actionsToTest {
+		msg := map[string]any{
+			"action":     action,
+			"request_id": "req-sig-test",
+		}
+		data, _ := json.Marshal(msg)
+
+		resp, err := h.HandleMessage(context.Background(), data)
+		if err != nil {
+			t.Fatalf("HandleMessage for action %s failed: %v", action, err)
+		}
+
+		var r proxy.ActionResponse
+		if err := json.Unmarshal(resp, &r); err != nil {
+			t.Fatalf("unmarshal response for action %s: %v", action, err)
+		}
+
+		if r.StatusCode != 403 {
+			t.Errorf("action %s expected 403 for unsigned message, got %d", action, r.StatusCode)
+		}
 	}
 }

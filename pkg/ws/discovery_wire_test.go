@@ -166,17 +166,35 @@ func (r *recordingProxy) Close() error                      { return nil }
 // This pins them, so adding a fourth without registering it fails here rather
 // than in production.
 func TestEveryDiscoveryActionRequiresSignature(t *testing.T) {
-	// Mirrors the actions discovery.Proxy.HandleRequest dispatches on.
+	dummyKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG5e/k5wQ5l5X+5b5W5d5e5f5g5h5i5j5k5l5m5n5o5 test@test"
+	verifier, err := signing.NewVerifier(dummyKey, testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	h := &Handler{registry: proxy.NewRegistry(), verifier: verifier, logger: testLogger()}
+
 	for _, action := range []string{"discovery_sweep", "discovery_ldap", "discovery_inventory"} {
-		if !signedActions[action] {
-			t.Errorf("%s is not in signedActions — it would bypass signature verification", action)
+		msg, _ := json.Marshal(map[string]any{"action": action, "request_id": "req-1"})
+		resp, err := h.HandleMessage(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleMessage failed: %v", err)
+		}
+		var r proxy.ActionResponse
+		_ = json.Unmarshal(resp, &r)
+		if r.StatusCode != 403 {
+			t.Errorf("%s expected 403 for unsigned message, got %d", action, r.StatusCode)
 		}
 	}
 }
 
-// The allowlist's default is the hazard, so state the invariant that matters:
-// anything that reaches a host or a network must be signed.
 func TestActionsThatTouchRemoteSystemsAreSigned(t *testing.T) {
+	dummyKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIAG5e/k5wQ5l5X+5b5W5d5e5f5g5h5i5j5k5l5m5n5o5 test@test"
+	verifier, err := signing.NewVerifier(dummyKey, testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+	h := &Handler{registry: proxy.NewRegistry(), verifier: verifier, logger: testLogger()}
+
 	mustBeSigned := []string{
 		"ssh_command", "ssh_upload", "ssh_download", "ssh_list_dir",
 		"db_query", "db_execute",
@@ -185,8 +203,15 @@ func TestActionsThatTouchRemoteSystemsAreSigned(t *testing.T) {
 		"datasource_config_sync", "test_datasource_config",
 	}
 	for _, action := range mustBeSigned {
-		if !signedActions[action] {
-			t.Errorf("%s executes against a remote system but is not signed", action)
+		msg, _ := json.Marshal(map[string]any{"action": action, "request_id": "req-1"})
+		resp, err := h.HandleMessage(context.Background(), msg)
+		if err != nil {
+			t.Fatalf("HandleMessage failed: %v", err)
+		}
+		var r proxy.ActionResponse
+		_ = json.Unmarshal(resp, &r)
+		if r.StatusCode != 403 {
+			t.Errorf("%s expected 403 for unsigned message, got %d", action, r.StatusCode)
 		}
 	}
 }

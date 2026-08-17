@@ -20,53 +20,6 @@ import (
 	"nudgebee/forager/pkg/signing"
 )
 
-// signedActions are actions that require signature verification when signing is enabled.
-// All actions that can modify state or execute commands should be listed here.
-var signedActions = map[string]bool{
-	// Config sync — can push arbitrary datasources including RCE via MCP stdio
-	"datasource_config_sync": true,
-
-	// Database — arbitrary SQL execution
-	"db_query":    true,
-	"db_execute":  true,
-	"db_metadata": true,
-
-	// SSH — arbitrary command execution, file read/write
-	"ssh_command":  true,
-	"ssh_upload":   true,
-	"ssh_download": true,
-	"ssh_list_dir": true,
-
-	// HTTP — SSRF, credential theft via redirect
-	"http_request": true,
-
-	// MCP — arbitrary JSON-RPC to local processes
-	"mcp_request": true,
-
-	// MongoDB — arbitrary queries/aggregations
-	"mongo_query":     true,
-	"mongo_aggregate": true,
-
-	// Redis — arbitrary command execution
-	"redis_command": true,
-
-	// Config test — creates temporary proxy to test connectivity
-	"test_datasource_config": true,
-
-	// Discovery — inventory executes commands on remote hosts over SSH, the
-	// same capability as ssh_command above. The commands themselves come
-	// from a signature-verified content pack, but the targets do not: an
-	// unsigned action lets a caller choose which hosts we connect to.
-	//
-	// Sweep sends probes across a network segment. Its scope is bounded by
-	// allowed_cidrs, but triggering one is not harmless — an unexpected scan
-	// reads as an attack originating from our agent, and some IDS and
-	// fail2ban configurations act on it.
-	"discovery_sweep":     true,
-	"discovery_ldap":      true,
-	"discovery_inventory": true,
-}
-
 // Handler dispatches incoming relay messages to the appropriate proxy module.
 type Handler struct {
 	registry   *proxy.Registry
@@ -91,45 +44,37 @@ func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, sec
 // All requests use a unified format: {request_id, datasource_id, action, params, ...}
 func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error) {
 	var envelope struct {
-		Action       string `json:"action"`
-		RequestID    string `json:"request_id"`
-		DatasourceID string `json:"datasource_id"`
-		Body         struct {
-			ActionName string `json:"action_name"`
-		} `json:"body"`
+		Action       string          `json:"action"`
+		RequestID    string          `json:"request_id"`
+		DatasourceID string          `json:"datasource_id"`
+		Body         json.RawMessage `json:"body"`
 	}
 	if err := json.Unmarshal(msg, &envelope); err != nil {
 		return nil, fmt.Errorf("unmarshal envelope: %w", err)
 	}
 
-	// Resolve the effective action — legacy messages use body.action_name
+	// Resolve the effective action — legacy action messages use body.action_name
 	effectiveAction := envelope.Action
-	if effectiveAction == "" {
-		effectiveAction = envelope.Body.ActionName
+	if effectiveAction == "" && len(envelope.Body) > 0 {
+		var body struct {
+			ActionName string `json:"action_name"`
+		}
+		_ = json.Unmarshal(envelope.Body, &body)
+		effectiveAction = body.ActionName
 	}
 
-	// Verify signature for actions that require it
-	if signedActions[effectiveAction] {
-		if err := h.verifier.Verify(msg); err != nil {
-			h.logger.Error("message signature verification failed",
-				"action", effectiveAction,
-				"request_id", envelope.RequestID,
-				"err", err,
-			)
-			if h.verifier.Enabled() {
-				return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
-			}
-		}
+	// Verify signature for all incoming messages (fail-closed, secure by default)
+	if h.verifier == nil {
+		h.logger.Error("verifier is not initialized", "request_id", envelope.RequestID)
+		return h.buildErrorResponse(envelope.RequestID, 500, "internal server error: verifier not initialized"), nil
 	}
-	// Legacy HTTP proxy requests (no action field) also require verification when signing is enabled
-	if effectiveAction == "" && h.verifier.Enabled() {
-		if err := h.verifier.Verify(msg); err != nil {
-			h.logger.Error("unsigned legacy HTTP request rejected",
-				"request_id", envelope.RequestID,
-				"err", err,
-			)
-			return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
-		}
+	if err := h.verifier.Verify(msg); err != nil {
+		h.logger.Error("message signature verification failed",
+			"action", effectiveAction,
+			"request_id", envelope.RequestID,
+			"err", err,
+		)
+		return h.buildErrorResponse(envelope.RequestID, 403, "signature verification failed"), nil
 	}
 
 	switch envelope.Action {
