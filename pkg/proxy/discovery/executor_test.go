@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"crypto/ed25519"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -26,12 +27,19 @@ type fakeSSHServer struct {
 	// responses maps a command to its canned stdout.
 	responses map[string]string
 
+	// exitCodes maps a command to its remote exit status. Unspecified
+	// commands exit successfully.
+	exitCodes map[string]uint32
+
 	// stderrFor maps a command to stderr written before its stdout, used to
 	// exercise concurrent pipe draining.
 	stderrFor map[string]string
 
 	// delay is applied before answering, to exercise concurrency.
 	delay time.Duration
+
+	// delayFor overrides delay for individual commands.
+	delayFor map[string]time.Duration
 
 	// rejectAuth makes the server refuse authentication.
 	rejectAuth bool
@@ -53,7 +61,7 @@ func newFakeSSHServer(t *testing.T, responses map[string]string) *fakeSSHServer 
 		t.Fatalf("creating signer: %v", err)
 	}
 
-	s := &fakeSSHServer{t: t, responses: responses}
+	s := &fakeSSHServer{t: t, responses: responses, exitCodes: make(map[string]uint32)}
 	s.config = &ssh.ServerConfig{
 		PasswordCallback: func(ssh.ConnMetadata, []byte) (*ssh.Permissions, error) {
 			if s.rejectAuth {
@@ -148,14 +156,18 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			continue
 		}
 		_ = req.Reply(true, nil)
+		cmd := string(req.Payload[4:])
 
 		done := s.trackExec()
-		if s.delay > 0 {
-			time.Sleep(s.delay)
+		commandDelay := s.delay
+		if d, ok := s.delayFor[cmd]; ok {
+			commandDelay = d
+		}
+		if commandDelay > 0 {
+			time.Sleep(commandDelay)
 		}
 		defer done()
 
-		cmd := string(req.Payload[4:])
 		out, known := s.responses[cmd]
 		if !known {
 			_, _ = io.WriteString(ch.Stderr(), "command not found\n")
@@ -168,7 +180,7 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			_, _ = io.WriteString(ch.Stderr(), errOut)
 		}
 		_, _ = io.WriteString(ch, out)
-		_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(0))
+		_, _ = ch.SendRequest("exit-status", false, exitStatusPayload(s.exitCodes[cmd]))
 		return
 	}
 }
@@ -244,6 +256,108 @@ func TestRunInventory_CollectsFromDebianHost(t *testing.T) {
 	}
 	if _, ran := r.Collected["pkgs-rpm"]; ran {
 		t.Error("rpm collector ran on a Debian host")
+	}
+}
+
+func TestRunInventory_ReportsCollectorExitCode(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"dpkg-query -W":       "updates available\n",
+		"cat /etc/os-release": ubuntuOSRelease,
+	})
+	srv.exitCodes["dpkg-query -W"] = 100
+
+	r := runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), testExecConfig(srv.port(), 2))[0]
+	if r.Status != StatusOK {
+		t.Fatalf("status = %s (%s), want ok", r.Status, r.Error)
+	}
+	if got := r.CollectorExitCodes["pkgs-dpkg"]; got != 100 {
+		t.Errorf("collector exit code = %d, want 100", got)
+	}
+	if got := r.Collected["pkgs-dpkg"]; got != "updates available\n" {
+		t.Errorf("collector output = %q, want output preserved", got)
+	}
+	encoded, err := json.Marshal(r)
+	if err != nil {
+		t.Fatalf("marshal target result: %v", err)
+	}
+	var wire map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &wire); err != nil {
+		t.Fatalf("unmarshal target result: %v", err)
+	}
+	for _, field := range []string{"collector_exit_codes", "collector_truncated", "collector_output_limit_bytes"} {
+		if _, ok := wire[field]; !ok {
+			t.Errorf("wire result missing %q", field)
+		}
+	}
+}
+
+func TestRunInventory_ReportsOutputTruncationAtBoundary(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		outputLen int
+		truncated bool
+	}{
+		{name: "under cap", outputLen: 999, truncated: false},
+		{name: "at cap", outputLen: 1000, truncated: false},
+		{name: "over cap", outputLen: 1001, truncated: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := newFakeSSHServer(t, map[string]string{
+				factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+				"dpkg-query -W":       strings.Repeat("x", tc.outputLen),
+				"cat /etc/os-release": ubuntuOSRelease,
+			})
+			cfg := testExecConfig(srv.port(), 2)
+			cfg.maxOutputBytes = 1000
+
+			r := runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), cfg)[0]
+			if r.Status != StatusOK {
+				t.Fatalf("status = %s (%s), want ok", r.Status, r.Error)
+			}
+			if got := r.CollectorTruncated["pkgs-dpkg"]; got != tc.truncated {
+				t.Errorf("collector truncated = %t, want %t", got, tc.truncated)
+			}
+			if got := len(r.Collected["pkgs-dpkg"]); got != min(tc.outputLen, cfg.maxOutputBytes) {
+				t.Errorf("collector output length = %d, want %d", got, min(tc.outputLen, cfg.maxOutputBytes))
+			}
+			if got := r.CollectorOutputLimitBytes; got != cfg.maxOutputBytes {
+				t.Errorf("output limit = %d, want %d", got, cfg.maxOutputBytes)
+			}
+		})
+	}
+}
+
+func TestRunInventory_NegativeOutputCapDoesNotPanic(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"cat /etc/os-release": ubuntuOSRelease,
+	})
+	cfg := testExecConfig(srv.port(), 2)
+	cfg.maxOutputBytes = -1
+
+	r := runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), cfg)[0]
+	if r.Status != StatusOK {
+		t.Fatalf("status = %s (%s), want ok", r.Status, r.Error)
+	}
+}
+
+func TestRunInventory_TimeoutIsNotAnExitCode(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"dpkg-query -W":       "package output",
+		"cat /etc/os-release": ubuntuOSRelease,
+	})
+	srv.delayFor = map[string]time.Duration{"dpkg-query -W": 200 * time.Millisecond}
+	cfg := testExecConfig(srv.port(), 2)
+	cfg.commandTimeout = 20 * time.Millisecond
+
+	r := runInventory(context.Background(), []string{"127.0.0.1"}, debianPack(t), cfg)[0]
+	if _, ok := r.CollectorExitCodes["pkgs-dpkg"]; ok {
+		t.Fatal("timed-out collector reported an exit code")
+	}
+	if !strings.Contains(r.Failed["pkgs-dpkg"], "command timed out") {
+		t.Errorf("collector error = %q, want command timeout", r.Failed["pkgs-dpkg"])
 	}
 }
 
