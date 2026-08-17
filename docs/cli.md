@@ -161,7 +161,10 @@ The example pack lives at `docs/content-packs/linux-inventory-example.yaml`.
         "pkgs-dpkg": "acpid\t1:2.0.33-1ubuntu1\tamd64\tinstalled\n...",
         "machine-id": "ec2403e319a2f3f0ae53a05e3daf084b\n",
         "os-release": "NAME=\"Ubuntu\"\nID=ubuntu\n..."
-      }
+      },
+      "collector_exit_codes": {"pkgs-dpkg": 0, "machine-id": 0},
+      "collector_truncated": {"pkgs-dpkg": false, "machine-id": false},
+      "collector_output_limit_bytes": 1048576
     },
     {"host": "192.168.1.51", "status": "ssh-auth-failed", "error": "..."}
   ]
@@ -186,6 +189,17 @@ why the tenth did not work. Per-host `status` is one of:
 Collector output is returned raw, exactly as the command printed it. Parsing
 happens server-side, which is why fixing a parser never requires touching a
 single machine.
+
+Each successfully started collector also reports its command exit status in
+`collector_exit_codes`. A non-zero status is preserved as data because some
+package-management commands use it to communicate findings (for example,
+`100` can mean updates are available); it is not treated as a collector
+failure. Commands that cannot complete, including timeouts, are reported in
+`collector_errors` and have no exit-code entry.
+
+`collector_truncated` identifies output that exceeded the per-stream cap shown
+in `collector_output_limit_bytes`. The cap applies independently to stdout
+and stderr, and the result is marked truncated if either stream exceeded it.
 
 ---
 

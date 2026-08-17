@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -28,14 +29,17 @@ const (
 // is returned raw: parsing lives server-side so that fixing a parser never
 // requires touching the agent.
 type TargetResult struct {
-	Host      string             `json:"host"`
-	Status    string             `json:"status"`
-	Error     string             `json:"error,omitempty"`
-	Facts     map[string]string  `json:"facts,omitempty"`
-	Collected map[string]string  `json:"collectors,omitempty"`
-	Failed    map[string]string  `json:"collector_errors,omitempty"`
-	Skipped   []SkippedCollector `json:"skipped_collectors,omitempty"`
-	DurationS float64            `json:"duration_seconds"`
+	Host                      string             `json:"host"`
+	Status                    string             `json:"status"`
+	Error                     string             `json:"error,omitempty"`
+	Facts                     map[string]string  `json:"facts,omitempty"`
+	Collected                 map[string]string  `json:"collectors,omitempty"`
+	CollectorExitCodes        map[string]int     `json:"collector_exit_codes,omitempty"`
+	CollectorTruncated        map[string]bool    `json:"collector_truncated,omitempty"`
+	CollectorOutputLimitBytes int                `json:"collector_output_limit_bytes,omitempty"`
+	Failed                    map[string]string  `json:"collector_errors,omitempty"`
+	Skipped                   []SkippedCollector `json:"skipped_collectors,omitempty"`
+	DurationS                 float64            `json:"duration_seconds"`
 }
 
 // execConfig is the tunable part of an inventory run.
@@ -94,7 +98,7 @@ func inventoryHost(ctx context.Context, host string, pack *Pack, cfg execConfig)
 	defer func() { _ = client.Close() }()
 
 	// Probe facts first: the pack's guards are evaluated against them.
-	probeOut, _, err := runCommand(ctx, client, factsProbe, cfg)
+	probeOut, _, _, _, err := runCommand(ctx, client, factsProbe, cfg)
 	if err != nil {
 		res.Status = StatusError
 		res.Error = fmt.Sprintf("facts probe: %v", err)
@@ -105,6 +109,9 @@ func inventoryHost(ctx context.Context, host string, pack *Pack, cfg execConfig)
 	collectors, skipped := pack.Select(res.Facts)
 	res.Skipped = skipped
 	res.Collected = make(map[string]string, len(collectors))
+	res.CollectorExitCodes = make(map[string]int, len(collectors))
+	res.CollectorTruncated = make(map[string]bool, len(collectors))
+	res.CollectorOutputLimitBytes = cfg.maxOutputBytes
 
 	for _, c := range collectors {
 		if ctx.Err() != nil {
@@ -112,7 +119,7 @@ func inventoryHost(ctx context.Context, host string, pack *Pack, cfg execConfig)
 			res.Error = "host timeout during collection"
 			return res
 		}
-		out, stderr, err := runCommand(ctx, client, c.Cmd, cfg)
+		out, stderr, exitCode, truncated, err := runCommand(ctx, client, c.Cmd, cfg)
 		if err != nil {
 			if res.Failed == nil {
 				res.Failed = make(map[string]string, 1)
@@ -120,6 +127,8 @@ func inventoryHost(ctx context.Context, host string, pack *Pack, cfg execConfig)
 			res.Failed[c.ID] = err.Error()
 			continue
 		}
+		res.CollectorExitCodes[c.ID] = exitCode
+		res.CollectorTruncated[c.ID] = truncated
 		// A non-zero exit is not an error here: `dnf needs-restarting -r`
 		// signals its answer through the exit code, and stderr is useful
 		// context for the server-side parser either way.
@@ -182,25 +191,30 @@ func classifyDialError(err error) string {
 }
 
 // runCommand executes one command and returns stdout and stderr, each capped
-// at cfg.maxOutputBytes. A package list on a large host is big but bounded;
-// an unbounded read here would let one host exhaust the forager's memory.
-func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execConfig) (string, string, error) {
+// at cfg.maxOutputBytes. It also returns the command's exit code and whether
+// either stream exceeded the cap. A package list on a large host is big but
+// bounded; an unbounded read here would let one host exhaust the forager's
+// memory.
+func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execConfig) (string, string, int, bool, error) {
+	if cfg.maxOutputBytes < 0 {
+		cfg.maxOutputBytes = 0
+	}
 	cmdCtx, cancel := context.WithTimeout(ctx, cfg.commandTimeout)
 	defer cancel()
 
 	session, err := client.NewSession()
 	if err != nil {
-		return "", "", fmt.Errorf("new session: %w", err)
+		return "", "", 0, false, fmt.Errorf("new session: %w", err)
 	}
 	defer func() { _ = session.Close() }()
 
 	stdoutPipe, err := session.StdoutPipe()
 	if err != nil {
-		return "", "", fmt.Errorf("stdout pipe: %w", err)
+		return "", "", 0, false, fmt.Errorf("stdout pipe: %w", err)
 	}
 	stderrPipe, err := session.StderrPipe()
 	if err != nil {
-		return "", "", fmt.Errorf("stderr pipe: %w", err)
+		return "", "", 0, false, fmt.Errorf("stderr pipe: %w", err)
 	}
 
 	// Commands come from a content pack read off local disk and verified
@@ -208,14 +222,18 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 	// request selects a pack by version and cannot supply one, so no part of
 	// an action's payload is executed here.
 	if err := session.Start(cmd); err != nil {
-		return "", "", fmt.Errorf("start: %w", err)
+		return "", "", 0, false, fmt.Errorf("start: %w", err)
 	}
 
 	// stdout and stderr must be drained concurrently. Reading them in
 	// sequence deadlocks whenever the remote fills one pipe's buffer while we
 	// are still blocked on the other — `dnf repolist` writing warnings to
 	// stderr ahead of its stdout is enough to trigger it.
-	type readResult struct{ stdout, stderr []byte }
+	type readResult struct {
+		stdout, stderr []byte
+		truncated      bool
+	}
+	var readResultTruncated atomic.Bool
 	readCh := make(chan readResult, 1)
 	go func() {
 		var out, errOut []byte
@@ -223,18 +241,26 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 		readWG.Add(2)
 		go func() {
 			defer readWG.Done()
-			out, _ = io.ReadAll(io.LimitReader(stdoutPipe, int64(cfg.maxOutputBytes)))
+			out, _ = io.ReadAll(io.LimitReader(stdoutPipe, int64(cfg.maxOutputBytes)+1))
+			if len(out) > cfg.maxOutputBytes {
+				out = out[:cfg.maxOutputBytes]
+				readResultTruncated.Store(true)
+			}
 			// Discard the remainder so a host exceeding the cap cannot block
 			// on a full pipe and hold the session open until timeout.
 			_, _ = io.Copy(io.Discard, stdoutPipe)
 		}()
 		go func() {
 			defer readWG.Done()
-			errOut, _ = io.ReadAll(io.LimitReader(stderrPipe, int64(cfg.maxOutputBytes)))
+			errOut, _ = io.ReadAll(io.LimitReader(stderrPipe, int64(cfg.maxOutputBytes)+1))
+			if len(errOut) > cfg.maxOutputBytes {
+				errOut = errOut[:cfg.maxOutputBytes]
+				readResultTruncated.Store(true)
+			}
 			_, _ = io.Copy(io.Discard, stderrPipe)
 		}()
 		readWG.Wait()
-		readCh <- readResult{out, errOut}
+		readCh <- readResult{out, errOut, readResultTruncated.Load()}
 	}()
 
 	waitCh := make(chan error, 1)
@@ -245,21 +271,25 @@ func runCommand(ctx context.Context, client *ssh.Client, cmd string, cfg execCon
 	case read = <-readCh:
 	case <-cmdCtx.Done():
 		_ = session.Signal(ssh.SIGKILL)
-		return "", "", fmt.Errorf("command timed out")
+		return "", "", 0, false, fmt.Errorf("command timed out")
 	}
 
+	exitCode := 0
 	select {
 	case waitErr := <-waitCh:
 		// Non-zero exit is reported through output, not as a Go error:
 		// `dnf needs-restarting -r` answers through its exit code.
-		var exitErr *ssh.ExitError
-		if waitErr != nil && !errors.As(waitErr, &exitErr) {
-			return "", "", fmt.Errorf("wait: %w", waitErr)
+		if waitErr != nil {
+			var exitErr *ssh.ExitError
+			if !errors.As(waitErr, &exitErr) {
+				return "", "", 0, read.truncated, fmt.Errorf("wait: %w", waitErr)
+			}
+			exitCode = exitErr.ExitStatus()
 		}
 	case <-cmdCtx.Done():
 		_ = session.Signal(ssh.SIGKILL)
-		return "", "", fmt.Errorf("command timed out")
+		return "", "", 0, read.truncated, fmt.Errorf("command timed out")
 	}
 
-	return string(read.stdout), string(read.stderr), nil
+	return string(read.stdout), string(read.stderr), exitCode, read.truncated, nil
 }
