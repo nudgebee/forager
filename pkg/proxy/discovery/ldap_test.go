@@ -38,6 +38,21 @@ func TestFormatObjectGUID_EdgeCases(t *testing.T) {
 	}
 }
 
+func BenchmarkFormatObjectGUID(b *testing.B) {
+	raw := []byte{
+		0x78, 0x56, 0x34, 0x12,
+		0xbc, 0x9a,
+		0xf0, 0xde,
+		0x12, 0x34,
+		0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0,
+	}
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_ = formatObjectGUID(raw)
+	}
+}
+
 func TestParseADTimestamp(t *testing.T) {
 	// 2024-01-15T10:30:00Z as a Windows FILETIME.
 	want := time.Date(2024, 1, 15, 10, 30, 0, 0, time.UTC)
