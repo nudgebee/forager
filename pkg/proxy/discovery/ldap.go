@@ -247,6 +247,8 @@ func parseADTimestamp(raw string) time.Time {
 	return time.Unix(ticks/10_000_000-windowsEpochToUnixSec, 0)
 }
 
+const hexTable = "0123456789abcdef"
+
 // formatObjectGUID renders AD's little-endian mixed-endian GUID in the
 // canonical string form, so it matches what other tools report for the same
 // machine — this is a STRONG merge identifier and must be byte-accurate.
@@ -257,13 +259,53 @@ func formatObjectGUID(raw []byte) string {
 		}
 		return hex.EncodeToString(raw)
 	}
-	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%s-%s",
-		raw[3], raw[2], raw[1], raw[0],
-		raw[5], raw[4],
-		raw[7], raw[6],
-		hex.EncodeToString(raw[8:10]),
-		hex.EncodeToString(raw[10:16]),
-	)
+
+	// AD GUID is a 16-byte structure formatted as 8-4-4-4-12 hex string (36 bytes).
+	// Stack-allocated buffer avoids fmt.Sprintf reflection and intermediate slice allocations.
+	var buf [36]byte
+	// Data1 (4 bytes, little-endian: 3, 2, 1, 0)
+	buf[0] = hexTable[raw[3]>>4]
+	buf[1] = hexTable[raw[3]&0x0f]
+	buf[2] = hexTable[raw[2]>>4]
+	buf[3] = hexTable[raw[2]&0x0f]
+	buf[4] = hexTable[raw[1]>>4]
+	buf[5] = hexTable[raw[1]&0x0f]
+	buf[6] = hexTable[raw[0]>>4]
+	buf[7] = hexTable[raw[0]&0x0f]
+	buf[8] = '-'
+	// Data2 (2 bytes, little-endian: 5, 4)
+	buf[9] = hexTable[raw[5]>>4]
+	buf[10] = hexTable[raw[5]&0x0f]
+	buf[11] = hexTable[raw[4]>>4]
+	buf[12] = hexTable[raw[4]&0x0f]
+	buf[13] = '-'
+	// Data3 (2 bytes, little-endian: 7, 6)
+	buf[14] = hexTable[raw[7]>>4]
+	buf[15] = hexTable[raw[7]&0x0f]
+	buf[16] = hexTable[raw[6]>>4]
+	buf[17] = hexTable[raw[6]&0x0f]
+	buf[18] = '-'
+	// Data4 (2 bytes, big-endian: 8, 9)
+	buf[19] = hexTable[raw[8]>>4]
+	buf[20] = hexTable[raw[8]&0x0f]
+	buf[21] = hexTable[raw[9]>>4]
+	buf[22] = hexTable[raw[9]&0x0f]
+	buf[23] = '-'
+	// Data5 (6 bytes, big-endian: 10..15)
+	buf[24] = hexTable[raw[10]>>4]
+	buf[25] = hexTable[raw[10]&0x0f]
+	buf[26] = hexTable[raw[11]>>4]
+	buf[27] = hexTable[raw[11]&0x0f]
+	buf[28] = hexTable[raw[12]>>4]
+	buf[29] = hexTable[raw[12]&0x0f]
+	buf[30] = hexTable[raw[13]>>4]
+	buf[31] = hexTable[raw[13]&0x0f]
+	buf[32] = hexTable[raw[14]>>4]
+	buf[33] = hexTable[raw[14]&0x0f]
+	buf[34] = hexTable[raw[15]>>4]
+	buf[35] = hexTable[raw[15]&0x0f]
+
+	return string(buf[:])
 }
 
 // isAccountEnabled reads the ACCOUNTDISABLE bit (0x2) of userAccountControl.
