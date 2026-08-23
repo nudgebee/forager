@@ -316,10 +316,8 @@ func buildRedisOptions(cfg Config, creds map[string]string) *redis.Options {
 	}
 	if cfg.TLSEnabled {
 		opts.TLSConfig = &tls.Config{
+			ServerName: cfg.Host,
 			MinVersion: tls.VersionTLS12,
-		}
-		if cfg.Host != "" && net.ParseIP(cfg.Host) == nil {
-			opts.TLSConfig.ServerName = cfg.Host
 		}
 	}
 	return opts
