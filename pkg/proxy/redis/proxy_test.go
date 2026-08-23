@@ -254,3 +254,26 @@ func TestProxy_Close_Lifecycle(t *testing.T) {
 		t.Errorf("expected 'redis proxy is closed', got %v", err)
 	}
 }
+
+func TestProxy_Configure_JSONErrors(t *testing.T) {
+	p := New(testLogger())
+
+	// Unmarshalable value like channel
+	err := p.Configure(map[string]any{"host": make(chan int)}, nil)
+	if err == nil || !strings.Contains(err.Error(), "marshaling redis config") {
+		t.Errorf("expected marshaling redis config error, got %v", err)
+	}
+
+	// Invalid type for port
+	err = p.Configure(map[string]any{"port": "invalid-port-string"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "parsing redis config") {
+		t.Errorf("expected parsing redis config error, got %v", err)
+	}
+}
+
+func TestJSONResponse_Error(t *testing.T) {
+	_, err := jsonResponse(make(chan int))
+	if err == nil || !strings.Contains(err.Error(), "marshaling response") {
+		t.Errorf("expected marshaling response error, got %v", err)
+	}
+}
