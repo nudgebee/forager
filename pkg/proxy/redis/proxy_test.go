@@ -174,3 +174,24 @@ func TestBuildRedisOptions_Plaintext(t *testing.T) {
 		t.Errorf("expected TLSConfig to be nil when TLSEnabled is false, got %+v", opts.TLSConfig)
 	}
 }
+
+func TestBuildRedisOptions_TLS_IP(t *testing.T) {
+	cfg := Config{
+		Host:       "10.0.0.1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil")
+	}
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IP host, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
