@@ -243,3 +243,112 @@ func TestProxy_Close(t *testing.T) {
 		t.Fatalf("Close: %v", err)
 	}
 }
+
+func TestProxy_ConfigureFollowRedirects(t *testing.T) {
+	p := New(testLogger())
+	err := p.Configure(map[string]any{
+		"base_url":         "http://localhost:8080",
+		"follow_redirects": true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	if !p.followRedirects {
+		t.Fatal("expected followRedirects to be true")
+	}
+}
+
+func TestProxy_HandleRequest_DefaultDoesNotFollowRedirect(t *testing.T) {
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("redirected destination"))
+	}))
+	defer targetServer.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetServer.URL, http.StatusFound)
+	}))
+	defer ts.Close()
+
+	p := New(testLogger())
+	err := p.Configure(map[string]any{"base_url": ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		Method: "GET",
+		URL:    "/redirect",
+	})
+	if err != nil {
+		t.Fatalf("HandleRequest: %v", err)
+	}
+
+	var httpResp struct {
+		StatusCode int                 `json:"status_code"`
+		Header     map[string][]string `json:"header"`
+		Body       string              `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(resp.Data), &httpResp); err != nil {
+		t.Fatalf("unmarshal response data: %v", err)
+	}
+
+	// Default must return 302 Found directly without following redirect to targetServer
+	if httpResp.StatusCode != http.StatusFound {
+		t.Fatalf("expected status %d, got %d", httpStatusFound(http.StatusFound), httpResp.StatusCode)
+	}
+	locs := httpResp.Header["Location"]
+	if len(locs) == 0 || locs[0] != targetServer.URL {
+		t.Fatalf("expected Location header %s, got %v", targetServer.URL, locs)
+	}
+}
+
+func httpStatusFound(s int) int { return s }
+
+func TestProxy_HandleRequest_FollowRedirectsEnabled(t *testing.T) {
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("redirected destination"))
+	}))
+	defer targetServer.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, targetServer.URL, http.StatusFound)
+	}))
+	defer ts.Close()
+
+	p := New(testLogger())
+	err := p.Configure(map[string]any{
+		"base_url":         ts.URL,
+		"follow_redirects": true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		Method: "GET",
+		URL:    "/redirect",
+	})
+	if err != nil {
+		t.Fatalf("HandleRequest: %v", err)
+	}
+
+	var httpResp struct {
+		StatusCode int                 `json:"status_code"`
+		Header     map[string][]string `json:"header"`
+		Body       string              `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(resp.Data), &httpResp); err != nil {
+		t.Fatalf("unmarshal response data: %v", err)
+	}
+
+	if httpResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected status 200 after following redirect, got %d", httpResp.StatusCode)
+	}
+
+	bodyBytes, _ := base64.StdEncoding.DecodeString(httpResp.Body)
+	if string(bodyBytes) != "redirected destination" {
+		t.Fatalf("expected body %q, got %q", "redirected destination", string(bodyBytes))
+	}
+}

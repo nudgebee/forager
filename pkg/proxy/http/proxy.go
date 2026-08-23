@@ -19,12 +19,13 @@ import (
 
 // Proxy is a generic HTTP reverse proxy for any HTTP-based datasource.
 type Proxy struct {
-	baseURL       string
-	authType      string // none, basic, bearer, custom_header
-	creds         map[string]string
-	tlsSkipVerify bool
-	client        *http.Client
-	logger        *slog.Logger
+	baseURL         string
+	authType        string // none, basic, bearer, custom_header
+	creds           map[string]string
+	tlsSkipVerify   bool
+	followRedirects bool
+	client          *http.Client
+	logger          *slog.Logger
 }
 
 // New creates a new HTTP proxy.
@@ -33,6 +34,9 @@ func New(logger *slog.Logger) *Proxy {
 		logger: logger,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -57,11 +61,25 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 	p.tlsSkipVerify = skipVerify
 
+	followRedirects := false
+	if v, ok := config["follow_redirects"].(bool); ok {
+		followRedirects = v
+	}
+	p.followRedirects = followRedirects
+
+	var checkRedirect func(req *http.Request, via []*http.Request) error
+	if !followRedirects {
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	}
+
 	p.client = &http.Client{
 		Timeout: 120 * time.Second,
 		Transport: &http.Transport{
 			TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify}, // nolint:gosec
 		},
+		CheckRedirect: checkRedirect,
 	}
 
 	p.creds = creds
