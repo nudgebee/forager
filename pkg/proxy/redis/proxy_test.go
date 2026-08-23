@@ -241,3 +241,16 @@ func TestProxy_Configure_Validation(t *testing.T) {
 		t.Errorf("expected 'invalid redis port: 70000', got %v", err)
 	}
 }
+
+func TestProxy_Close_Lifecycle(t *testing.T) {
+	p := New(testLogger())
+	if err := p.Close(); err != nil {
+		t.Fatalf("expected nil error on close, got %v", err)
+	}
+
+	// Configure on a closed proxy should return closed error
+	err := p.Configure(map[string]any{"host": "127.0.0.1", "port": 6379}, nil)
+	if err == nil || err.Error() != "redis proxy is closed" {
+		t.Errorf("expected 'redis proxy is closed', got %v", err)
+	}
+}

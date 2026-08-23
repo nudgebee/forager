@@ -30,10 +30,12 @@ var readOnlyCommands = map[string]bool{
 
 // Proxy implements the proxy.Proxy interface for Redis.
 type Proxy struct {
-	mu     sync.RWMutex
-	client *redis.Client
-	config Config
-	logger *slog.Logger
+	configMu sync.Mutex
+	mu       sync.RWMutex
+	client   *redis.Client
+	config   Config
+	logger   *slog.Logger
+	closed   bool
 }
 
 // Config holds Redis connection parameters.
@@ -52,6 +54,16 @@ func New(logger *slog.Logger) *Proxy {
 func (p *Proxy) Type() string { return "redis-proxy" }
 
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("redis proxy is closed")
+	}
+	p.mu.RUnlock()
+
 	configJSON, _ := json.Marshal(config)
 	var cfg Config
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
@@ -78,6 +90,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 
 	p.mu.Lock()
 	defer p.mu.Unlock()
+
+	if p.closed {
+		_ = client.Close()
+		return fmt.Errorf("redis proxy is closed")
+	}
 
 	if p.client != nil {
 		_ = p.client.Close()
@@ -134,9 +151,13 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 }
 
 func (p *Proxy) Close() error {
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.closed = true
 	if p.client != nil {
 		err := p.client.Close()
 		p.client = nil
