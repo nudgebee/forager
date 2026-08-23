@@ -149,6 +149,12 @@ type DatasourceHealth struct {
 	LastCheck string `json:"last_check"` // RFC3339
 }
 
+const (
+	// defaultHealthCheckConcurrency bounds the number of simultaneous datasource
+	// health checks to prevent resource and file descriptor exhaustion.
+	defaultHealthCheckConcurrency = 16
+)
+
 // HealthReport runs health checks on all registered datasources concurrently and returns a map
 // of datasource ID → health status. Used for periodic reporting to the cloud.
 func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth {
@@ -175,12 +181,36 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 	var mu sync.Mutex
 	var wg sync.WaitGroup
 
-	// Run health checks concurrently to prevent a single slow or timing-out
-	// datasource from blocking the health status of other datasources.
+	limit := defaultHealthCheckConcurrency
+	if len(targets) < limit {
+		limit = len(targets)
+	}
+	sem := make(chan struct{}, limit)
+
+	// Run health checks concurrently with bounded concurrency to prevent a single
+	// slow or timing-out datasource from blocking other datasources while preventing
+	// unbounded goroutine and network resource exhaustion.
 	for _, t := range targets {
 		wg.Add(1)
 		go func(t target) {
 			defer wg.Done()
+
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				mu.Lock()
+				report[t.id] = DatasourceHealth{
+					Type:      t.cfg.Type,
+					ProxyType: t.cfg.ProxyType,
+					Name:      t.cfg.Name,
+					LastCheck: now,
+					Status:    "error",
+					Error:     ctx.Err().Error(),
+				}
+				mu.Unlock()
+				return
+			}
 
 			health := DatasourceHealth{
 				Type:      t.cfg.Type,
