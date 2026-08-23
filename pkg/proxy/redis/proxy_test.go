@@ -188,8 +188,8 @@ func TestBuildRedisOptions_TLS_IP(t *testing.T) {
 	if opts.TLSConfig == nil {
 		t.Fatal("expected TLSConfig to be non-nil")
 	}
-	if opts.TLSConfig.ServerName != "10.0.0.1" {
-		t.Errorf("expected ServerName 10.0.0.1, got %s", opts.TLSConfig.ServerName)
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IP host, got %s", opts.TLSConfig.ServerName)
 	}
 	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
 		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
@@ -212,8 +212,8 @@ func TestBuildRedisOptions_TLS_IPv6(t *testing.T) {
 	if opts.TLSConfig == nil {
 		t.Fatal("expected TLSConfig to be non-nil")
 	}
-	if opts.TLSConfig.ServerName != "2001:db8::1" {
-		t.Errorf("expected ServerName 2001:db8::1, got %s", opts.TLSConfig.ServerName)
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IPv6 address, got %s", opts.TLSConfig.ServerName)
 	}
 	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
 		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)

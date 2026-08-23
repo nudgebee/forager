@@ -58,11 +58,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	defer p.configMu.Unlock()
 
 	p.mu.RLock()
-	if p.closed {
-		p.mu.RUnlock()
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
 		return fmt.Errorf("redis proxy is closed")
 	}
-	p.mu.RUnlock()
 
 	configJSON, err := json.Marshal(config)
 	if err != nil {
@@ -345,8 +345,10 @@ func buildRedisOptions(cfg Config, creds map[string]string) *redis.Options {
 	}
 	if cfg.TLSEnabled {
 		opts.TLSConfig = &tls.Config{
-			ServerName: cfg.Host,
 			MinVersion: tls.VersionTLS12,
+		}
+		if net.ParseIP(cfg.Host) == nil {
+			opts.TLSConfig.ServerName = cfg.Host
 		}
 	}
 	return opts
