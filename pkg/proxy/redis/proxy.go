@@ -2,9 +2,12 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,10 +30,12 @@ var readOnlyCommands = map[string]bool{
 
 // Proxy implements the proxy.Proxy interface for Redis.
 type Proxy struct {
-	mu     sync.RWMutex
-	client *redis.Client
-	config Config
-	logger *slog.Logger
+	configMu sync.Mutex
+	mu       sync.RWMutex
+	client   *redis.Client
+	config   Config
+	logger   *slog.Logger
+	closed   bool
 }
 
 // Config holds Redis connection parameters.
@@ -49,35 +54,34 @@ func New(logger *slog.Logger) *Proxy {
 func (p *Proxy) Type() string { return "redis-proxy" }
 
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
 
-	if p.client != nil {
-		_ = p.client.Close()
-		p.client = nil
+	p.mu.RLock()
+	closed := p.closed
+	p.mu.RUnlock()
+	if closed {
+		return fmt.Errorf("redis proxy is closed")
 	}
 
-	configJSON, _ := json.Marshal(config)
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshaling redis config: %w", err)
+	}
 	var cfg Config
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
 		return fmt.Errorf("parsing redis config: %w", err)
 	}
+	if cfg.Host == "" {
+		return fmt.Errorf("redis host is required")
+	}
 	if cfg.Port == 0 {
 		cfg.Port = 6379
-	}
-	p.config = cfg
-
-	opts := &redis.Options{
-		Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		DB:   cfg.DB,
-	}
-	if password := creds["password"]; password != "" {
-		opts.Password = password
-	}
-	if username := creds["username"]; username != "" {
-		opts.Username = username
+	} else if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("invalid redis port: %d", cfg.Port)
 	}
 
+	opts := buildRedisOptions(cfg, creds)
 	client := redis.NewClient(opts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -87,7 +91,20 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("redis ping failed: %w", err)
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.closed {
+		_ = client.Close()
+		return fmt.Errorf("redis proxy is closed")
+	}
+
+	if p.client != nil {
+		_ = p.client.Close()
+	}
 	p.client = client
+	p.config = cfg
+
 	p.logger.Info("redis connection established",
 		"host", cfg.Host, "port", cfg.Port, "db", cfg.DB)
 	return nil
@@ -140,6 +157,7 @@ func (p *Proxy) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
+	p.closed = true
 	if p.client != nil {
 		err := p.client.Close()
 		p.client = nil
@@ -304,9 +322,34 @@ func parseRedisInfo(info string) map[string]any {
 }
 
 func jsonResponse(data any) (*proxy.ActionResponse, error) {
-	b, _ := json.Marshal(data)
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling response: %w", err)
+	}
 	return &proxy.ActionResponse{
 		StatusCode: 200,
 		Data:       string(b),
 	}, nil
+}
+
+func buildRedisOptions(cfg Config, creds map[string]string) *redis.Options {
+	opts := &redis.Options{
+		Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
+		DB:   cfg.DB,
+	}
+	if password := creds["password"]; password != "" {
+		opts.Password = password
+	}
+	if username := creds["username"]; username != "" {
+		opts.Username = username
+	}
+	if cfg.TLSEnabled {
+		opts.TLSConfig = &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		}
+		if net.ParseIP(cfg.Host) == nil {
+			opts.TLSConfig.ServerName = cfg.Host
+		}
+	}
+	return opts
 }
