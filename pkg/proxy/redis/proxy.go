@@ -151,9 +151,6 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 }
 
 func (p *Proxy) Close() error {
-	p.configMu.Lock()
-	defer p.configMu.Unlock()
-
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
