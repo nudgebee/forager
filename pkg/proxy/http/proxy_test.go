@@ -32,6 +32,14 @@ func TestProxy_ConfigureRequiresBaseURL(t *testing.T) {
 	}
 }
 
+func TestProxy_ConfigureInvalidBaseURL(t *testing.T) {
+	p := New(testLogger())
+	err := p.Configure(map[string]any{"base_url": "http://invalid-url\x7f"}, nil)
+	if err == nil {
+		t.Fatal("expected error when base_url is malformed")
+	}
+}
+
 func TestProxy_ConfigureBasic(t *testing.T) {
 	p := New(testLogger())
 	err := p.Configure(map[string]any{
