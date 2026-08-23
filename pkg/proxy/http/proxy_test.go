@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"testing"
 
@@ -388,5 +389,45 @@ func TestProxy_HandleRequest_FollowRedirects_BlocksCrossOrigin(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected cross-origin redirect to be blocked with error")
+	}
+}
+
+func TestEffectivePort(t *testing.T) {
+	uHTTP, _ := url.Parse("http://example.com/path")
+	if port := effectivePort(uHTTP); port != "80" {
+		t.Fatalf("expected port 80 for http URL, got %q", port)
+	}
+
+	uHTTPS, _ := url.Parse("https://example.com/path")
+	if port := effectivePort(uHTTPS); port != "443" {
+		t.Fatalf("expected port 443 for https URL, got %q", port)
+	}
+
+	uExplicit, _ := url.Parse("http://example.com:8080/path")
+	if port := effectivePort(uExplicit); port != "8080" {
+		t.Fatalf("expected port 8080 for explicit port URL, got %q", port)
+	}
+
+	if port := effectivePort(nil); port != "" {
+		t.Fatalf("expected empty string for nil URL, got %q", port)
+	}
+}
+
+func TestProxy_Configure_ClosesPreviousIdleConnections(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+	}))
+	defer ts.Close()
+
+	p := New(testLogger())
+	err := p.Configure(map[string]any{"base_url": ts.URL}, nil)
+	if err != nil {
+		t.Fatalf("initial Configure: %v", err)
+	}
+
+	// Reconfiguring should not fail and should close idle connections of the old client
+	err = p.Configure(map[string]any{"base_url": ts.URL, "follow_redirects": true}, nil)
+	if err != nil {
+		t.Fatalf("reconfiguration Configure: %v", err)
 	}
 }

@@ -82,11 +82,17 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
-			if req.URL.Scheme != baseParsed.Scheme || req.URL.Host != baseParsed.Host {
+			reqPort := effectivePort(req.URL)
+			basePort := effectivePort(baseParsed)
+			if req.URL.Scheme != baseParsed.Scheme || req.URL.Hostname() != baseParsed.Hostname() || reqPort != basePort {
 				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.String())
 			}
 			return nil
 		}
+	}
+
+	if p.client != nil {
+		p.client.CloseIdleConnections()
 	}
 
 	p.client = &http.Client{
@@ -244,5 +250,23 @@ func (p *Proxy) injectAuth(req *http.Request) {
 		if name := p.creds["custom_header_name"]; name != "" {
 			req.Header.Set(name, p.creds["custom_header_value"])
 		}
+	}
+}
+
+func effectivePort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	port := u.Port()
+	if port != "" {
+		return port
+	}
+	switch u.Scheme {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
 	}
 }
