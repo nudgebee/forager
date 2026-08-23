@@ -57,8 +57,13 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
 		return fmt.Errorf("parsing redis config: %w", err)
 	}
+	if cfg.Host == "" {
+		return fmt.Errorf("redis host is required")
+	}
 	if cfg.Port == 0 {
 		cfg.Port = 6379
+	} else if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("invalid redis port: %d", cfg.Port)
 	}
 
 	opts := buildRedisOptions(cfg, creds)

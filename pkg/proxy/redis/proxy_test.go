@@ -219,3 +219,25 @@ func TestBuildRedisOptions_TLS_IPv6(t *testing.T) {
 		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
 	}
 }
+
+func TestProxy_Configure_Validation(t *testing.T) {
+	p := New(testLogger())
+
+	// Missing host
+	err := p.Configure(map[string]any{"port": 6379}, nil)
+	if err == nil || err.Error() != "redis host is required" {
+		t.Errorf("expected 'redis host is required', got %v", err)
+	}
+
+	// Invalid port negative
+	err = p.Configure(map[string]any{"host": "127.0.0.1", "port": -1}, nil)
+	if err == nil || err.Error() != "invalid redis port: -1" {
+		t.Errorf("expected 'invalid redis port: -1', got %v", err)
+	}
+
+	// Invalid port too high
+	err = p.Configure(map[string]any{"host": "127.0.0.1", "port": 70000}, nil)
+	if err == nil || err.Error() != "invalid redis port: 70000" {
+		t.Errorf("expected 'invalid redis port: 70000', got %v", err)
+	}
+}
