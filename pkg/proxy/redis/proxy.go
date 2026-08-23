@@ -64,7 +64,10 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 	p.mu.RUnlock()
 
-	configJSON, _ := json.Marshal(config)
+	configJSON, err := json.Marshal(config)
+	if err != nil {
+		return fmt.Errorf("marshaling redis config: %w", err)
+	}
 	var cfg Config
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
 		return fmt.Errorf("parsing redis config: %w", err)
@@ -319,7 +322,10 @@ func parseRedisInfo(info string) map[string]any {
 }
 
 func jsonResponse(data any) (*proxy.ActionResponse, error) {
-	b, _ := json.Marshal(data)
+	b, err := json.Marshal(data)
+	if err != nil {
+		return nil, fmt.Errorf("marshaling response: %w", err)
+	}
 	return &proxy.ActionResponse{
 		StatusCode: 200,
 		Data:       string(b),
