@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -304,7 +305,7 @@ func jsonResponse(data any) (*proxy.ActionResponse, error) {
 
 func buildRedisOptions(cfg Config, creds map[string]string) *redis.Options {
 	opts := &redis.Options{
-		Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		Addr: net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
 		DB:   cfg.DB,
 	}
 	if password := creds["password"]; password != "" {

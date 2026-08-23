@@ -195,3 +195,27 @@ func TestBuildRedisOptions_TLS_IP(t *testing.T) {
 		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
 	}
 }
+
+func TestBuildRedisOptions_TLS_IPv6(t *testing.T) {
+	cfg := Config{
+		Host:       "2001:db8::1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "[2001:db8::1]:6379" {
+		t.Errorf("expected Addr [2001:db8::1]:6379, got %s", opts.Addr)
+	}
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil")
+	}
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IP host, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
