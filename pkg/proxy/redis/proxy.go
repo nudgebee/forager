@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"log/slog"
@@ -67,17 +68,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 	p.config = cfg
 
-	opts := &redis.Options{
-		Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
-		DB:   cfg.DB,
-	}
-	if password := creds["password"]; password != "" {
-		opts.Password = password
-	}
-	if username := creds["username"]; username != "" {
-		opts.Username = username
-	}
-
+	opts := buildRedisOptions(cfg, creds)
 	client := redis.NewClient(opts)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
@@ -309,4 +300,24 @@ func jsonResponse(data any) (*proxy.ActionResponse, error) {
 		StatusCode: 200,
 		Data:       string(b),
 	}, nil
+}
+
+func buildRedisOptions(cfg Config, creds map[string]string) *redis.Options {
+	opts := &redis.Options{
+		Addr: fmt.Sprintf("%s:%d", cfg.Host, cfg.Port),
+		DB:   cfg.DB,
+	}
+	if password := creds["password"]; password != "" {
+		opts.Password = password
+	}
+	if username := creds["username"]; username != "" {
+		opts.Username = username
+	}
+	if cfg.TLSEnabled {
+		opts.TLSConfig = &tls.Config{
+			ServerName: cfg.Host,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+	return opts
 }

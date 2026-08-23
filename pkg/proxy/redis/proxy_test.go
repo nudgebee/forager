@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"os"
 	"strings"
@@ -117,5 +118,59 @@ func TestReadOnlyCommands(t *testing.T) {
 		if readOnlyCommands[cmd] {
 			t.Errorf("expected %s to NOT be in readOnlyCommands", cmd)
 		}
+	}
+}
+
+func TestBuildRedisOptions_TLS(t *testing.T) {
+	cfg := Config{
+		Host:       "redis.internal.net",
+		Port:       6380,
+		DB:         2,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{
+		"username": "admin",
+		"password": "secret-password",
+	}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "redis.internal.net:6380" {
+		t.Errorf("expected Addr redis.internal.net:6380, got %s", opts.Addr)
+	}
+	if opts.DB != 2 {
+		t.Errorf("expected DB 2, got %d", opts.DB)
+	}
+	if opts.Username != "admin" {
+		t.Errorf("expected Username admin, got %s", opts.Username)
+	}
+	if opts.Password != "secret-password" {
+		t.Errorf("expected Password secret-password, got %s", opts.Password)
+	}
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil when TLSEnabled is true")
+	}
+	if opts.TLSConfig.ServerName != "redis.internal.net" {
+		t.Errorf("expected ServerName redis.internal.net, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
+
+func TestBuildRedisOptions_Plaintext(t *testing.T) {
+	cfg := Config{
+		Host:       "127.0.0.1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: false,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "127.0.0.1:6379" {
+		t.Errorf("expected Addr 127.0.0.1:6379, got %s", opts.Addr)
+	}
+	if opts.TLSConfig != nil {
+		t.Errorf("expected TLSConfig to be nil when TLSEnabled is false, got %+v", opts.TLSConfig)
 	}
 }
