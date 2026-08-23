@@ -295,7 +295,7 @@ func TestProxy_HandleRequest_DefaultDoesNotFollowRedirect(t *testing.T) {
 
 	// Default must return 302 Found directly without following redirect to targetServer
 	if httpResp.StatusCode != http.StatusFound {
-		t.Fatalf("expected status %d, got %d", httpStatusFound(http.StatusFound), httpResp.StatusCode)
+		t.Fatalf("expected status %d, got %d", http.StatusFound, httpResp.StatusCode)
 	}
 	locs := httpResp.Header["Location"]
 	if len(locs) == 0 || locs[0] != targetServer.URL {
@@ -303,17 +303,17 @@ func TestProxy_HandleRequest_DefaultDoesNotFollowRedirect(t *testing.T) {
 	}
 }
 
-func httpStatusFound(s int) int { return s }
-
 func TestProxy_HandleRequest_FollowRedirectsEnabled(t *testing.T) {
-	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(200)
-		_, _ = w.Write([]byte("redirected destination"))
-	}))
-	defer targetServer.Close()
-
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		http.Redirect(w, r, targetServer.URL, http.StatusFound)
+		if r.URL.Path == "/redirect" {
+			http.Redirect(w, r, "/destination", http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/destination" {
+			w.WriteHeader(200)
+			_, _ = w.Write([]byte("redirected destination"))
+			return
+		}
 	}))
 	defer ts.Close()
 
@@ -350,5 +350,35 @@ func TestProxy_HandleRequest_FollowRedirectsEnabled(t *testing.T) {
 	bodyBytes, _ := base64.StdEncoding.DecodeString(httpResp.Body)
 	if string(bodyBytes) != "redirected destination" {
 		t.Fatalf("expected body %q, got %q", "redirected destination", string(bodyBytes))
+	}
+}
+
+func TestProxy_HandleRequest_FollowRedirects_BlocksCrossOrigin(t *testing.T) {
+	externalServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("external resource"))
+	}))
+	defer externalServer.Close()
+
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, externalServer.URL+"/secret", http.StatusFound)
+	}))
+	defer ts.Close()
+
+	p := New(testLogger())
+	err := p.Configure(map[string]any{
+		"base_url":         ts.URL,
+		"follow_redirects": true,
+	}, nil)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	_, err = p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		Method: "GET",
+		URL:    "/redirect",
+	})
+	if err == nil {
+		t.Fatal("expected cross-origin redirect to be blocked with error")
 	}
 }

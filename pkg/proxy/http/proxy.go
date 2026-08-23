@@ -72,6 +72,19 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		checkRedirect = func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		}
+	} else {
+		baseParsed, parseErr := url.Parse(p.baseURL)
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			if parseErr == nil && baseParsed != nil {
+				if req.URL.Scheme != baseParsed.Scheme || req.URL.Host != baseParsed.Host {
+					return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.String())
+				}
+			}
+			return nil
+		}
 	}
 
 	p.client = &http.Client{
