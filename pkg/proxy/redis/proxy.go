@@ -50,14 +50,6 @@ func New(logger *slog.Logger) *Proxy {
 func (p *Proxy) Type() string { return "redis-proxy" }
 
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-
-	if p.client != nil {
-		_ = p.client.Close()
-		p.client = nil
-	}
-
 	configJSON, _ := json.Marshal(config)
 	var cfg Config
 	if err := json.Unmarshal(configJSON, &cfg); err != nil {
@@ -66,7 +58,6 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if cfg.Port == 0 {
 		cfg.Port = 6379
 	}
-	p.config = cfg
 
 	opts := buildRedisOptions(cfg, creds)
 	client := redis.NewClient(opts)
@@ -78,7 +69,15 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("redis ping failed: %w", err)
 	}
 
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	if p.client != nil {
+		_ = p.client.Close()
+	}
 	p.client = client
+	p.config = cfg
+
 	p.logger.Info("redis connection established",
 		"host", cfg.Host, "port", cfg.Port, "db", cfg.DB)
 	return nil
