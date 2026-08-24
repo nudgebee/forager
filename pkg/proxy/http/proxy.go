@@ -107,11 +107,19 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		}
 	}
 
-	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
-	if !ok {
-		return fmt.Errorf("http.DefaultTransport is not an *http.Transport")
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
 	}
-	transport := defaultTransport.Clone()
 	if transport.TLSClientConfig == nil {
 		transport.TLSClientConfig = &tls.Config{}
 	} else {
