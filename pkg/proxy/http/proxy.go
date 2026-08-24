@@ -111,12 +111,23 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
 		transport = defaultTransport.Clone()
 	} else {
-		transport = &http.Transport{}
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
 	}
-	transport.TLSClientConfig = &tls.Config{
-		InsecureSkipVerify: skipVerify, // nolint:gosec
-		ServerName:         baseParsed.Hostname(),
+
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 	}
+	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
+	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
 
 	newClient := &http.Client{
 		Timeout:       120 * time.Second,
@@ -365,7 +376,7 @@ func effectivePort(u *url.URL) string {
 	if port != "" {
 		return port
 	}
-	switch u.Scheme {
+	switch strings.ToLower(u.Scheme) {
 	case "https":
 		return "443"
 	case "http":

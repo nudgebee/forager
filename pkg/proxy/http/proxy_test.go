@@ -409,6 +409,16 @@ func TestEffectivePort(t *testing.T) {
 		t.Fatalf("expected port 8080 for explicit port URL, got %q", port)
 	}
 
+	uMixedHTTP, _ := url.Parse("HTTP://example.com/path")
+	if port := effectivePort(uMixedHTTP); port != "80" {
+		t.Fatalf("expected port 80 for HTTP URL, got %q", port)
+	}
+
+	uMixedHTTPS, _ := url.Parse("Https://example.com/path")
+	if port := effectivePort(uMixedHTTPS); port != "443" {
+		t.Fatalf("expected port 443 for Https URL, got %q", port)
+	}
+
 	if port := effectivePort(nil); port != "" {
 		t.Fatalf("expected empty string for nil URL, got %q", port)
 	}
