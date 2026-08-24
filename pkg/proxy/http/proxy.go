@@ -107,7 +107,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		}
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	defaultTransport, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		return fmt.Errorf("http.DefaultTransport is not an *http.Transport")
+	}
+	transport := defaultTransport.Clone()
 	if transport.TLSClientConfig == nil {
 		transport.TLSClientConfig = &tls.Config{}
 	} else {
