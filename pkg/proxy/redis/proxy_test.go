@@ -2,6 +2,7 @@ package redis
 
 import (
 	"context"
+	"crypto/tls"
 	"log/slog"
 	"os"
 	"strings"
@@ -117,5 +118,162 @@ func TestReadOnlyCommands(t *testing.T) {
 		if readOnlyCommands[cmd] {
 			t.Errorf("expected %s to NOT be in readOnlyCommands", cmd)
 		}
+	}
+}
+
+func TestBuildRedisOptions_TLS(t *testing.T) {
+	cfg := Config{
+		Host:       "redis.internal.net",
+		Port:       6380,
+		DB:         2,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{
+		"username": "admin",
+		"password": "secret-password",
+	}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "redis.internal.net:6380" {
+		t.Errorf("expected Addr redis.internal.net:6380, got %s", opts.Addr)
+	}
+	if opts.DB != 2 {
+		t.Errorf("expected DB 2, got %d", opts.DB)
+	}
+	if opts.Username != "admin" {
+		t.Errorf("expected Username admin, got %s", opts.Username)
+	}
+	if opts.Password != "secret-password" {
+		t.Errorf("expected Password secret-password, got %s", opts.Password)
+	}
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil when TLSEnabled is true")
+	}
+	if opts.TLSConfig.ServerName != "redis.internal.net" {
+		t.Errorf("expected ServerName redis.internal.net, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
+
+func TestBuildRedisOptions_Plaintext(t *testing.T) {
+	cfg := Config{
+		Host:       "127.0.0.1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: false,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "127.0.0.1:6379" {
+		t.Errorf("expected Addr 127.0.0.1:6379, got %s", opts.Addr)
+	}
+	if opts.TLSConfig != nil {
+		t.Errorf("expected TLSConfig to be nil when TLSEnabled is false, got %+v", opts.TLSConfig)
+	}
+}
+
+func TestBuildRedisOptions_TLS_IP(t *testing.T) {
+	cfg := Config{
+		Host:       "10.0.0.1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil")
+	}
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IP host, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
+
+func TestBuildRedisOptions_TLS_IPv6(t *testing.T) {
+	cfg := Config{
+		Host:       "2001:db8::1",
+		Port:       6379,
+		DB:         0,
+		TLSEnabled: true,
+	}
+	creds := map[string]string{}
+
+	opts := buildRedisOptions(cfg, creds)
+	if opts.Addr != "[2001:db8::1]:6379" {
+		t.Errorf("expected Addr [2001:db8::1]:6379, got %s", opts.Addr)
+	}
+	if opts.TLSConfig == nil {
+		t.Fatal("expected TLSConfig to be non-nil")
+	}
+	if opts.TLSConfig.ServerName != "" {
+		t.Errorf("expected empty ServerName for IPv6 address, got %s", opts.TLSConfig.ServerName)
+	}
+	if opts.TLSConfig.MinVersion != tls.VersionTLS12 {
+		t.Errorf("expected MinVersion TLS 1.2 (%x), got %x", tls.VersionTLS12, opts.TLSConfig.MinVersion)
+	}
+}
+
+func TestProxy_Configure_Validation(t *testing.T) {
+	p := New(testLogger())
+
+	// Missing host
+	err := p.Configure(map[string]any{"port": 6379}, nil)
+	if err == nil || err.Error() != "redis host is required" {
+		t.Errorf("expected 'redis host is required', got %v", err)
+	}
+
+	// Invalid port negative
+	err = p.Configure(map[string]any{"host": "127.0.0.1", "port": -1}, nil)
+	if err == nil || err.Error() != "invalid redis port: -1" {
+		t.Errorf("expected 'invalid redis port: -1', got %v", err)
+	}
+
+	// Invalid port too high
+	err = p.Configure(map[string]any{"host": "127.0.0.1", "port": 70000}, nil)
+	if err == nil || err.Error() != "invalid redis port: 70000" {
+		t.Errorf("expected 'invalid redis port: 70000', got %v", err)
+	}
+}
+
+func TestProxy_Close_Lifecycle(t *testing.T) {
+	p := New(testLogger())
+	if err := p.Close(); err != nil {
+		t.Fatalf("expected nil error on close, got %v", err)
+	}
+
+	// Configure on a closed proxy should return closed error
+	err := p.Configure(map[string]any{"host": "127.0.0.1", "port": 6379}, nil)
+	if err == nil || err.Error() != "redis proxy is closed" {
+		t.Errorf("expected 'redis proxy is closed', got %v", err)
+	}
+}
+
+func TestProxy_Configure_JSONErrors(t *testing.T) {
+	p := New(testLogger())
+
+	// Unmarshalable value like channel
+	err := p.Configure(map[string]any{"host": make(chan int)}, nil)
+	if err == nil || !strings.Contains(err.Error(), "marshaling redis config") {
+		t.Errorf("expected marshaling redis config error, got %v", err)
+	}
+
+	// Invalid type for port
+	err = p.Configure(map[string]any{"port": "invalid-port-string"}, nil)
+	if err == nil || !strings.Contains(err.Error(), "parsing redis config") {
+		t.Errorf("expected parsing redis config error, got %v", err)
+	}
+}
+
+func TestJSONResponse_Error(t *testing.T) {
+	_, err := jsonResponse(make(chan int))
+	if err == nil || !strings.Contains(err.Error(), "marshaling response") {
+		t.Errorf("expected marshaling response error, got %v", err)
 	}
 }
