@@ -465,6 +465,11 @@ func TestProxy_Configure_ValidatesSchemeAndHost(t *testing.T) {
 			wantErr: `base_url must specify a host`,
 		},
 		{
+			name:    "missing host with port",
+			baseURL: "http://:8080",
+			wantErr: `base_url must specify a host`,
+		},
+		{
 			name:    "valid http",
 			baseURL: "http://localhost:8080",
 			wantErr: "",
@@ -539,4 +544,28 @@ func TestProxy_ConcurrentConfigureAndRequests(t *testing.T) {
 		}()
 	}
 	wg.Wait()
+}
+
+func TestProxy_Configure_CredsDefensiveCopy(t *testing.T) {
+	p := New(testLogger())
+	creds := map[string]string{
+		"bearer_token": "original-token",
+	}
+	err := p.Configure(map[string]any{
+		"base_url":  "http://localhost:8080",
+		"auth_type": "bearer",
+	}, creds)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	// Mutate the original map
+	creds["bearer_token"] = "mutated-token"
+
+	req, _ := http.NewRequest("GET", "http://localhost:8080/test", nil)
+	p.injectAuth(req)
+
+	if got := req.Header.Get("Authorization"); got != "Bearer original-token" {
+		t.Fatalf("expected original-token, got %q", got)
+	}
 }

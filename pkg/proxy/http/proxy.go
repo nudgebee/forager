@@ -67,7 +67,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if baseParsed.Scheme != "http" && baseParsed.Scheme != "https" {
 		return fmt.Errorf("base_url scheme must be http or https, got %q", baseParsed.Scheme)
 	}
-	if baseParsed.Host == "" {
+	if baseParsed.Hostname() == "" {
 		return fmt.Errorf("base_url must specify a host")
 	}
 
@@ -105,15 +105,24 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		}
 	}
 
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.TLSClientConfig = &tls.Config{
+		InsecureSkipVerify: skipVerify, // nolint:gosec
+		ServerName:         baseParsed.Hostname(),
+	}
+
 	newClient := &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{
-				InsecureSkipVerify: skipVerify, // nolint:gosec
-				ServerName:         baseParsed.Hostname(),
-			},
-		},
+		Timeout:       120 * time.Second,
+		Transport:     transport,
 		CheckRedirect: checkRedirect,
+	}
+
+	var credsCopy map[string]string
+	if creds != nil {
+		credsCopy = make(map[string]string, len(creds))
+		for k, v := range creds {
+			credsCopy[k] = v
+		}
 	}
 
 	p.mu.Lock()
@@ -129,7 +138,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.authType = authType
 	p.tlsSkipVerify = skipVerify
 	p.followRedirects = followRedirects
-	p.creds = creds
+	p.creds = credsCopy
 	p.client = newClient
 	p.mu.Unlock()
 
