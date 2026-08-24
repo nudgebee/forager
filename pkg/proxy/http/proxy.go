@@ -24,6 +24,7 @@ type Proxy struct {
 	mu              sync.RWMutex
 	closed          bool
 	baseURL         string
+	baseParsed      *url.URL
 	authType        string // none, basic, bearer, custom_header
 	creds           map[string]string
 	tlsSkipVerify   bool
@@ -98,7 +99,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 			reqPort := effectivePort(req.URL)
 			basePort := effectivePort(baseParsed)
 			if req.URL.Scheme != baseParsed.Scheme || req.URL.Hostname() != baseParsed.Hostname() || reqPort != basePort {
-				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.String())
+				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.Redacted())
 			}
 			return nil
 		}
@@ -124,6 +125,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 
 	oldClient := p.client
 	p.baseURL = baseURL
+	p.baseParsed = baseParsed
 	p.authType = authType
 	p.tlsSkipVerify = skipVerify
 	p.followRedirects = followRedirects
@@ -143,10 +145,9 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 // request URL comes from the control plane (untrusted from CodeQL's point of
 // view); without this guard a value such as "@evil.com/..." or "//evil.com"
 // could redirect the request to an arbitrary server (SSRF, CWE-918).
-func (p *Proxy) resolveTargetURL(baseURL, reqURL string) (string, error) {
-	base, err := url.Parse(baseURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid base_url %q: %w", baseURL, err)
+func (p *Proxy) resolveTargetURL(base *url.URL, reqURL string) (string, error) {
+	if base == nil {
+		return "", fmt.Errorf("base_url is not configured")
 	}
 
 	// The request URL must be a path/query relative to base_url; it must not
@@ -185,17 +186,17 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 		p.mu.RUnlock()
 		return nil, fmt.Errorf("proxy is closed")
 	}
-	baseURL := p.baseURL
+	baseParsed := p.baseParsed
 	authType := p.authType
 	creds := p.creds
 	client := p.client
 	p.mu.RUnlock()
 
-	if client == nil || baseURL == "" {
+	if client == nil || baseParsed == nil {
 		return nil, fmt.Errorf("http proxy not configured")
 	}
 
-	targetURL, err := p.resolveTargetURL(baseURL, req.URL)
+	targetURL, err := p.resolveTargetURL(baseParsed, req.URL)
 	if err != nil {
 		return nil, err
 	}
