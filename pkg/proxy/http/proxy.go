@@ -107,7 +107,10 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	newClient := &http.Client{
 		Timeout: 120 * time.Second,
 		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify}, // nolint:gosec
+			TLSClientConfig: &tls.Config{
+				InsecureSkipVerify: skipVerify, // nolint:gosec
+				ServerName:         baseParsed.Hostname(),
+			},
 		},
 		CheckRedirect: checkRedirect,
 	}
