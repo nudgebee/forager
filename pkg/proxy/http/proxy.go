@@ -98,14 +98,21 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 			}
 			reqPort := effectivePort(req.URL)
 			basePort := effectivePort(baseParsed)
-			if req.URL.Scheme != baseParsed.Scheme || req.URL.Hostname() != baseParsed.Hostname() || reqPort != basePort {
+			reqHost := strings.TrimSuffix(req.URL.Hostname(), ".")
+			baseHost := strings.TrimSuffix(baseParsed.Hostname(), ".")
+			if !strings.EqualFold(req.URL.Scheme, baseParsed.Scheme) || !strings.EqualFold(reqHost, baseHost) || reqPort != basePort {
 				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.Redacted())
 			}
 			return nil
 		}
 	}
 
-	transport := http.DefaultTransport.(*http.Transport).Clone()
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{}
+	}
 	transport.TLSClientConfig = &tls.Config{
 		InsecureSkipVerify: skipVerify, // nolint:gosec
 		ServerName:         baseParsed.Hostname(),
@@ -190,6 +197,10 @@ func (p *Proxy) resolveTargetURL(base *url.URL, reqURL string) (string, error) {
 }
 
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
+	if req == nil {
+		return nil, fmt.Errorf("request cannot be nil")
+	}
+
 	p.mu.RLock()
 	if p.closed {
 		p.mu.RUnlock()

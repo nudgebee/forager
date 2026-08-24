@@ -569,3 +569,13 @@ func TestProxy_Configure_CredsDefensiveCopy(t *testing.T) {
 		t.Fatalf("expected original-token, got %q", got)
 	}
 }
+
+func TestProxy_HandleRequest_NilRequest(t *testing.T) {
+	p := New(testLogger())
+	_ = p.Configure(map[string]any{"base_url": "http://localhost:8080"}, nil)
+
+	_, err := p.HandleRequest(context.Background(), nil)
+	if err == nil || err.Error() != "request cannot be nil" {
+		t.Fatalf("expected 'request cannot be nil' error, got %v", err)
+	}
+}
