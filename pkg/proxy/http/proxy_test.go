@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"sync"
 	"testing"
 
 	"nudgebee/forager/pkg/proxy"
@@ -430,4 +431,112 @@ func TestProxy_Configure_ClosesPreviousIdleConnections(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reconfiguration Configure: %v", err)
 	}
+}
+
+func TestProxy_Configure_ValidatesSchemeAndHost(t *testing.T) {
+	tests := []struct {
+		name    string
+		baseURL string
+		wantErr string
+	}{
+		{
+			name:    "unsupported scheme ftp",
+			baseURL: "ftp://example.com/resource",
+			wantErr: `base_url scheme must be http or https, got "ftp"`,
+		},
+		{
+			name:    "missing scheme with port",
+			baseURL: "localhost:8080",
+			wantErr: `base_url scheme must be http or https, got "localhost"`,
+		},
+		{
+			name:    "missing scheme without port",
+			baseURL: "example.com/api",
+			wantErr: `base_url scheme must be http or https, got ""`,
+		},
+		{
+			name:    "relative url",
+			baseURL: "/api/v1",
+			wantErr: `base_url scheme must be http or https, got ""`,
+		},
+		{
+			name:    "missing host",
+			baseURL: "http://",
+			wantErr: `base_url must specify a host`,
+		},
+		{
+			name:    "valid http",
+			baseURL: "http://localhost:8080",
+			wantErr: "",
+		},
+		{
+			name:    "valid https",
+			baseURL: "https://example.com:8443",
+			wantErr: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(testLogger())
+			err := p.Configure(map[string]any{"base_url": tt.baseURL}, nil)
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else {
+				if err == nil || err.Error() != tt.wantErr {
+					t.Fatalf("expected error %q, got %v", tt.wantErr, err)
+				}
+			}
+		})
+	}
+}
+
+func TestProxy_Configure_ClosedProxy(t *testing.T) {
+	p := New(testLogger())
+	err := p.Configure(map[string]any{"base_url": "http://localhost:8080"}, nil)
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	if err := p.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err = p.Configure(map[string]any{"base_url": "http://localhost:8080"}, nil)
+	if err == nil || err.Error() != "proxy is closed" {
+		t.Fatalf("expected 'proxy is closed' error, got %v", err)
+	}
+}
+
+func TestProxy_ConcurrentConfigureAndRequests(t *testing.T) {
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(200)
+		_, _ = w.Write([]byte("ok"))
+	}))
+	defer ts.Close()
+
+	p := New(testLogger())
+	_ = p.Configure(map[string]any{"base_url": ts.URL}, nil)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(2)
+		go func(idx int) {
+			defer wg.Done()
+			_ = p.Configure(map[string]any{
+				"base_url":         ts.URL,
+				"follow_redirects": idx%2 == 0,
+			}, nil)
+		}(i)
+		go func() {
+			defer wg.Done()
+			_, _ = p.HandleRequest(context.Background(), &proxy.ActionRequest{
+				Method: "GET",
+				URL:    "/test",
+			})
+		}()
+	}
+	wg.Wait()
 }
