@@ -137,7 +137,9 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.mu.Lock()
 	if p.closed {
 		p.mu.Unlock()
-		newClient.CloseIdleConnections()
+		if newClient.Transport != nil {
+			newClient.CloseIdleConnections()
+		}
 		return fmt.Errorf("proxy is closed")
 	}
 
@@ -151,7 +153,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.client = newClient
 	p.mu.Unlock()
 
-	if oldClient != nil {
+	if oldClient != nil && oldClient.Transport != nil {
 		oldClient.CloseIdleConnections()
 	}
 
@@ -323,7 +325,7 @@ func (p *Proxy) Close() error {
 	p.client = nil
 	p.mu.Unlock()
 
-	if client != nil {
+	if client != nil && client.Transport != nil {
 		client.CloseIdleConnections()
 	}
 	return nil
