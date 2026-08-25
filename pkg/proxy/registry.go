@@ -195,29 +195,24 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		go func(t target) {
 			defer wg.Done()
 
-			select {
-			case sem <- struct{}{}:
-				defer func() { <-sem }()
-			case <-ctx.Done():
-				mu.Lock()
-				report[t.id] = DatasourceHealth{
-					Type:      t.cfg.Type,
-					ProxyType: t.cfg.ProxyType,
-					Name:      t.cfg.Name,
-					LastCheck: now,
-					Status:    "error",
-					Error:     ctx.Err().Error(),
-				}
-				mu.Unlock()
-				return
-			}
-
 			health := DatasourceHealth{
 				Type:      t.cfg.Type,
 				ProxyType: t.cfg.ProxyType,
 				Name:      t.cfg.Name,
 				LastCheck: now,
 			}
+
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				health.Status = "error"
+				health.Error = ctx.Err().Error()
+				mu.Lock()
+				report[t.id] = health
+				mu.Unlock()
+				return
+			}
+			defer func() { <-sem }()
 
 			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			defer cancel()

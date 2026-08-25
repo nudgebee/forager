@@ -175,8 +175,10 @@ func (f *fakeHealthProxy) HandleRequest(ctx context.Context, req *ActionRequest)
 }
 func (f *fakeHealthProxy) HealthCheck(ctx context.Context) error {
 	if f.delay > 0 {
+		timer := time.NewTimer(f.delay)
+		defer timer.Stop()
 		select {
-		case <-time.After(f.delay):
+		case <-timer.C:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
