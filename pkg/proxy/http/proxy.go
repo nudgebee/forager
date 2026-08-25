@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
@@ -19,12 +20,17 @@ import (
 
 // Proxy is a generic HTTP reverse proxy for any HTTP-based datasource.
 type Proxy struct {
-	baseURL       string
-	authType      string // none, basic, bearer, custom_header
-	creds         map[string]string
-	tlsSkipVerify bool
-	client        *http.Client
-	logger        *slog.Logger
+	configMu        sync.Mutex
+	mu              sync.RWMutex
+	closed          bool
+	baseURL         string
+	baseParsed      *url.URL
+	authType        string // none, basic, bearer, custom_header
+	creds           map[string]string
+	tlsSkipVerify   bool
+	followRedirects bool
+	client          *http.Client
+	logger          *slog.Logger
 }
 
 // New creates a new HTTP proxy.
@@ -33,6 +39,9 @@ func New(logger *slog.Logger) *Proxy {
 		logger: logger,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -40,31 +49,122 @@ func New(logger *slog.Logger) *Proxy {
 func (p *Proxy) Type() string { return "http-proxy" }
 
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+
+	var baseURL string
 	if v, ok := config["base_url"].(string); ok {
-		p.baseURL = v
+		baseURL = v
 	}
-	if p.baseURL == "" {
+	if baseURL == "" {
 		return fmt.Errorf("base_url is required for http-proxy")
 	}
 
+	baseParsed, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base_url %q: %w", baseURL, err)
+	}
+	if baseParsed.Scheme != "http" && baseParsed.Scheme != "https" {
+		return fmt.Errorf("base_url scheme must be http or https, got %q", baseParsed.Scheme)
+	}
+	if baseParsed.Hostname() == "" {
+		return fmt.Errorf("base_url must specify a host")
+	}
+
+	var authType string
 	if v, ok := config["auth_type"].(string); ok {
-		p.authType = v
+		authType = v
 	}
 
 	skipVerify := false
 	if v, ok := config["tls_skip_verify"].(bool); ok {
 		skipVerify = v
 	}
-	p.tlsSkipVerify = skipVerify
 
-	p.client = &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify}, // nolint:gosec
-		},
+	followRedirects := false
+	if v, ok := config["follow_redirects"].(bool); ok {
+		followRedirects = v
 	}
 
-	p.creds = creds
+	var checkRedirect func(req *http.Request, via []*http.Request) error
+	if !followRedirects {
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	} else {
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			reqPort := effectivePort(req.URL)
+			basePort := effectivePort(baseParsed)
+			reqHost := strings.TrimSuffix(req.URL.Hostname(), ".")
+			baseHost := strings.TrimSuffix(baseParsed.Hostname(), ".")
+			if !strings.EqualFold(req.URL.Scheme, baseParsed.Scheme) || !strings.EqualFold(reqHost, baseHost) || reqPort != basePort {
+				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.Redacted())
+			}
+			return nil
+		}
+	}
+
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
+	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
+
+	newClient := &http.Client{
+		Timeout:       120 * time.Second,
+		Transport:     transport,
+		CheckRedirect: checkRedirect,
+	}
+
+	var credsCopy map[string]string
+	if creds != nil {
+		credsCopy = make(map[string]string, len(creds))
+		for k, v := range creds {
+			credsCopy[k] = v
+		}
+	}
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if newClient.Transport != nil {
+			newClient.CloseIdleConnections()
+		}
+		return fmt.Errorf("proxy is closed")
+	}
+
+	oldClient := p.client
+	p.baseURL = baseURL
+	p.baseParsed = baseParsed
+	p.authType = authType
+	p.tlsSkipVerify = skipVerify
+	p.followRedirects = followRedirects
+	p.creds = credsCopy
+	p.client = newClient
+	p.mu.Unlock()
+
+	if oldClient != nil && oldClient.Transport != nil {
+		oldClient.CloseIdleConnections()
+	}
+
 	return nil
 }
 
@@ -73,10 +173,9 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 // request URL comes from the control plane (untrusted from CodeQL's point of
 // view); without this guard a value such as "@evil.com/..." or "//evil.com"
 // could redirect the request to an arbitrary server (SSRF, CWE-918).
-func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
-	base, err := url.Parse(p.baseURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid base_url %q: %w", p.baseURL, err)
+func (p *Proxy) resolveTargetURL(base *url.URL, reqURL string) (string, error) {
+	if base == nil {
+		return "", fmt.Errorf("base_url is not configured")
 	}
 
 	// The request URL must be a path/query relative to base_url; it must not
@@ -110,7 +209,26 @@ func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
 }
 
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
-	targetURL, err := p.resolveTargetURL(req.URL)
+	if req == nil {
+		return nil, fmt.Errorf("request cannot be nil")
+	}
+
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("proxy is closed")
+	}
+	baseParsed := p.baseParsed
+	authType := p.authType
+	creds := p.creds
+	client := p.client
+	p.mu.RUnlock()
+
+	if client == nil || baseParsed == nil {
+		return nil, fmt.Errorf("http proxy not configured")
+	}
+
+	targetURL, err := p.resolveTargetURL(baseParsed, req.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -143,9 +261,9 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 	}
 
 	// Inject auth
-	p.injectAuth(httpReq)
+	p.injectAuthWith(httpReq, authType, creds)
 
-	resp, err := p.client.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
@@ -171,13 +289,28 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 }
 
 func (p *Proxy) HealthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.baseURL, nil)
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("proxy is closed")
+	}
+	baseURL := p.baseURL
+	authType := p.authType
+	creds := p.creds
+	client := p.client
+	p.mu.RUnlock()
+
+	if client == nil || baseURL == "" {
+		return fmt.Errorf("http proxy not configured")
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", baseURL, nil)
 	if err != nil {
 		return err
 	}
-	p.injectAuth(req)
+	p.injectAuthWith(req, authType, creds)
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}
@@ -190,26 +323,66 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 }
 
 func (p *Proxy) Close() error {
-	p.client.CloseIdleConnections()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	client := p.client
+	p.client = nil
+	p.mu.Unlock()
+
+	if client != nil && client.Transport != nil {
+		client.CloseIdleConnections()
+	}
 	return nil
 }
 
 // CollectMetadata returns connection info for the HTTP datasource.
 func (p *Proxy) CollectMetadata(_ context.Context) (map[string]any, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return map[string]any{
 		"base_url": p.baseURL,
 	}, nil
 }
 
 func (p *Proxy) injectAuth(req *http.Request) {
-	switch p.authType {
+	p.mu.RLock()
+	authType := p.authType
+	creds := p.creds
+	p.mu.RUnlock()
+	p.injectAuthWith(req, authType, creds)
+}
+
+func (p *Proxy) injectAuthWith(req *http.Request, authType string, creds map[string]string) {
+	switch authType {
 	case "basic":
-		req.SetBasicAuth(p.creds["username"], p.creds["password"])
+		req.SetBasicAuth(creds["username"], creds["password"])
 	case "bearer":
-		req.Header.Set("Authorization", "Bearer "+p.creds["bearer_token"])
+		req.Header.Set("Authorization", "Bearer "+creds["bearer_token"])
 	case "custom_header":
-		if name := p.creds["custom_header_name"]; name != "" {
-			req.Header.Set(name, p.creds["custom_header_value"])
+		if name := creds["custom_header_name"]; name != "" {
+			req.Header.Set(name, creds["custom_header_value"])
 		}
+	}
+}
+
+func effectivePort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	port := u.Port()
+	if port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
 	}
 }
