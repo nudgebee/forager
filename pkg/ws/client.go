@@ -146,8 +146,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.relayURL, header)
 	if err != nil {
 		if resp != nil {
-			body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
-			resp.Body.Close() // nolint:errcheck
+			var body []byte
+			if resp.Body != nil {
+				body, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
+				resp.Body.Close() // nolint:errcheck
+			}
 			return fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
 		}
 		return fmt.Errorf("dial failed: %w", err)
