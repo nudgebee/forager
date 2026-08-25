@@ -88,7 +88,7 @@ func TestExamplePackGuardsModularityTagForOldRpm(t *testing.T) {
 	}
 }
 
-func loadExamplePack(t *testing.T) *Pack {
+func loadExamplePack(t testing.TB) *Pack {
 	t.Helper()
 	raw, err := os.ReadFile("../../../docs/content-packs/linux-inventory-example.yaml")
 	if err != nil {
@@ -118,3 +118,19 @@ func collectorCmd(t *testing.T, pack *Pack, id string) string {
 }
 
 func b64(b []byte) string { return base64.StdEncoding.EncodeToString(b) }
+
+func BenchmarkExamplePackSelect(b *testing.B) {
+	pack := loadExamplePack(b)
+	facts := map[string]string{
+		"os_family": "rhel",
+		"os_id":     "rocky",
+		"os_major":  "9",
+		"arch":      "x86_64",
+	}
+
+	b.ResetTimer()
+	b.ReportAllocs()
+	for i := 0; i < b.N; i++ {
+		_, _ = pack.Select(facts)
+	}
+}

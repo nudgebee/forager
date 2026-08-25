@@ -119,6 +119,13 @@ Response:
  ]}
 ```
 
+Successful collectors also include their command status in
+`collector_exit_codes`. Non-zero statuses remain collected data; commands
+that fail to complete, including timeouts, are listed in
+`collector_errors`. `collector_truncated` reports whether stdout or stderr
+exceeded `collector_output_limit_bytes`, the per-stream output cap applied to
+the target.
+
 Per-target statuses (`ok`, `ssh-refused`, `ssh-auth-failed`, `timeout`,
 `error`) map onto the server's coverage states and gap reasons. **One host
 failing never fails the batch** — "which hosts could we not reach, and why"

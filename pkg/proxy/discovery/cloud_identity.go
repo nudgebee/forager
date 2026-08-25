@@ -109,7 +109,7 @@ func enrichCloudIdentity(ctx context.Context, hosts []SweepHost, cfg execConfig)
 			}
 			defer func() { _ = client.Close() }()
 
-			out, _, err := runCommand(hostCtx, client, cloudIdentityProbeCmd, cfg)
+			out, _, _, _, err := runCommand(hostCtx, client, cloudIdentityProbeCmd, cfg)
 			if err != nil || strings.TrimSpace(out) == "" {
 				return
 			}

@@ -30,6 +30,8 @@ type Collector struct {
 	ID   string `yaml:"id"`
 	When string `yaml:"when,omitempty"` // empty = run on every host
 	Cmd  string `yaml:"cmd"`
+
+	expr *whenExpr // parsed once at pack validation time to avoid per-host re-parsing
 }
 
 // KindInventory is the only pack kind Phase 0 executes.
@@ -49,9 +51,11 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 		return nil, fmt.Errorf("pack too large: %d bytes (max %d)", len(raw), maxPackBytes)
 	}
 
-	// Checked before parsing: the signature covers the document minus these
-	// lines, so their count is part of what makes the signature meaningful.
-	if n := countSignatureLines(raw); n != 1 {
+	// Checked before parsing: splitSignatureLine extracts the signed payload body
+	// and counts top-level signature lines in a single pass to avoid duplicate
+	// regex line parsing.
+	signedBody, n := splitSignatureLine(raw)
+	if n != 1 {
 		return nil, fmt.Errorf("pack must contain exactly one top-level signature line, found %d", n)
 	}
 
@@ -70,7 +74,7 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("pack signature is not valid base64: %w", err)
 	}
-	if !ed25519.Verify(pubKey, SignedBytes(raw), sig) {
+	if !ed25519.Verify(pubKey, signedBody, sig) {
 		return nil, fmt.Errorf("pack signature verification failed")
 	}
 
@@ -150,7 +154,8 @@ func (p *Pack) validate() error {
 	}
 
 	seen := make(map[string]bool, len(p.Collectors))
-	for i, c := range p.Collectors {
+	for i := range p.Collectors {
+		c := &p.Collectors[i]
 		if c.ID == "" {
 			return fmt.Errorf("collector %d has no id", i)
 		}
@@ -163,11 +168,14 @@ func (p *Pack) validate() error {
 			return fmt.Errorf("collector %q has no cmd", c.ID)
 		}
 		// Reject unparseable guards at load time rather than per host, so a
-		// malformed pack fails once and loudly.
+		// malformed pack fails once and loudly. Cache the parsed expression to
+		// avoid re-parsing guards on every host during inventory sweeps.
 		if c.When != "" {
-			if _, err := parseWhen(c.When); err != nil {
+			expr, err := parseWhen(c.When)
+			if err != nil {
 				return fmt.Errorf("collector %q: %w", c.ID, err)
 			}
+			c.expr = expr
 		}
 	}
 	return nil
@@ -177,7 +185,7 @@ func (p *Pack) validate() error {
 // in pack order. A guard referencing an unknown fact does not match — see
 // evalWhen.
 func (p *Pack) Select(facts map[string]string) ([]Collector, []SkippedCollector) {
-	var run []Collector
+	run := make([]Collector, 0, len(p.Collectors))
 	var skipped []SkippedCollector
 
 	for _, c := range p.Collectors {
@@ -185,11 +193,15 @@ func (p *Pack) Select(facts map[string]string) ([]Collector, []SkippedCollector)
 			run = append(run, c)
 			continue
 		}
-		expr, err := parseWhen(c.When)
-		if err != nil {
-			// validate() already rejected these; defensive.
-			skipped = append(skipped, SkippedCollector{ID: c.ID, Reason: err.Error()})
-			continue
+		expr := c.expr
+		if expr == nil {
+			var err error
+			expr, err = parseWhen(c.When)
+			if err != nil {
+				// validate() already rejected these; defensive.
+				skipped = append(skipped, SkippedCollector{ID: c.ID, Reason: err.Error()})
+				continue
+			}
 		}
 		match, err := expr.eval(facts)
 		if err != nil {
