@@ -1,4 +1,3 @@
-<<<<<<< HEAD
 # Bolt's Performance Journal
 
 Critical learnings and performance patterns discovered in this codebase.
