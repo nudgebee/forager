@@ -121,13 +121,19 @@ func TestTamperedDiscoveryActionIsRejected(t *testing.T) {
 	}
 
 	logger := slog.New(slog.DiscardHandler)
-	verifier, _ := signing.NewVerifier(base64.StdEncoding.EncodeToString(pub), logger)
+	verifier, err := signing.NewVerifier(base64.StdEncoding.EncodeToString(pub), logger)
+	if err != nil {
+		t.Fatalf("verifier: %v", err)
+	}
 
 	registry := proxy.NewRegistry()
 	spy := &recordingProxy{}
 	registry.Register("local:aws-testbed", proxy.DatasourceEntry{ID: "local:aws-testbed"}, spy)
 
-	store, _ := secrets.NewCloudPushStore(t.TempDir(), "test-secret")
+	store, err := secrets.NewCloudPushStore(t.TempDir(), "test-secret")
+	if err != nil {
+		t.Fatalf("store: %v", err)
+	}
 	h := NewHandler(registry, store, secrets.NewManager(logger), verifier, logger)
 
 	msg := signLikeRelay(t, map[string]any{

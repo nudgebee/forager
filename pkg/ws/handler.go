@@ -65,13 +65,13 @@ var signedActions = map[string]bool{
 	"redis_keyspace_stats": true,
 
 	// Kafka — cluster broker topology, topic metadata, offsets & consumer lag
-	"kafka_consumer_lag":           true,
-	"kafka_consumer_groups":        true,
+	"kafka_consumer_lag":            true,
+	"kafka_consumer_groups":         true,
 	"kafka_consumer_group_describe": true,
-	"kafka_topics":                 true,
-	"kafka_topic_describe":         true,
-	"kafka_brokers":                true,
-	"kafka_topic_offsets":          true,
+	"kafka_topics":                  true,
+	"kafka_topic_describe":          true,
+	"kafka_brokers":                 true,
+	"kafka_topic_offsets":           true,
 
 	// Config test — creates temporary proxy to test connectivity
 	"test_datasource_config": true,

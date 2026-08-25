@@ -329,7 +329,10 @@ func TestHandler_SignatureEnforcement(t *testing.T) {
 	registry.Register("ds-redis", proxy.DatasourceEntry{ID: "ds-redis", ProxyType: "redis-proxy"}, &fakeProxy{proxyType: "redis-proxy"})
 
 	dir := t.TempDir()
-	credStore, _ := secrets.NewCloudPushStore(dir, "test-secret")
+	credStore, err := secrets.NewCloudPushStore(dir, "test-secret")
+	if err != nil {
+		t.Fatalf("NewCloudPushStore: %v", err)
+	}
 	secretsMgr := secrets.NewManager(testLogger())
 	h := NewHandler(registry, credStore, secretsMgr, verifier, testLogger())
 
@@ -420,10 +423,11 @@ func TestHandler_SignatureEnforcement(t *testing.T) {
 		}
 
 		var resp proxy.ActionResponse
-		_ = json.Unmarshal(respBytes, &resp)
+		if err := json.Unmarshal(respBytes, &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
 		if resp.StatusCode != 403 {
 			t.Errorf("expected 403 Forbidden for unsigned unknown action, got %d", resp.StatusCode)
 		}
 	})
 }
-
