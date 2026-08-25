@@ -230,9 +230,16 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 					continue
 				}
 
-				checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-				err := t.proxy.HealthCheck(checkCtx)
-				cancel()
+				err := func() (err error) {
+					defer func() {
+						if rec := recover(); rec != nil {
+							err = fmt.Errorf("panic: %v", rec)
+						}
+					}()
+					checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+					return t.proxy.HealthCheck(checkCtx)
+				}()
 
 				if err != nil {
 					health.Status = "error"

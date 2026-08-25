@@ -164,6 +164,7 @@ type fakeHealthProxy struct {
 	proxyType string
 	healthErr error
 	delay     time.Duration
+	panicVal  any
 }
 
 func (f *fakeHealthProxy) Type() string { return f.proxyType }
@@ -174,6 +175,9 @@ func (f *fakeHealthProxy) HandleRequest(ctx context.Context, req *ActionRequest)
 	return &ActionResponse{StatusCode: 200, Data: "ok"}, nil
 }
 func (f *fakeHealthProxy) HealthCheck(ctx context.Context) error {
+	if f.panicVal != nil {
+		panic(f.panicVal)
+	}
 	if f.delay > 0 {
 		timer := time.NewTimer(f.delay)
 		defer timer.Stop()
@@ -264,5 +268,44 @@ func TestRegistry_HealthReportContextCancelled(t *testing.T) {
 		if h.Error == "" {
 			t.Errorf("expected non-empty error message for %s under cancelled context", id)
 		}
+	}
+}
+
+func TestRegistry_HealthReport_RecoversFromPanic(t *testing.T) {
+	r := NewRegistry()
+
+	r.Register("ds-panic", DatasourceEntry{
+		ID:        "ds-panic",
+		Type:      "postgresql",
+		ProxyType: "db-proxy",
+		Name:      "Panicking DB",
+	}, &fakeHealthProxy{proxyType: "db-proxy", panicVal: "nil pointer dereference"})
+
+	r.Register("ds-ok", DatasourceEntry{
+		ID:        "ds-ok",
+		Type:      "postgresql",
+		ProxyType: "db-proxy",
+		Name:      "Healthy DB",
+	}, &fakeHealthProxy{proxyType: "db-proxy"})
+
+	report := r.HealthReport(context.Background())
+	if len(report) != 2 {
+		t.Fatalf("expected 2 entries, got %d", len(report))
+	}
+
+	hPanic, ok := report["ds-panic"]
+	if !ok {
+		t.Fatalf("missing ds-panic entry")
+	}
+	if hPanic.Status != "error" || hPanic.Error != "panic: nil pointer dereference" {
+		t.Errorf("expected status 'error' with 'panic: nil pointer dereference', got status=%q err=%q", hPanic.Status, hPanic.Error)
+	}
+
+	hOK, ok := report["ds-ok"]
+	if !ok {
+		t.Fatalf("missing ds-ok entry")
+	}
+	if hOK.Status != "healthy" {
+		t.Errorf("expected status 'healthy', got %q", hOK.Status)
 	}
 }
