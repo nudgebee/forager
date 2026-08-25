@@ -176,6 +176,22 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		return make(map[string]DatasourceHealth)
 	}
 
+	if err := ctx.Err(); err != nil {
+		report := make(map[string]DatasourceHealth, len(targets))
+		now := time.Now().UTC().Format(time.RFC3339)
+		for _, t := range targets {
+			report[t.id] = DatasourceHealth{
+				Type:      t.cfg.Type,
+				ProxyType: t.cfg.ProxyType,
+				Name:      t.cfg.Name,
+				Status:    "error",
+				Error:     err.Error(),
+				LastCheck: now,
+			}
+		}
+		return report
+	}
+
 	report := make(map[string]DatasourceHealth, len(targets))
 	now := time.Now().UTC().Format(time.RFC3339)
 	var mu sync.Mutex
@@ -186,9 +202,9 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		limit = len(targets)
 	}
 
-	targetsChan := make(chan target, len(targets))
-	for _, t := range targets {
-		targetsChan <- t
+	targetsChan := make(chan int, len(targets))
+	for i := range targets {
+		targetsChan <- i
 	}
 	close(targetsChan)
 
@@ -199,7 +215,8 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for t := range targetsChan {
+			for idx := range targetsChan {
+				t := targets[idx]
 				health := DatasourceHealth{
 					Type:      t.cfg.Type,
 					ProxyType: t.cfg.ProxyType,
