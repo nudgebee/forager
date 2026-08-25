@@ -430,4 +430,27 @@ func TestHandler_SignatureEnforcement(t *testing.T) {
 			t.Errorf("expected 403 Forbidden for unsigned unknown action, got %d", resp.StatusCode)
 		}
 	})
+
+	t.Run("NilVerifier_DoesNotPanic", func(t *testing.T) {
+		nilVerifierHandler := NewHandler(registry, credStore, secretsMgr, nil, testLogger())
+		msg := map[string]any{
+			"request_id":    "req-nil-verifier",
+			"datasource_id": "ds-redis",
+			"action":        "redis_info",
+			"params":        map[string]any{},
+		}
+		msgBytes, _ := json.Marshal(msg)
+		respBytes, err := nilVerifierHandler.HandleMessage(context.Background(), msgBytes)
+		if err != nil {
+			t.Fatalf("HandleMessage failed: %v", err)
+		}
+
+		var resp proxy.ActionResponse
+		if err := json.Unmarshal(respBytes, &resp); err != nil {
+			t.Fatalf("unmarshal response: %v", err)
+		}
+		if resp.StatusCode != 200 {
+			t.Errorf("expected 200 OK for nil verifier handler, got %d", resp.StatusCode)
+		}
+	})
 }

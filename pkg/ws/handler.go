@@ -132,7 +132,7 @@ func (h *Handler) HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 	}
 
 	// Verify signature for actions that require it or whenever verification is enabled (defense in depth)
-	if signedActions[effectiveAction] || h.verifier.Enabled() {
+	if h.verifier != nil && (signedActions[effectiveAction] || h.verifier.Enabled()) {
 		if err := h.verifier.Verify(msg); err != nil {
 			h.logger.Error("message signature verification failed",
 				"action", effectiveAction,
