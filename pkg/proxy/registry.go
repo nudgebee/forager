@@ -192,9 +192,8 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		return report
 	}
 
-	report := make(map[string]DatasourceHealth, len(targets))
+	results := make([]DatasourceHealth, len(targets))
 	now := time.Now().UTC().Format(time.RFC3339)
-	var mu sync.Mutex
 	var wg sync.WaitGroup
 
 	limit := defaultHealthCheckConcurrency
@@ -227,9 +226,7 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 				if err := ctx.Err(); err != nil {
 					health.Status = "error"
 					health.Error = err.Error()
-					mu.Lock()
-					report[t.id] = health
-					mu.Unlock()
+					results[idx] = health
 					continue
 				}
 
@@ -244,14 +241,17 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 					health.Status = "healthy"
 				}
 
-				mu.Lock()
-				report[t.id] = health
-				mu.Unlock()
+				results[idx] = health
 			}
 		}()
 	}
 
 	wg.Wait()
+
+	report := make(map[string]DatasourceHealth, len(targets))
+	for i, t := range targets {
+		report[t.id] = results[i]
+	}
 	return report
 }
 
