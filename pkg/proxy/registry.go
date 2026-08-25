@@ -185,50 +185,53 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 	if len(targets) < limit {
 		limit = len(targets)
 	}
-	sem := make(chan struct{}, limit)
 
-	// Run health checks concurrently with bounded concurrency to prevent a single
+	targetsChan := make(chan target, len(targets))
+	for _, t := range targets {
+		targetsChan <- t
+	}
+	close(targetsChan)
+
+	// Run health checks concurrently using a worker pool to prevent a single
 	// slow or timing-out datasource from blocking other datasources while preventing
 	// unbounded goroutine and network resource exhaustion.
-	for _, t := range targets {
+	for i := 0; i < limit; i++ {
 		wg.Add(1)
-		go func(t target) {
+		go func() {
 			defer wg.Done()
+			for t := range targetsChan {
+				health := DatasourceHealth{
+					Type:      t.cfg.Type,
+					ProxyType: t.cfg.ProxyType,
+					Name:      t.cfg.Name,
+					LastCheck: now,
+				}
 
-			health := DatasourceHealth{
-				Type:      t.cfg.Type,
-				ProxyType: t.cfg.ProxyType,
-				Name:      t.cfg.Name,
-				LastCheck: now,
-			}
+				if err := ctx.Err(); err != nil {
+					health.Status = "error"
+					health.Error = err.Error()
+					mu.Lock()
+					report[t.id] = health
+					mu.Unlock()
+					continue
+				}
 
-			select {
-			case sem <- struct{}{}:
-			case <-ctx.Done():
-				health.Status = "error"
-				health.Error = ctx.Err().Error()
+				checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				err := t.proxy.HealthCheck(checkCtx)
+				cancel()
+
+				if err != nil {
+					health.Status = "error"
+					health.Error = err.Error()
+				} else {
+					health.Status = "healthy"
+				}
+
 				mu.Lock()
 				report[t.id] = health
 				mu.Unlock()
-				return
 			}
-			defer func() { <-sem }()
-
-			checkCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
-			defer cancel()
-			err := t.proxy.HealthCheck(checkCtx)
-
-			if err != nil {
-				health.Status = "error"
-				health.Error = err.Error()
-			} else {
-				health.Status = "healthy"
-			}
-
-			mu.Lock()
-			report[t.id] = health
-			mu.Unlock()
-		}(t)
+		}()
 	}
 
 	wg.Wait()

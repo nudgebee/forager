@@ -8,7 +8,7 @@ Critical learnings and performance patterns discovered in this codebase.
 
 ## 2026-08-09 - Parallel Datasource Health Checks with Bounded Concurrency
 **Learning:** In proxy registries managing multiple datasources (DB, SSH, HTTP, Kafka, etc.), sequential health checks cause total latency to scale linearly as $O(N \cdot \text{timeout})$, blocking reporting threads when target endpoints time out. Unbounded goroutine spawning can also exhaust system resources when hundreds of datasources are registered.
-**Action:** Always perform multi-datasource health probes concurrently using goroutines with per-check context timeouts and a semaphore (buffered channel) to bound maximum concurrency.
+**Action:** Always perform multi-datasource health probes concurrently using a worker pool with per-check context timeouts to bound maximum concurrency and eliminate $O(N)$ goroutine allocations.
 
 ## 2026-08-13 - Use Switch Statements for Zero-Allocation Static Lookups
 **Learning:** Defining static lookup map literals (such as `map[string]string{...}`) inside helper functions evaluated per-host (e.g., `osFamily` in `parseFacts`) causes Go to allocate and populate a new hash map on the heap on every invocation (~1.2 KB and 3 allocations per call).
