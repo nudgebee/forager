@@ -156,11 +156,11 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			continue
 		}
 		_ = req.Reply(true, nil)
-		cmd := string(req.Payload[4:])
+		cmd := string(req.Payload[4:]) //nolint:staticcheck // cmd is reused for multiple response maps below.
 
 		done := s.trackExec()
 		commandDelay := s.delay
-		if d, ok := s.delayFor[cmd]; ok {
+		if d, ok := s.delayFor[string(req.Payload[4:])]; ok {
 			commandDelay = d
 		}
 		if commandDelay > 0 {
