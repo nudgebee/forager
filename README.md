@@ -111,6 +111,30 @@ curl -fsSL https://github.com/nudgebee/forager/releases/latest/download/install.
 Installs the binary to `/usr/local/bin/nudgebee-forager`, drops config
 under `/etc/nudgebee/`, and registers a systemd unit.
 
+To configure a discovery datasource during installation, provide the signed
+pack verification key and the SSH key already present on the host:
+
+```bash
+curl -fsSL https://github.com/nudgebee/forager/releases/latest/download/install.sh | \
+  sudo NB_DATASOURCES=discovery \
+  NB_DISCOVERY_ALLOWED_CIDRS=10.0.0.0/24 \
+  NB_DISCOVERY_SSH_USERNAME=nudgebee-ro \
+  NB_DISCOVERY_SSH_PRIVATE_KEY_FILE=/root/.ssh/id_ed25519 \
+  NB_PACK_PUBLIC_KEY=<base64-ed25519-public-key> bash
+```
+
+The installer downloads and verifies `linux-inventory-v2.yaml`, stores it in
+`/etc/nudgebee/packs/`, copies the private key into Forager-owned storage, and
+writes the discovery datasource into `forager.yaml`. Existing configuration is
+preserved unless `NB_REPLACE_CONFIG=true` is set. Set
+`NB_DATASOURCES=interactive` to answer the same discovery questions in a
+terminal.
+
+For a generic SSH datasource, use `NB_DATASOURCES=ssh` with
+`NB_SSH_NAME`, `NB_SSH_ALLOWED_HOSTS`, `NB_SSH_USERNAME`, and
+`NB_SSH_PRIVATE_KEY_FILE`. Set `NB_DATASOURCES=discovery,ssh` to configure both
+in one installation.
+
 ### macOS
 
 ```bash
