@@ -120,8 +120,9 @@ func ParsePublicKey(s string) (ed25519.PublicKey, error) {
 }
 
 // Enabled returns true if signature verification is active.
+// Enabled is nil-safe: a nil verifier verifies nothing.
 func (v *Verifier) Enabled() bool {
-	return v.enabled
+	return v != nil && v.enabled
 }
 
 // Verify checks the Ed25519 signature on a message.

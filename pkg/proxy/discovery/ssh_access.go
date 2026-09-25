@@ -85,11 +85,17 @@ func SSHAccessSibling(discovery proxy.DatasourceEntry, cfg map[string]any, creds
 }
 
 // stringSlice accepts both []string (local config) and []any (JSON-decoded
-// cloud push) forms.
+// cloud push) forms, dropping empty entries from either.
 func stringSlice(v any) []string {
 	switch s := v.(type) {
 	case []string:
-		return s
+		out := make([]string, 0, len(s))
+		for _, e := range s {
+			if e != "" {
+				out = append(out, e)
+			}
+		}
+		return out
 	case []any:
 		out := make([]string, 0, len(s))
 		for _, e := range s {

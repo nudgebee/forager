@@ -130,3 +130,15 @@ func TestSSHAccessSiblingNeedsUsername(t *testing.T) {
 		t.Fatal("sibling configured without ssh credentials")
 	}
 }
+
+func TestSSHAccessConfigDropsEmptyScopeEntries(t *testing.T) {
+	kh := knownHostsFile(t)
+	for _, cidrs := range []any{[]string{"", ""}, []any{"", nil}} {
+		if _, err := SSHAccessConfig(map[string]any{"allowed_cidrs": cidrs, "known_hosts_file": kh}, true); err == nil {
+			t.Errorf("scope %v of only empty entries accepted", cidrs)
+		}
+	}
+	if SSHAccessEnabled(nil) {
+		t.Error("nil config enabled ssh_access")
+	}
+}
