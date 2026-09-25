@@ -56,7 +56,9 @@ jobs:
       - name: Lint
         uses: golangci/golangci-lint-action@82606bf257cbaff209d206a39f5134f0cfbfd2ee # v9.2.1
         with:
-          version: v2.7.2
+          # Keep in sync with ci.yml. Must be built with a Go at least as
+          # new as go.mod's go directive, or it refuses to load the module.
+          version: v2.13.2
           args: --timeout 10m
 
       - name: Test
