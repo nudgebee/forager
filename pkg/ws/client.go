@@ -177,13 +177,14 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		"agent_build_time": version.BuildTime,
 		"protocol_version": "1.0.0",
 		"capabilities": map[string]bool{
-			"http-proxy":  true,
-			"db-proxy":    true,
-			"mcp-proxy":   true,
-			"ssh-proxy":   true,
-			"mongo-proxy": true,
-			"redis-proxy": true,
-			"kafka-proxy": true,
+			"http-proxy":      true,
+			"db-proxy":        true,
+			"mcp-proxy":       true,
+			"ssh-proxy":       true,
+			"mongo-proxy":     true,
+			"redis-proxy":     true,
+			"kafka-proxy":     true,
+			"discovery-proxy": true,
 		},
 	}
 	greetingBytes, _ := json.Marshal(greeting)
