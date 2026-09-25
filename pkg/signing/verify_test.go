@@ -446,3 +446,10 @@ func TestVerify_ConcurrentReplay(t *testing.T) {
 		t.Fatalf("expected %d replay rejections, got %d", goroutines-1, replayCount)
 	}
 }
+
+func TestNilVerifierIsDisabled(t *testing.T) {
+	var v *Verifier
+	if v.Enabled() {
+		t.Fatal("nil verifier reported enabled")
+	}
+}

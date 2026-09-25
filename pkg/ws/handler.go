@@ -10,6 +10,7 @@ import (
 
 	"nudgebee/forager/pkg/proxy"
 	dbproxy "nudgebee/forager/pkg/proxy/db"
+	discoveryproxy "nudgebee/forager/pkg/proxy/discovery"
 	httpproxy "nudgebee/forager/pkg/proxy/http"
 	kafkaproxy "nudgebee/forager/pkg/proxy/kafka"
 	mcpproxy "nudgebee/forager/pkg/proxy/mcp"
@@ -276,7 +277,8 @@ func normalizeConfigValues(config map[string]any) {
 }
 
 // newProxyByType creates a proxy instance for the given proxy type.
-// Handles db_type fallback for db-proxy and allowed_hosts injection for ssh-proxy.
+// Handles db_type fallback for db-proxy and allowed_hosts injection for
+// ssh-proxy (as allowed_hosts) and discovery-proxy (as allowed_cidrs).
 func newProxyByType(proxyType, dsType string, config map[string]any, allowedHosts []string, logger *slog.Logger) (proxy.Proxy, error) {
 	switch proxyType {
 	case "http-proxy":
@@ -300,6 +302,13 @@ func newProxyByType(proxyType, dsType string, config map[string]any, allowedHost
 		return redisproxy.New(logger), nil
 	case "kafka-proxy":
 		return kafkaproxy.New(logger), nil
+	case "discovery-proxy":
+		if len(allowedHosts) > 0 {
+			if _, set := config["allowed_cidrs"]; !set {
+				config["allowed_cidrs"] = allowedHosts
+			}
+		}
+		return discoveryproxy.New(logger), nil
 	default:
 		return nil, fmt.Errorf("unknown proxy type: %s", proxyType)
 	}
@@ -360,6 +369,12 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 			creds = resolved
 		}
 
+		// A push without "config" decodes to a nil map, which newProxyByType
+		// writes allowed_hosts/allowed_cidrs into.
+		if ds.Config == nil {
+			ds.Config = map[string]any{}
+		}
+
 		// Coerce string config values (e.g. "true"/"5432") to native types
 		normalizeConfigValues(ds.Config)
 
@@ -385,6 +400,18 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		}
 		h.registry.Register(ds.ID, entry, p)
 		h.logger.Info("datasource configured", "id", ds.ID, "type", ds.Type, "proxy_type", ds.ProxyType)
+
+		if ds.ProxyType == "discovery-proxy" && discoveryproxy.SSHAccessEnabled(ds.Config) {
+			sibling, sp, err := discoveryproxy.SSHAccessSibling(entry, ds.Config, creds, h.verifier.Enabled(), h.logger)
+			if err != nil {
+				// Left out of newIDs, so a previously registered sibling is removed below.
+				h.logger.Error("ssh_access not enabled", "datasource_id", ds.ID, "err", err)
+				continue
+			}
+			newIDs[sibling.ID] = true
+			h.registry.Register(sibling.ID, sibling, sp)
+			h.logger.Info("ssh access enabled for discovery scope", "datasource_id", ds.ID, "id", sibling.ID)
+		}
 	}
 
 	// Remove cloud-managed datasources not in the new config.
@@ -443,6 +470,9 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 	}
 
 	// Coerce string config values (e.g. "true"/"5432") to native types
+	if ds.Config == nil {
+		ds.Config = map[string]any{}
+	}
 	normalizeConfigValues(ds.Config)
 
 	// Create temporary proxy
