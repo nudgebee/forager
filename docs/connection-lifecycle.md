@@ -37,6 +37,8 @@ sequenceDiagram
     end
 ```
 
+**Integration errors:** Each entry in the health report carries `status`, and while `status` is `"error"` also `error` and `error_class` (`datasource_integration_failure` or `ssh_integration_failure`). Errors come from failed health checks and from failed proxied requests (kept for up to 15 minutes, cleared by the next successful request). They are redacted before leaving the host (credentials, private keys, IPs, `host:port`) and truncated to 512 chars. Nothing is stored server-side by the agent: once the integration recovers, the next report simply omits the error.
+
 **Auto-reconnect:** On disconnect, the agent reconnects with exponential backoff (3s → 6s → 12s → ... → 30s max).
 
 ## Config Sync

@@ -70,6 +70,48 @@ type Registry struct {
 	mu      sync.RWMutex
 	proxies map[string]Proxy // datasource ID → Proxy
 	configs map[string]DatasourceEntry
+
+	reqErrMu  sync.Mutex
+	reqErrors map[string]requestError // datasource ID → last unrecovered request failure
+}
+
+type requestError struct {
+	msg string
+	at  time.Time
+}
+
+// requestErrorTTL bounds how long a request failure is reported without a
+// later successful request to the same datasource.
+const requestErrorTTL = 15 * time.Minute
+
+// RecordRequestResult notes the outcome of a proxied request. A failure is
+// reported on the next health report (deduplicated per datasource, latest
+// wins); a success clears it.
+func (r *Registry) RecordRequestResult(datasourceID string, err error) {
+	r.reqErrMu.Lock()
+	defer r.reqErrMu.Unlock()
+	if err == nil {
+		delete(r.reqErrors, datasourceID)
+		return
+	}
+	if r.reqErrors == nil {
+		r.reqErrors = make(map[string]requestError)
+	}
+	r.reqErrors[datasourceID] = requestError{msg: RedactError(err.Error()), at: time.Now()}
+}
+
+func (r *Registry) recentRequestError(datasourceID string) (string, bool) {
+	r.reqErrMu.Lock()
+	defer r.reqErrMu.Unlock()
+	e, ok := r.reqErrors[datasourceID]
+	if !ok {
+		return "", false
+	}
+	if time.Since(e.at) > requestErrorTTL {
+		delete(r.reqErrors, datasourceID)
+		return "", false
+	}
+	return e.msg, true
 }
 
 // DatasourceEntry stores the proxy and its metadata.
@@ -146,7 +188,10 @@ type DatasourceHealth struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"` // "healthy", "error", "unknown"
 	Error     string `json:"error,omitempty"`
-	LastCheck string `json:"last_check"` // RFC3339
+	// ErrorClass is set only while Status is "error"; it clears on the next
+	// successful check, so the report always reflects current state.
+	ErrorClass string `json:"error_class,omitempty"`
+	LastCheck  string `json:"last_check"` // RFC3339
 }
 
 const (
@@ -181,12 +226,13 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		now := time.Now().UTC().Format(time.RFC3339)
 		for _, t := range targets {
 			report[t.id] = DatasourceHealth{
-				Type:      t.cfg.Type,
-				ProxyType: t.cfg.ProxyType,
-				Name:      t.cfg.Name,
-				Status:    "error",
-				Error:     err.Error(),
-				LastCheck: now,
+				Type:       t.cfg.Type,
+				ProxyType:  t.cfg.ProxyType,
+				Name:       t.cfg.Name,
+				Status:     "error",
+				Error:      RedactError(err.Error()),
+				ErrorClass: ErrorClass(t.cfg.ProxyType),
+				LastCheck:  now,
 			}
 		}
 		return report
@@ -243,7 +289,12 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 
 				if err != nil {
 					health.Status = "error"
-					health.Error = err.Error()
+					health.Error = RedactError(err.Error())
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
+				} else if msg, ok := r.recentRequestError(t.id); ok {
+					health.Status = "error"
+					health.Error = msg
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
 				} else {
 					health.Status = "healthy"
 				}
