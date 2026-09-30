@@ -84,10 +84,30 @@ type requestError struct {
 // later successful request to the same datasource.
 const requestErrorTTL = 15 * time.Minute
 
-// RecordRequestResult notes the outcome of a proxied request. A failure is
-// reported on the next health report (deduplicated per datasource, latest
-// wins); a success clears it.
-func (r *Registry) RecordRequestResult(datasourceID string, err error) {
+// RecordRequestResult notes the outcome of a proxied request. A failure that
+// looks like an integration problem (see IsIntegrationError) is reported on
+// the next health report (deduplicated per datasource, latest wins); a
+// success clears it. Failures caused by the caller — bad input, policy
+// rejections, a cancelled or timed-out request context — are ignored.
+//
+// Lock order is mu → reqErrMu everywhere.
+func (r *Registry) RecordRequestResult(ctx context.Context, datasourceID string, err error) {
+	var msg string
+	if err != nil {
+		if ctx.Err() != nil || !IsIntegrationError(err) {
+			return
+		}
+		msg = RedactError(err.Error()) // outside the locks: several regexes
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// Ignore results for datasources that were removed while the request was
+	// in flight, so they cannot resurrect an entry nothing will clean up.
+	if _, ok := r.proxies[datasourceID]; !ok {
+		return
+	}
+
 	r.reqErrMu.Lock()
 	defer r.reqErrMu.Unlock()
 	if err == nil {
@@ -97,7 +117,15 @@ func (r *Registry) RecordRequestResult(datasourceID string, err error) {
 	if r.reqErrors == nil {
 		r.reqErrors = make(map[string]requestError)
 	}
-	r.reqErrors[datasourceID] = requestError{msg: RedactError(err.Error()), at: time.Now()}
+	r.reqErrors[datasourceID] = requestError{msg: msg, at: time.Now()}
+}
+
+// clearRequestError drops any recorded request failure for a datasource.
+// Callers hold r.mu.
+func (r *Registry) clearRequestError(datasourceID string) {
+	r.reqErrMu.Lock()
+	delete(r.reqErrors, datasourceID)
+	r.reqErrMu.Unlock()
 }
 
 func (r *Registry) recentRequestError(datasourceID string) (string, bool) {
@@ -152,6 +180,8 @@ func (r *Registry) Register(id string, entry DatasourceEntry, p Proxy) {
 
 	r.proxies[id] = p
 	r.configs[id] = entry
+	// A replaced proxy is a new configuration; the old failure no longer applies.
+	r.clearRequestError(id)
 }
 
 // Remove removes and closes a proxy by datasource ID.
@@ -165,6 +195,7 @@ func (r *Registry) Remove(id string) error {
 		}
 		delete(r.proxies, id)
 		delete(r.configs, id)
+		r.clearRequestError(id)
 	}
 	return nil
 }
@@ -271,7 +302,8 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 
 				if err := ctx.Err(); err != nil {
 					health.Status = "error"
-					health.Error = err.Error()
+					health.Error = RedactError(err.Error())
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
 					results[idx] = health
 					continue
 				}
@@ -386,5 +418,6 @@ func (r *Registry) CloseAll() {
 		p.Close() // nolint:errcheck
 		delete(r.proxies, id)
 		delete(r.configs, id)
+		r.clearRequestError(id)
 	}
 }
