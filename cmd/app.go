@@ -62,6 +62,8 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
 
+	handler.SetOnConfigSynced(client.TriggerHealthReport)
+
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
 		entries := registry.List()
 		items := make([]ws.DatasourceInventoryItem, 0, len(entries))
@@ -142,6 +144,16 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 			if v, ok := ds.Credentials["auth_type"]; ok {
 				cfg["auth_type"] = v
 			}
+		}
+		cfg["datasource_type"] = ds.Type
+		if ds.TLSSkipVerify {
+			cfg["tls_skip_verify"] = true
+		}
+		if ds.FollowRedirects {
+			cfg["follow_redirects"] = true
+		}
+		if ds.MaxResponseBytes > 0 {
+			cfg["max_response_bytes"] = ds.MaxResponseBytes
 		}
 		p = proxyhttp.New(logger.With("datasource", ds.Name))
 	case "ssh":

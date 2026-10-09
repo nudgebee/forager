@@ -6,6 +6,8 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"testing"
 	"time"
@@ -13,6 +15,7 @@ import (
 	"github.com/google/uuid"
 
 	"nudgebee/forager/pkg/proxy"
+	httpproxy "nudgebee/forager/pkg/proxy/http"
 	"nudgebee/forager/pkg/secrets"
 	"nudgebee/forager/pkg/signing"
 )
@@ -453,4 +456,93 @@ func TestHandler_SignatureEnforcement(t *testing.T) {
 			t.Errorf("expected 200 OK for nil verifier handler, got %d", resp.StatusCode)
 		}
 	})
+}
+
+func TestHandler_DatasourceNotFound_ErrorCode(t *testing.T) {
+	h := newTestHandler(t)
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"request_id":"r","datasource_id":"nope","action":"http_request"}`))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 404 || r.ErrorCode != proxy.ErrCodeDatasourceNotFound {
+		t.Fatalf("got status=%d code=%q", r.StatusCode, r.ErrorCode)
+	}
+}
+
+func TestHandler_LegacyHTTP_AmbiguousDatasource(t *testing.T) {
+	h := newTestHandler(t)
+	h.registry.Register("a", proxy.DatasourceEntry{ID: "a", ProxyType: "http-proxy"}, &fakeProxy{proxyType: "http-proxy"})
+	h.registry.Register("b", proxy.DatasourceEntry{ID: "b", ProxyType: "http-proxy"}, &fakeProxy{proxyType: "http-proxy"})
+
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"method":"GET","url":"/api/v1/query","request_id":"r"}`))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 400 || r.ErrorCode != proxy.ErrCodeAmbiguousDatasource {
+		t.Fatalf("got status=%d code=%q", r.StatusCode, r.ErrorCode)
+	}
+}
+
+func TestHandler_LegacyHTTP_SingleProxyStillRoutes(t *testing.T) {
+	h := newTestHandler(t)
+	h.registry.Register("a", proxy.DatasourceEntry{ID: "a", ProxyType: "http-proxy"}, &fakeProxy{proxyType: "http-proxy"})
+
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"method":"GET","url":"/api/v1/query","request_id":"r"}`))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 200 {
+		t.Fatalf("expected 200, got %d", r.StatusCode)
+	}
+}
+
+func TestHandler_ConfigSync_TriggersCallback(t *testing.T) {
+	h := newTestHandler(t)
+	called := 0
+	h.SetOnConfigSynced(func() { called++ })
+	if _, err := h.HandleMessage(context.Background(), []byte(`{"action":"datasource_config_sync","account_id":"a","datasources":[]}`)); err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	if called != 1 {
+		t.Fatalf("expected callback once, got %d", called)
+	}
+}
+
+// The relay forwards an execute request to a proxy agent as the legacy envelope, with the
+// HTTP request inside action_params. It must reach the datasource with its path intact.
+func TestHandler_LegacyHTTPRequest_KeepsPathAndQuery(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotURI = r.URL.RequestURI()
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t)
+	p := httpproxy.New(testLogger())
+	if err := p.Configure(map[string]any{"base_url": srv.URL, "datasource_type": "prometheus"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.registry.Register("ds-1", proxy.DatasourceEntry{ID: "ds-1", Type: "prometheus", ProxyType: "http-proxy"}, p)
+
+	msg := `{"request_id":"r1","body":{"account_id":"acc","action_name":"http_request","action_params":{
+		"datasource_id":"ds-1","method":"GET","url":"/api/v1/query?query=up"}}}`
+	resp, err := h.HandleMessage(context.Background(), []byte(msg))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 200 {
+		t.Fatalf("status %d: %s", r.StatusCode, resp)
+	}
+	if gotURI != "/api/v1/query?query=up" {
+		t.Fatalf("datasource received %q, want the path and query from action_params", gotURI)
+	}
 }

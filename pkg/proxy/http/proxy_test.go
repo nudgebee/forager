@@ -2,15 +2,28 @@ package http
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
 	"encoding/base64"
 	"encoding/json"
+	"encoding/pem"
+	"errors"
+	"io"
 	"log/slog"
+	"math"
+	"math/big"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"sync"
 	"testing"
+	"time"
 
 	"nudgebee/forager/pkg/proxy"
 )
@@ -587,5 +600,294 @@ func TestProxy_HandleRequest_NilRequest(t *testing.T) {
 	_, err := p.HandleRequest(context.Background(), nil)
 	if err == nil || err.Error() != "request cannot be nil" {
 		t.Fatalf("expected 'request cannot be nil' error, got %v", err)
+	}
+}
+
+func newPromProxy(t *testing.T, srv *httptest.Server, extra map[string]any, creds map[string]string) *Proxy {
+	t.Helper()
+	cfg := map[string]any{"base_url": srv.URL, "datasource_type": "prometheus"}
+	for k, v := range extra {
+		cfg[k] = v
+	}
+	p := New(testLogger())
+	if err := p.Configure(cfg, creds); err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+	return p
+}
+
+func TestProxy_PrometheusHealth(t *testing.T) {
+	tests := []struct {
+		name    string
+		handler http.HandlerFunc
+		wantErr bool
+	}{
+		{"ready 200", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/-/ready" {
+				w.WriteHeader(200)
+				return
+			}
+			w.WriteHeader(404)
+		}, false},
+		{"fallback to buildinfo", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path == "/api/v1/status/buildinfo" {
+				w.WriteHeader(200)
+				return
+			}
+			w.WriteHeader(404)
+		}, false},
+		{"all 404 is unhealthy", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }, true},
+		{"401 is unhealthy", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(401) }, true},
+		{"503 is unhealthy", func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(503) }, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(tt.handler)
+			defer srv.Close()
+			err := newPromProxy(t, srv, nil, nil).HealthCheck(context.Background())
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("err=%v wantErr=%v", err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestProxy_NonPrometheusHealthUnchanged(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }))
+	defer srv.Close()
+	p := New(testLogger())
+	if err := p.Configure(map[string]any{"base_url": srv.URL}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := p.HealthCheck(context.Background()); err != nil {
+		t.Fatalf("generic http 404 should stay healthy: %v", err)
+	}
+}
+
+func TestProxy_UpstreamUnreachable(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	p := newPromProxy(t, srv, nil, nil)
+	srv.Close() // connection refused from here on
+
+	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{Method: "GET", URL: "/api/v1/query?query=up"})
+	if !errors.Is(err, proxy.ErrUpstreamUnreachable) {
+		t.Fatalf("expected ErrUpstreamUnreachable, got %v", err)
+	}
+}
+
+func TestProxy_UpstreamHTTPErrorPassesThrough(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(500) }))
+	defer srv.Close()
+	resp, err := newPromProxy(t, srv, nil, nil).HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"})
+	if err != nil {
+		t.Fatalf("upstream 500 must not be an error: %v", err)
+	}
+	if resp.StatusCode != 200 {
+		t.Fatalf("got %d", resp.StatusCode)
+	}
+}
+
+func TestProxy_MaxResponseBytes(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write(make([]byte, 100))
+	}))
+	defer srv.Close()
+	p := newPromProxy(t, srv, map[string]any{"max_response_bytes": 50}, nil)
+	if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"}); err == nil {
+		t.Fatal("expected error for oversized response")
+	}
+	p = newPromProxy(t, srv, map[string]any{"max_response_bytes": 100}, nil)
+	if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"}); err != nil {
+		t.Fatalf("response at the limit must pass: %v", err)
+	}
+}
+
+func pemCert(t *testing.T, srv *httptest.Server) string {
+	t.Helper()
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: srv.Certificate().Raw}))
+}
+
+func TestProxy_CustomCA(t *testing.T) {
+	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(200) }))
+	defer srv.Close()
+
+	// Without the CA the handshake fails and surfaces as unreachable.
+	_, err := newPromProxy(t, srv, nil, nil).HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"})
+	if !errors.Is(err, proxy.ErrUpstreamUnreachable) {
+		t.Fatalf("expected untrusted cert to fail as unreachable, got %v", err)
+	}
+
+	p := newPromProxy(t, srv, nil, map[string]string{"ca_cert": pemCert(t, srv)})
+	if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"}); err != nil {
+		t.Fatalf("custom CA should trust server: %v", err)
+	}
+}
+
+func TestProxy_InvalidTLSMaterial(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	defer srv.Close()
+	for name, creds := range map[string]map[string]string{
+		"bad ca":       {"ca_cert": "not pem"},
+		"cert no key":  {"client_cert": "x"},
+		"key no cert":  {"client_key": "x"},
+		"mismatch pem": {"client_cert": "x", "client_key": "y"},
+	} {
+		p := New(testLogger())
+		if err := p.Configure(map[string]any{"base_url": srv.URL}, creds); err == nil {
+			t.Errorf("%s: expected Configure error", name)
+		}
+	}
+}
+
+func TestProxy_MutualTLS(t *testing.T) {
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.TLS.PeerCertificates) == 0 {
+			w.WriteHeader(401)
+			return
+		}
+		w.WriteHeader(200)
+	}))
+	srv.TLS = &tls.Config{ClientAuth: tls.RequireAnyClientCert}
+	srv.StartTLS()
+	defer srv.Close()
+
+	certPEM, keyPEM := selfSignedClientPair(t)
+	creds := map[string]string{"ca_cert": pemCert(t, srv), "client_cert": certPEM, "client_key": keyPEM}
+	if err := newPromProxy(t, srv, nil, creds).HealthCheck(context.Background()); err != nil {
+		t.Fatalf("mTLS health check: %v", err)
+	}
+	// No client cert: server rejects the handshake.
+	if err := newPromProxy(t, srv, nil, map[string]string{"ca_cert": pemCert(t, srv)}).HealthCheck(context.Background()); err == nil {
+		t.Fatal("expected failure without client certificate")
+	}
+}
+
+func selfSignedClientPair(t *testing.T) (string, string) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "forager-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyDER, err := x509.MarshalECPrivateKey(key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})),
+		string(pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER}))
+}
+
+func TestIsNetworkError(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{"canceled", context.Canceled, false},
+		{"redirect loop wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: errors.New("stopped after 10 redirects")}, false},
+		{"unsupported scheme wrapped by url.Error", &url.Error{Op: "Get", URL: "ftp://x", Err: errors.New(`unsupported protocol scheme "ftp"`)}, false},
+		{"dial error wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: &net.OpError{Op: "dial", Err: errors.New("refused")}}, true},
+		{"timeout wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: context.DeadlineExceeded}, true},
+		{"cert verification", &url.Error{Op: "Get", URL: "https://x", Err: &tls.CertificateVerificationError{}}, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isNetworkError(tt.err); got != tt.want {
+				t.Fatalf("got %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestProxy_MaxResponseBytesMaxInt64DoesNotTruncate(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = w.Write([]byte("hello")) }))
+	defer srv.Close()
+	p := newPromProxy(t, srv, map[string]any{"max_response_bytes": int64(math.MaxInt64)}, nil)
+	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{URL: "/x"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out struct {
+		Body string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(resp.Data), &out); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := base64.StdEncoding.DecodeString(out.Body); string(got) != "hello" {
+		t.Fatalf("body truncated: %q", got)
+	}
+}
+
+// A legacy execute envelope carries the request in action_params, which reach the proxy
+// as Params with the top-level URL empty. They must not be dropped: the request used to
+// go to the base URL and Prometheus answered 302 for "/".
+func TestProxy_ReadsRequestFromParamsWhenTopLevelURLIsEmpty(t *testing.T) {
+	var gotMethod, gotURI, gotHeader, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotURI, gotHeader, gotBody = r.Method, r.URL.RequestURI(), r.Header.Get("X-Scope-OrgID"), string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	p := newPromProxy(t, srv, nil, nil)
+	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		Action: "http_request",
+		Params: map[string]any{
+			"method": "POST",
+			"url":    "/api/v1/query?query=up&time=1",
+			"header": map[string]any{"X-Scope-OrgID": []any{"tenant-1"}},
+			"body":   base64.StdEncoding.EncodeToString([]byte("a=b")),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotMethod != "POST" || gotURI != "/api/v1/query?query=up&time=1" || gotHeader != "tenant-1" || gotBody != "a=b" {
+		t.Fatalf("request was not read from Params: %s %s hdr=%q body=%q", gotMethod, gotURI, gotHeader, gotBody)
+	}
+}
+
+func TestProxy_TopLevelFieldsWinOverParams(t *testing.T) {
+	var gotURI string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gotURI = r.URL.RequestURI() }))
+	defer srv.Close()
+
+	p := newPromProxy(t, srv, nil, nil)
+	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+		URL:    "/top",
+		Params: map[string]any{"url": "/params"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotURI != "/top" {
+		t.Fatalf("top-level URL must win, got %s", gotURI)
+	}
+}
+
+func TestHeadersFromParams(t *testing.T) {
+	got := headersFromParams(map[string]any{"A": "1", "B": []any{"2", "3", 4}, "C": []string{"5"}, "D": 6})
+	want := map[string][]string{"A": {"1"}, "B": {"2", "3"}, "C": {"5"}}
+	if len(got) != len(want) {
+		t.Fatalf("got %v want %v", got, want)
+	}
+	for k, v := range want {
+		if len(got[k]) != len(v) {
+			t.Fatalf("%s: got %v want %v", k, got[k], v)
+		}
+	}
+	if headersFromParams("not a map") != nil || headersFromParams(nil) != nil {
+		t.Fatal("non-object input must give nil")
 	}
 }
