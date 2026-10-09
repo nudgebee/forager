@@ -95,6 +95,12 @@ type LocalDatasource struct {
 	CredentialRef    string            `mapstructure:"credential_ref"`
 	Credentials      map[string]string `mapstructure:"credentials"`
 
+	// HTTP / Prometheus fields. CA and client certificates go in credentials
+	// (ca_cert, client_cert, client_key, each also accepted as *_file).
+	TLSSkipVerify    bool  `mapstructure:"tls_skip_verify"`
+	FollowRedirects  bool  `mapstructure:"follow_redirects"`
+	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+
 	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
 	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
 	AllowedHosts []string `mapstructure:"allowed_hosts"`

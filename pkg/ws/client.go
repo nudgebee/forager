@@ -55,6 +55,7 @@ type Client struct {
 	healthPeriod time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
+	healthNow    chan struct{} // triggers an immediate health report
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -83,6 +84,7 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		handler:      handler,
 		healthPeriod: period,
 		sendCh:       make(chan []byte, 64),
+		healthNow:    make(chan struct{}, 1),
 		logger:       logger,
 		done:         make(chan struct{}),
 	}
@@ -319,6 +321,16 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 	}
 }
 
+// TriggerHealthReport asks the health loop to report now instead of waiting
+// for the next tick, e.g. after a datasource config push. Non-blocking;
+// coalesces concurrent triggers.
+func (c *Client) TriggerHealthReport() {
+	select {
+	case c.healthNow <- struct{}{}:
+	default:
+	}
+}
+
 func (c *Client) healthReportLoop(ctx context.Context) {
 	// Wait a bit before first report to let datasources initialize
 	select {
@@ -337,6 +349,10 @@ func (c *Client) healthReportLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-c.healthNow:
+			// The report is about to go out; restart the period so the ticker does
+			// not fire a second one right behind it.
+			ticker.Reset(c.healthPeriod)
 		}
 	}
 }

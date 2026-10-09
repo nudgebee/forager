@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"sync"
@@ -24,11 +25,29 @@ type ActionRequest struct {
 	Body   string              `json:"body,omitempty"`
 }
 
+// Machine-readable error codes carried in ActionResponse.ErrorCode so the
+// server can tell "this forager cannot serve the request" (worth retrying on
+// another forager) apart from an upstream's own HTTP error.
+const (
+	ErrCodeDatasourceNotFound  = "datasource_not_found"
+	ErrCodeUpstreamUnreachable = "upstream_unreachable"
+	ErrCodeAmbiguousDatasource = "ambiguous_datasource"
+)
+
+// ErrUpstreamUnreachable marks failures to reach the target datasource at the
+// network level (DNS, dial, TLS handshake, timeout) as opposed to the target
+// answering with an error. Proxies wrap it with %w.
+var ErrUpstreamUnreachable = errors.New("upstream unreachable")
+
 // ActionResponse is the response sent back to the relay server.
 type ActionResponse struct {
 	StatusCode int    `json:"status_code"`
 	RequestID  string `json:"request_id"`
 	Action     string `json:"action,omitempty"`
+
+	// ErrorCode is a stable machine-readable reason set on error responses
+	// (see ErrCode* constants). Empty for successes and uncategorised errors.
+	ErrorCode string `json:"error_code,omitempty"`
 
 	// Data carries the payload as an opaque string. It is a string because
 	// some actions return things that are not JSON at all — an HTTP response
@@ -70,6 +89,8 @@ type Registry struct {
 	mu      sync.RWMutex
 	proxies map[string]Proxy // datasource ID → Proxy
 	configs map[string]DatasourceEntry
+	// lastSuccess is the RFC3339 time of each datasource's last passing health check.
+	lastSuccess map[string]string
 }
 
 // DatasourceEntry stores the proxy and its metadata.
@@ -87,6 +108,8 @@ func NewRegistry() *Registry {
 	return &Registry{
 		proxies: make(map[string]Proxy),
 		configs: make(map[string]DatasourceEntry),
+
+		lastSuccess: make(map[string]string),
 	}
 }
 
@@ -123,6 +146,7 @@ func (r *Registry) Remove(id string) error {
 		}
 		delete(r.proxies, id)
 		delete(r.configs, id)
+		delete(r.lastSuccess, id)
 	}
 	return nil
 }
@@ -147,6 +171,13 @@ type DatasourceHealth struct {
 	Status    string `json:"status"` // "healthy", "error", "unknown"
 	Error     string `json:"error,omitempty"`
 	LastCheck string `json:"last_check"` // RFC3339
+
+	// Reachable is true when the datasource's health check succeeded from this
+	// forager. With several foragers per account the server uses it to pick one
+	// that can actually see the datasource.
+	Reachable   bool   `json:"reachable"`
+	LatencyMs   int64  `json:"latency_ms"`
+	LastSuccess string `json:"last_success,omitempty"` // RFC3339
 }
 
 const (
@@ -230,6 +261,7 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 					continue
 				}
 
+				start := time.Now()
 				err := func() (err error) {
 					defer func() {
 						if rec := recover(); rec != nil {
@@ -241,11 +273,21 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 					return t.proxy.HealthCheck(checkCtx)
 				}()
 
+				health.LatencyMs = time.Since(start).Milliseconds()
+
 				if err != nil {
 					health.Status = "error"
 					health.Error = err.Error()
+					r.mu.RLock()
+					health.LastSuccess = r.lastSuccess[t.id]
+					r.mu.RUnlock()
 				} else {
 					health.Status = "healthy"
+					health.Reachable = true
+					health.LastSuccess = now
+					r.mu.Lock()
+					r.lastSuccess[t.id] = now
+					r.mu.Unlock()
 				}
 
 				results[idx] = health

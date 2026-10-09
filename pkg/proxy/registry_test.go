@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -307,5 +308,36 @@ func TestRegistry_HealthReport_RecoversFromPanic(t *testing.T) {
 	}
 	if hOK.Status != "healthy" {
 		t.Errorf("expected status 'healthy', got %q", hOK.Status)
+	}
+}
+
+type healthStub struct{ err error }
+
+func (h *healthStub) Type() string                                      { return "http-proxy" }
+func (h *healthStub) Configure(map[string]any, map[string]string) error { return nil }
+func (h *healthStub) HandleRequest(context.Context, *ActionRequest) (*ActionResponse, error) {
+	return &ActionResponse{StatusCode: 200}, nil
+}
+func (h *healthStub) HealthCheck(context.Context) error { return h.err }
+func (h *healthStub) Close() error                      { return nil }
+
+func TestRegistry_HealthReport_Reachability(t *testing.T) {
+	r := NewRegistry()
+	stub := &healthStub{}
+	r.Register("d", DatasourceEntry{ID: "d", Type: "prometheus", ProxyType: "http-proxy"}, stub)
+
+	h := r.HealthReport(context.Background())["d"]
+	if !h.Reachable || h.Status != "healthy" || h.LastSuccess == "" {
+		t.Fatalf("expected reachable with last_success, got %+v", h)
+	}
+	first := h.LastSuccess
+
+	stub.err = errors.New("down")
+	h = r.HealthReport(context.Background())["d"]
+	if h.Reachable || h.Status != "error" {
+		t.Fatalf("expected unreachable, got %+v", h)
+	}
+	if h.LastSuccess != first {
+		t.Fatalf("last_success should persist across failures: %q vs %q", h.LastSuccess, first)
 	}
 }

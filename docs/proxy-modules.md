@@ -31,12 +31,39 @@ Supports PostgreSQL, MySQL, MSSQL, ClickHouse, Oracle. Opens a connection pool, 
 
 Generic reverse proxy for any HTTP API. Forwards method, URL, headers, body. Base64-encodes response body.
 
-**Config:** `base_url`, `auth_type`, `tls_skip_verify`
+**Config:** `base_url`, `auth_type`, `tls_skip_verify`, `follow_redirects` (same-origin only), `max_response_bytes` (default 256 MiB; larger upstream responses fail instead of exhausting memory)
 **Auth types:** `basic`, `bearer`, `custom_header`
 **Creds:**
 - basic: `username`, `password`
 - bearer: `bearer_token`
 - custom_header: `custom_header_name`, `custom_header_value`
+- TLS (optional, PEM): `ca_cert` to trust a private CA, `client_cert` + `client_key` for mTLS. Each also accepts a `*_file` path (e.g. `ca_cert_file`) in local YAML so Kubernetes can mount a Secret.
+
+In local YAML, `tls_skip_verify`, `follow_redirects` and `max_response_bytes` are datasource fields next to `url`.
+
+### Prometheus datasources
+
+`type: prometheus` uses this proxy. Its health check requires a 2xx from `/-/ready`, falling back to `/api/v1/status/buildinfo` for Prometheus-compatible stores (Mimir, VictoriaMetrics, Thanos). A 404 or 401 from a wrong host or reverse proxy is reported as an error. Other `http` datasources keep the looser check (any status below 500).
+
+### Customer-run metrics store
+
+For VM metrics the customer runs the store and the agents write to it directly. The forager only carries queries:
+
+```
+node-agent (on each VM) --remote-write--> customer Prometheus <--queries-- forager <--relay-- server
+```
+
+Requirements for the store:
+- Remote-write receiving enabled (Prometheus `--web.enable-remote-write-receiver`, or the equivalent in Mimir/VictoriaMetrics).
+- Write authentication (basic or bearer) so only the VMs' agents can push.
+- TLS on both the write and query endpoints. Use `ca_cert` / mTLS above when the certificate comes from a private CA.
+- The forager host must be able to reach the query endpoint. The VMs only need to reach the write endpoint.
+
+With more than one forager in an account the relay queue is shared, so a request can land on a forager that cannot see the store. Foragers expose what the server needs to avoid that:
+- `datasource_health_update` carries `reachable`, `latency_ms` and `last_success` per datasource. Route to a forager where the datasource is reachable.
+- Error responses carry `error_code`: `datasource_not_found` (this forager has no such datasource) and `upstream_unreachable` (network-level failure to the store) are safe to retry on another forager. An upstream HTTP error (including 4xx/5xx from the store) is passed through unchanged and should not be retried elsewhere.
+- A health update is sent immediately after each `datasource_config_sync`, so a newly connected store reports without waiting for the next interval.
+- A request without `datasource_id` is only accepted when exactly one `http-proxy` datasource exists; otherwise it fails with `ambiguous_datasource` (HTTP 400). Always send `datasource_id`.
 
 ## MCP Proxy (`mcp-proxy`)
 
