@@ -40,7 +40,7 @@ RUN OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
 RUN chmod +x /app/nudgebee-forager
 
 
-FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f2068983107a6f6c21eeb AS release-stage
+FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS release-stage
 
 # apt-get upgrade patches the base packages to the latest bookworm security
 # releases — the pinned digest snapshot drifts behind (Trivy flagged 13 fixable
