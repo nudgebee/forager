@@ -133,6 +133,9 @@ func (r *Registry) Register(id string, entry DatasourceEntry, p Proxy) {
 
 	r.proxies[id] = p
 	r.configs[id] = entry
+	// A replaced datasource may point at a different target; its old last_success
+	// says nothing about the new one.
+	delete(r.lastSuccess, id)
 }
 
 // Remove removes and closes a proxy by datasource ID.
@@ -224,6 +227,9 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 	}
 
 	results := make([]DatasourceHealth, len(targets))
+	// superseded marks a datasource that was replaced or removed while its check ran.
+	// The check then hit a closed proxy, so its result says nothing about the target.
+	superseded := make([]bool, len(targets))
 	now := time.Now().UTC().Format(time.RFC3339)
 	var wg sync.WaitGroup
 
@@ -275,20 +281,23 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 
 				health.LatencyMs = time.Since(start).Milliseconds()
 
+				r.mu.Lock()
+				if r.proxies[t.id] != t.proxy {
+					r.mu.Unlock()
+					superseded[idx] = true
+					continue
+				}
 				if err != nil {
 					health.Status = "error"
 					health.Error = err.Error()
-					r.mu.RLock()
 					health.LastSuccess = r.lastSuccess[t.id]
-					r.mu.RUnlock()
 				} else {
 					health.Status = "healthy"
 					health.Reachable = true
 					health.LastSuccess = now
-					r.mu.Lock()
 					r.lastSuccess[t.id] = now
-					r.mu.Unlock()
 				}
+				r.mu.Unlock()
 
 				results[idx] = health
 			}
@@ -299,6 +308,11 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 
 	report := make(map[string]DatasourceHealth, len(targets))
 	for i, t := range targets {
+		if superseded[i] {
+			// Left out rather than reported unreachable: the next report covers the
+			// new proxy, and reachability drives routing.
+			continue
+		}
 		report[t.id] = results[i]
 	}
 	return report

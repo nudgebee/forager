@@ -337,12 +337,20 @@ func (c *Client) healthReportLoop(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	case <-time.After(initialHealthDelay):
+	case <-c.healthNow:
+		// A config sync arrived during the delay. Report now rather than wait it out.
 	}
 
 	ticker := time.NewTicker(c.healthPeriod)
 	defer ticker.Stop()
 
 	for {
+		// Any trigger already pending is covered by the report about to be taken;
+		// left in the channel it would fire a second full round of checks.
+		select {
+		case <-c.healthNow:
+		default:
+		}
 		c.sendHealthReport(ctx)
 
 		select {

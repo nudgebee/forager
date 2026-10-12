@@ -5,6 +5,7 @@ import (
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -544,5 +545,52 @@ func TestHandler_LegacyHTTPRequest_KeepsPathAndQuery(t *testing.T) {
 	}
 	if gotURI != "/api/v1/query?query=up" {
 		t.Fatalf("datasource received %q, want the path and query from action_params", gotURI)
+	}
+}
+
+// The rest of the HTTP request (method, header, body) rides in action_params too.
+func TestHandler_LegacyHTTPRequest_KeepsMethodHeaderAndBody(t *testing.T) {
+	var gotMethod, gotHeader, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotMethod, gotHeader, gotBody = r.Method, r.Header.Get("X-Scope-OrgID"), string(b)
+		w.WriteHeader(200)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t)
+	p := httpproxy.New(testLogger())
+	if err := p.Configure(map[string]any{"base_url": srv.URL, "datasource_type": "prometheus"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	h.registry.Register("ds-1", proxy.DatasourceEntry{ID: "ds-1", Type: "prometheus", ProxyType: "http-proxy"}, p)
+
+	msg := `{"request_id":"r1","body":{"action_name":"http_request","action_params":{
+		"datasource_id":"ds-1","method":"POST","url":"/api/v1/query",
+		"header":{"X-Scope-OrgID":["tenant-1"]},"body":"` + base64.StdEncoding.EncodeToString([]byte("query=up")) + `"}}}`
+	resp, err := h.HandleMessage(context.Background(), []byte(msg))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 200 {
+		t.Fatalf("status %d: %s", r.StatusCode, resp)
+	}
+	if gotMethod != "POST" || gotHeader != "tenant-1" || gotBody != "query=up" {
+		t.Fatalf("got %s hdr=%q body=%q", gotMethod, gotHeader, gotBody)
+	}
+}
+
+func TestHandler_LegacyHTTP_NoProxyIsCodedNotFound(t *testing.T) {
+	h := newTestHandler(t)
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"request_id":"r1","method":"GET","url":"/x"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r proxy.ActionResponse
+	_ = json.Unmarshal(resp, &r)
+	if r.StatusCode != 404 || r.ErrorCode != proxy.ErrCodeDatasourceNotFound {
+		t.Fatalf("got %d %q", r.StatusCode, r.ErrorCode)
 	}
 }

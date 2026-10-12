@@ -109,7 +109,12 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 			maxRespBytes = v
 		}
 	case float64:
-		if v > 0 {
+		// Converting a float64 beyond the int64 range is implementation-defined
+		// (negative on amd64), which would reject every response. Clamp instead.
+		switch {
+		case v >= math.MaxInt64:
+			maxRespBytes = math.MaxInt64
+		case v >= 1:
 			maxRespBytes = int64(v)
 		}
 	}
@@ -201,71 +206,6 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	return nil
 }
 
-// httpRequestFields is the HTTP request to make, wherever the sender put it.
-type httpRequestFields struct {
-	method string
-	url    string
-	header map[string][]string
-	body   string
-}
-
-// requestFields reads the HTTP request from either envelope the relay uses.
-//
-// The unified shape carries method, url, header and body at the top level. The legacy
-// execute envelope ({body: {action_name, action_params}}) carries them inside
-// action_params, and the websocket handler hands those over as req.Params only. Reading
-// the top level alone sent every request through that route to the datasource's base URL
-// (a Prometheus answered 302 for "/"), so fall back to Params when the top level has no
-// URL. The top level wins when both are present.
-func requestFields(req *proxy.ActionRequest) httpRequestFields {
-	f := httpRequestFields{method: req.Method, url: req.URL, header: req.Header, body: req.Body}
-	if f.url != "" || req.Params == nil {
-		return f
-	}
-	if v, ok := req.Params["url"].(string); ok {
-		f.url = v
-	}
-	if f.method == "" {
-		if v, ok := req.Params["method"].(string); ok {
-			f.method = v
-		}
-	}
-	if f.body == "" {
-		if v, ok := req.Params["body"].(string); ok {
-			f.body = v
-		}
-	}
-	if len(f.header) == 0 {
-		f.header = headersFromParams(req.Params["header"])
-	}
-	return f
-}
-
-// headersFromParams converts the JSON-decoded header object ({"K": ["v"]} or {"K": "v"})
-// to the shape http.Header takes. Values that are neither are skipped.
-func headersFromParams(raw any) map[string][]string {
-	obj, ok := raw.(map[string]any)
-	if !ok {
-		return nil
-	}
-	out := make(map[string][]string, len(obj))
-	for k, v := range obj {
-		switch vals := v.(type) {
-		case string:
-			out[k] = []string{vals}
-		case []any:
-			for _, item := range vals {
-				if str, ok := item.(string); ok {
-					out[k] = append(out[k], str)
-				}
-			}
-		case []string:
-			out[k] = append(out[k], vals...)
-		}
-	}
-	return out
-}
-
 // resolveTargetURL appends the request path/query to the configured base_url
 // and guarantees the result still targets the base_url's scheme and host. The
 // request URL comes from the control plane (untrusted from CodeQL's point of
@@ -327,24 +267,22 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 		return nil, fmt.Errorf("http proxy not configured")
 	}
 
-	fields := requestFields(req)
-
-	targetURL, err := p.resolveTargetURL(baseParsed, fields.url)
+	targetURL, err := p.resolveTargetURL(baseParsed, req.URL)
 	if err != nil {
 		return nil, err
 	}
 
 	var bodyReader io.Reader
-	if fields.body != "" {
-		decoded, err := base64.StdEncoding.DecodeString(fields.body)
+	if req.Body != "" {
+		decoded, err := base64.StdEncoding.DecodeString(req.Body)
 		if err != nil {
-			bodyReader = bytes.NewReader([]byte(fields.body))
+			bodyReader = bytes.NewReader([]byte(req.Body))
 		} else {
 			bodyReader = bytes.NewReader(decoded)
 		}
 	}
 
-	method := fields.method
+	method := req.Method
 	if method == "" {
 		method = "GET"
 	}
@@ -355,7 +293,7 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 	}
 
 	// Copy headers from the original request
-	for k, vals := range fields.header {
+	for k, vals := range req.Header {
 		for _, v := range vals {
 			httpReq.Header.Add(k, v)
 		}
@@ -501,8 +439,12 @@ func applyTLSMaterial(cfg *tls.Config, creds map[string]string) error {
 	return nil
 }
 
-// isNetworkError reports whether err is a failure to reach the upstream
-// (DNS, dial, TLS handshake, timeout) rather than a protocol-level error.
+// isNetworkError reports whether err means the request never reached the upstream:
+// DNS, dial, or TLS handshake failures. These are safe to retry on another forager.
+//
+// Timeouts and connection resets that happen after the request was written are
+// deliberately not included. The upstream may have accepted the work, so retrying
+// would run a heavy query twice or repeat a non-idempotent POST.
 func isNetworkError(err error) bool {
 	if errors.Is(err, context.Canceled) {
 		return false
@@ -514,12 +456,16 @@ func isNetworkError(err error) bool {
 	if errors.As(err, &urlErr) {
 		err = urlErr.Err
 	}
-	var netErr net.Error
-	if errors.As(err, &netErr) {
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
 		return true
 	}
 	var opErr *net.OpError
-	if errors.As(err, &opErr) {
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &recordErr) {
 		return true
 	}
 	var certErr *tls.CertificateVerificationError

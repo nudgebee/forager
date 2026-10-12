@@ -215,14 +215,21 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 			return h.buildCodedErrorResponse(requestID, 404, proxy.ErrCodeDatasourceNotFound, fmt.Sprintf("datasource %s not found", datasourceID)), nil
 		}
 
-		req := &proxy.ActionRequest{
-			RequestID:    actionReq.RequestID,
-			Action:       actionReq.Body.ActionName,
-			DatasourceID: datasourceID,
-			Params:       actionReq.Body.ActionParams,
+		// action_params uses the same field names as ActionRequest, so decode it the
+		// same way. Otherwise the HTTP fields (method, url, header, body) stay empty
+		// and the request goes to the datasource's base URL. Best effort: a param
+		// whose type does not match (say a non-string "body" for a db action) is
+		// skipped by the decoder, and it is still available in Params.
+		var req proxy.ActionRequest
+		if raw, err := json.Marshal(actionReq.Body.ActionParams); err == nil {
+			_ = json.Unmarshal(raw, &req)
 		}
+		req.RequestID = actionReq.RequestID
+		req.Action = actionReq.Body.ActionName
+		req.DatasourceID = datasourceID
+		req.Params = actionReq.Body.ActionParams
 
-		resp, err := p.HandleRequest(ctx, req)
+		resp, err := p.HandleRequest(ctx, &req)
 		if err != nil {
 			h.logger.Error("legacy proxy request failed", "action", req.Action, "datasource", datasourceID, "err", err)
 			return h.buildProxyErrorResponse(requestID, err), nil
@@ -248,7 +255,7 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 		}
 		switch len(httpProxies) {
 		case 0:
-			return h.buildErrorResponse(requestID, 404, "no http-proxy datasource configured"), nil
+			return h.buildCodedErrorResponse(requestID, 404, proxy.ErrCodeDatasourceNotFound, "no http-proxy datasource configured"), nil
 		case 1:
 			req := &proxy.ActionRequest{
 				Method: httpReq.Method,

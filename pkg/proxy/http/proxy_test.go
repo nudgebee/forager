@@ -12,7 +12,6 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"errors"
-	"io"
 	"log/slog"
 	"math"
 	"math/big"
@@ -797,7 +796,11 @@ func TestIsNetworkError(t *testing.T) {
 		{"redirect loop wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: errors.New("stopped after 10 redirects")}, false},
 		{"unsupported scheme wrapped by url.Error", &url.Error{Op: "Get", URL: "ftp://x", Err: errors.New(`unsupported protocol scheme "ftp"`)}, false},
 		{"dial error wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: &net.OpError{Op: "dial", Err: errors.New("refused")}}, true},
-		{"timeout wrapped by url.Error", &url.Error{Op: "Get", URL: "http://x", Err: context.DeadlineExceeded}, true},
+		{"dns error", &url.Error{Op: "Get", URL: "http://x", Err: &net.DNSError{Err: "no such host", Name: "x"}}, true},
+		{"tls record header", &url.Error{Op: "Get", URL: "https://x", Err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}}, true},
+		{"client timeout after send", &url.Error{Op: "Get", URL: "http://x", Err: context.DeadlineExceeded}, false},
+		{"read timeout", &url.Error{Op: "Get", URL: "http://x", Err: &net.OpError{Op: "read", Err: errors.New("i/o timeout")}}, false},
+		{"connection reset after write", &url.Error{Op: "Post", URL: "http://x", Err: &net.OpError{Op: "read", Err: errors.New("connection reset by peer")}}, false},
 		{"cert verification", &url.Error{Op: "Get", URL: "https://x", Err: &tls.CertificateVerificationError{}}, true},
 	}
 	for _, tt := range tests {
@@ -828,66 +831,26 @@ func TestProxy_MaxResponseBytesMaxInt64DoesNotTruncate(t *testing.T) {
 	}
 }
 
-// A legacy execute envelope carries the request in action_params, which reach the proxy
-// as Params with the top-level URL empty. They must not be dropped: the request used to
-// go to the base URL and Prometheus answered 302 for "/".
-func TestProxy_ReadsRequestFromParamsWhenTopLevelURLIsEmpty(t *testing.T) {
-	var gotMethod, gotURI, gotHeader, gotBody string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		b, _ := io.ReadAll(r.Body)
-		gotMethod, gotURI, gotHeader, gotBody = r.Method, r.URL.RequestURI(), r.Header.Get("X-Scope-OrgID"), string(b)
-		w.WriteHeader(200)
-	}))
-	defer srv.Close()
-
-	p := newPromProxy(t, srv, nil, nil)
-	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
-		Action: "http_request",
-		Params: map[string]any{
-			"method": "POST",
-			"url":    "/api/v1/query?query=up&time=1",
-			"header": map[string]any{"X-Scope-OrgID": []any{"tenant-1"}},
-			"body":   base64.StdEncoding.EncodeToString([]byte("a=b")),
-		},
-	})
-	if err != nil {
-		t.Fatal(err)
+func TestConfigure_MaxResponseBytesFloatIsClamped(t *testing.T) {
+	tests := []struct {
+		name string
+		in   float64
+		want int64
+	}{
+		{"beyond int64", 1e19, math.MaxInt64},
+		{"in range", 2048, 2048},
+		{"below one", 0.5, defaultMaxResponseBytes},
+		{"negative", -1, defaultMaxResponseBytes},
 	}
-	if gotMethod != "POST" || gotURI != "/api/v1/query?query=up&time=1" || gotHeader != "tenant-1" || gotBody != "a=b" {
-		t.Fatalf("request was not read from Params: %s %s hdr=%q body=%q", gotMethod, gotURI, gotHeader, gotBody)
-	}
-}
-
-func TestProxy_TopLevelFieldsWinOverParams(t *testing.T) {
-	var gotURI string
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { gotURI = r.URL.RequestURI() }))
-	defer srv.Close()
-
-	p := newPromProxy(t, srv, nil, nil)
-	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
-		URL:    "/top",
-		Params: map[string]any{"url": "/params"},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if gotURI != "/top" {
-		t.Fatalf("top-level URL must win, got %s", gotURI)
-	}
-}
-
-func TestHeadersFromParams(t *testing.T) {
-	got := headersFromParams(map[string]any{"A": "1", "B": []any{"2", "3", 4}, "C": []string{"5"}, "D": 6})
-	want := map[string][]string{"A": {"1"}, "B": {"2", "3"}, "C": {"5"}}
-	if len(got) != len(want) {
-		t.Fatalf("got %v want %v", got, want)
-	}
-	for k, v := range want {
-		if len(got[k]) != len(v) {
-			t.Fatalf("%s: got %v want %v", k, got[k], v)
-		}
-	}
-	if headersFromParams("not a map") != nil || headersFromParams(nil) != nil {
-		t.Fatal("non-object input must give nil")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p := New(testLogger())
+			if err := p.Configure(map[string]any{"base_url": "http://127.0.0.1:1", "max_response_bytes": tt.in}, nil); err != nil {
+				t.Fatal(err)
+			}
+			if p.maxRespBytes != tt.want {
+				t.Fatalf("got %d, want %d", p.maxRespBytes, tt.want)
+			}
+		})
 	}
 }

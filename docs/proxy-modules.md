@@ -61,7 +61,7 @@ Requirements for the store:
 
 With more than one forager in an account the relay queue is shared, so a request can land on a forager that cannot see the store. Foragers expose what the server needs to avoid that:
 - `datasource_health_update` carries `reachable`, `latency_ms` and `last_success` per datasource. Route to a forager where the datasource is reachable.
-- Error responses carry `error_code`: `datasource_not_found` (this forager has no such datasource) and `upstream_unreachable` (network-level failure to the store) are safe to retry on another forager. An upstream HTTP error (including 4xx/5xx from the store) is passed through unchanged and should not be retried elsewhere.
+- Error responses carry `error_code`: `datasource_not_found` (this forager has no such datasource) and `upstream_unreachable` (the request never reached the store: DNS, dial or TLS handshake failure) are safe to retry on another forager. An upstream HTTP error (including 4xx/5xx from the store) is passed through unchanged and should not be retried elsewhere. A timeout or connection reset after the request was sent has no `error_code`, since the store may already be running it.
 - A health update is sent immediately after each `datasource_config_sync`, so a newly connected store reports without waiting for the next interval.
 - A request without `datasource_id` is only accepted when exactly one `http-proxy` datasource exists; otherwise it fails with `ambiguous_datasource` (HTTP 400). Always send `datasource_id`.
 
