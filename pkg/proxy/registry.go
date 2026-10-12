@@ -91,6 +91,76 @@ type Registry struct {
 	configs map[string]DatasourceEntry
 	// lastSuccess is the RFC3339 time of each datasource's last passing health check.
 	lastSuccess map[string]string
+
+	reqErrMu  sync.Mutex
+	reqErrors map[string]requestError // datasource ID → last unrecovered request failure
+}
+
+type requestError struct {
+	msg string
+	at  time.Time
+}
+
+// requestErrorTTL bounds how long a request failure is reported without a
+// later successful request to the same datasource.
+const requestErrorTTL = 15 * time.Minute
+
+// RecordRequestResult notes the outcome of a proxied request. A failure that
+// looks like an integration problem (see IsIntegrationError) is reported on
+// the next health report (deduplicated per datasource, latest wins); a
+// success clears it. Failures caused by the caller — bad input, policy
+// rejections, a cancelled or timed-out request context — are ignored.
+//
+// Lock order is mu → reqErrMu everywhere.
+func (r *Registry) RecordRequestResult(ctx context.Context, datasourceID string, err error) {
+	var msg string
+	if err != nil {
+		if ctx.Err() != nil || !IsIntegrationError(err) {
+			return
+		}
+		msg = RedactError(err.Error()) // outside the locks: several regexes
+	}
+
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	// Ignore results for datasources that were removed while the request was
+	// in flight, so they cannot resurrect an entry nothing will clean up.
+	if _, ok := r.proxies[datasourceID]; !ok {
+		return
+	}
+
+	r.reqErrMu.Lock()
+	defer r.reqErrMu.Unlock()
+	if err == nil {
+		delete(r.reqErrors, datasourceID)
+		return
+	}
+	if r.reqErrors == nil {
+		r.reqErrors = make(map[string]requestError)
+	}
+	r.reqErrors[datasourceID] = requestError{msg: msg, at: time.Now()}
+}
+
+// clearRequestError drops any recorded request failure for a datasource.
+// Callers hold r.mu.
+func (r *Registry) clearRequestError(datasourceID string) {
+	r.reqErrMu.Lock()
+	delete(r.reqErrors, datasourceID)
+	r.reqErrMu.Unlock()
+}
+
+func (r *Registry) recentRequestError(datasourceID string) (string, bool) {
+	r.reqErrMu.Lock()
+	defer r.reqErrMu.Unlock()
+	e, ok := r.reqErrors[datasourceID]
+	if !ok {
+		return "", false
+	}
+	if time.Since(e.at) > requestErrorTTL {
+		delete(r.reqErrors, datasourceID)
+		return "", false
+	}
+	return e.msg, true
 }
 
 // DatasourceEntry stores the proxy and its metadata.
@@ -136,6 +206,8 @@ func (r *Registry) Register(id string, entry DatasourceEntry, p Proxy) {
 	// A replaced datasource may point at a different target; its old last_success
 	// says nothing about the new one.
 	delete(r.lastSuccess, id)
+	// A replaced proxy is a new configuration; the old failure no longer applies.
+	r.clearRequestError(id)
 }
 
 // Remove removes and closes a proxy by datasource ID.
@@ -150,6 +222,7 @@ func (r *Registry) Remove(id string) error {
 		delete(r.proxies, id)
 		delete(r.configs, id)
 		delete(r.lastSuccess, id)
+		r.clearRequestError(id)
 	}
 	return nil
 }
@@ -173,7 +246,10 @@ type DatasourceHealth struct {
 	Name      string `json:"name"`
 	Status    string `json:"status"` // "healthy", "error", "unknown"
 	Error     string `json:"error,omitempty"`
-	LastCheck string `json:"last_check"` // RFC3339
+	// ErrorClass is set only while Status is "error"; it clears on the next
+	// successful check, so the report always reflects current state.
+	ErrorClass string `json:"error_class,omitempty"`
+	LastCheck  string `json:"last_check"` // RFC3339
 
 	// Reachable is true when the datasource's health check succeeded from this
 	// forager. With several foragers per account the server uses it to pick one
@@ -215,12 +291,13 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 		now := time.Now().UTC().Format(time.RFC3339)
 		for _, t := range targets {
 			report[t.id] = DatasourceHealth{
-				Type:      t.cfg.Type,
-				ProxyType: t.cfg.ProxyType,
-				Name:      t.cfg.Name,
-				Status:    "error",
-				Error:     err.Error(),
-				LastCheck: now,
+				Type:       t.cfg.Type,
+				ProxyType:  t.cfg.ProxyType,
+				Name:       t.cfg.Name,
+				Status:     "error",
+				Error:      RedactError(err.Error()),
+				ErrorClass: ErrorClass(t.cfg.ProxyType),
+				LastCheck:  now,
 			}
 		}
 		return report
@@ -262,7 +339,8 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 
 				if err := ctx.Err(); err != nil {
 					health.Status = "error"
-					health.Error = err.Error()
+					health.Error = RedactError(err.Error())
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
 					results[idx] = health
 					continue
 				}
@@ -287,15 +365,24 @@ func (r *Registry) HealthReport(ctx context.Context) map[string]DatasourceHealth
 					superseded[idx] = true
 					continue
 				}
-				if err != nil {
-					health.Status = "error"
-					health.Error = err.Error()
-					health.LastSuccess = r.lastSuccess[t.id]
-				} else {
-					health.Status = "healthy"
+				if err == nil {
+					// The target answered, whatever recent requests did.
 					health.Reachable = true
 					health.LastSuccess = now
 					r.lastSuccess[t.id] = now
+				} else {
+					health.LastSuccess = r.lastSuccess[t.id]
+				}
+				if err != nil {
+					health.Status = "error"
+					health.Error = RedactError(err.Error())
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
+				} else if msg, ok := r.recentRequestError(t.id); ok {
+					health.Status = "error"
+					health.Error = msg
+					health.ErrorClass = ErrorClass(t.cfg.ProxyType)
+				} else {
+					health.Status = "healthy"
 				}
 				r.mu.Unlock()
 
@@ -391,5 +478,6 @@ func (r *Registry) CloseAll() {
 		p.Close() // nolint:errcheck
 		delete(r.proxies, id)
 		delete(r.configs, id)
+		r.clearRequestError(id)
 	}
 }

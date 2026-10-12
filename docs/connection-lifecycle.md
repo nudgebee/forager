@@ -37,6 +37,8 @@ sequenceDiagram
     end
 ```
 
+**Integration errors:** Each entry in the health report carries `status`, and while `status` is `"error"` also `error` and `error_class` (`datasource_integration_failure` or `ssh_integration_failure`). Errors come from failed health checks and from proxied requests that fail with a connectivity or authentication error (kept for up to 15 minutes, cleared by the next successful request or when the datasource is re-registered or removed). Caller mistakes (bad SQL, disallowed commands, invalid input) and cancelled requests are not reported. Messages are redacted on a best-effort basis before entering the report (credentials, bearer tokens, private keys, IP addresses, `host:port`, and hosts named after `lookup`/`dial`) and truncated to 512 chars; a bare hostname or username in free-form text may not be caught. The raw error is still returned in the response to the failing request itself. Once the integration recovers, the next report simply omits the error.
+
 **Auto-reconnect:** On disconnect, the agent reconnects with exponential backoff (3s → 6s → 12s → ... → 30s max).
 
 ## Config Sync

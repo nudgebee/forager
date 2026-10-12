@@ -182,6 +182,7 @@ func (h *Handler) handleRequest(ctx context.Context, msg []byte, requestID, data
 	}
 
 	resp, err := p.HandleRequest(ctx, &req)
+	h.registry.RecordRequestResult(ctx, datasourceID, err)
 	if err != nil {
 		h.logger.Error("proxy request failed", "action", req.Action, "datasource", datasourceID, "err", err)
 		return h.buildProxyErrorResponse(requestID, err), nil
@@ -230,6 +231,7 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 		req.Params = actionReq.Body.ActionParams
 
 		resp, err := p.HandleRequest(ctx, &req)
+		h.registry.RecordRequestResult(ctx, datasourceID, err)
 		if err != nil {
 			h.logger.Error("legacy proxy request failed", "action", req.Action, "datasource", datasourceID, "err", err)
 			return h.buildProxyErrorResponse(requestID, err), nil
