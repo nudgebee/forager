@@ -177,11 +177,32 @@ and no target list of its own.
 | `pack_public_key` | — | Required; without it no pack can be trusted, so nothing runs. |
 | `pack_dir` | — | Directory holding signed packs, named `linux-inventory-v<N>.yaml`. Required to run inventory. |
 | `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified and unknown/changed keys are refused. |
+| `ssh_access` | false | Also expose in-scope hosts for ad-hoc commands (see below). |
 
 Credentials arrive through `pkg/secrets`, local or cloud-push, and never
 appear in logs or responses: `username` plus `private_key` or `password` for
 SSH, and `ldap_bind_dn` / `ldap_bind_password` for the directory. LDAP bind
 failures echo the DN back, so those errors are redacted before they leave.
+
+## SSH access (`ssh_access`)
+
+Inventory only runs signed pack commands. Setting `ssh_access: true` also
+registers a sibling `ssh-proxy` datasource, `<id>:ssh` named `<name>-ssh`, in
+dynamic mode:
+- It uses the same credentials.
+- `allowed_hosts` is set to `allowed_cidrs`.
+- It verifies host keys against the same `known_hosts_file`.
+
+The server registers the sibling like any other ssh datasource, so
+`ssh_command` can target any in-scope host by passing `params.host`. The discovery datasource itself is unchanged.
+
+The flag widens what the credentials were granted for, from signed packs to
+arbitrary commands. For that reason the sibling is refused, and an error is
+logged, unless all of the following hold:
+- `signing_public_key` is configured, so unsigned commands are rejected.
+- `known_hosts_file` is set. The trust-on-first-use tradeoff above is
+  acceptable for inventory but not for a shell.
+- `allowed_cidrs` is non-empty. An unrestricted scope is never exposed.
 
 ## Pack format
 

@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Scoped workflow `GITHUB_TOKEN` permissions to least privilege: read-only
   at the top level, per-job escalation only where needed.
 
+### Fixed
+- MCP proxy (http/sse): concurrent callers no longer share one upstream
+  session. The proxy now runs the MCP `initialize` handshake, sends
+  `Mcp-Session-Id`, keeps one session per `session_id` request param,
+  closes idle sessions, and recovers when the server expires one.
+  Streamable HTTP servers that require sessions now work through forager.
+
 ## [0.1.0] - 2026-05-23
 
 ### Added

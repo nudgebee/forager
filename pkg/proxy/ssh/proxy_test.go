@@ -413,6 +413,34 @@ func TestIsHostAllowed(t *testing.T) {
 	}
 }
 
+// A bare IP in allowed_hosts is a single-host network, so equivalent
+// spellings of the address match, and an address outside it does not.
+func TestParseAllowedHosts_BareIPIsSingleHostNet(t *testing.T) {
+	p := New(testLogger())
+	if err := p.parseAllowedHosts([]string{"192.0.2.10", "2001:db8::1", "special-host.local"}); err != nil {
+		t.Fatalf("parseAllowedHosts: %v", err)
+	}
+	if len(p.allowedNets) != 2 || len(p.allowedHosts) != 1 {
+		t.Fatalf("nets=%v hosts=%v, want 2 nets and only the hostname kept as a string", p.allowedNets, p.allowedHosts)
+	}
+
+	tests := []struct {
+		host    string
+		allowed bool
+	}{
+		{"192.0.2.10", true},
+		{"192.0.2.11", false},
+		{"2001:db8:0:0:0:0:0:1", true}, // same address, non-canonical spelling
+		{"2001:db8::2", false},
+		{"special-host.local", true},
+	}
+	for _, tt := range tests {
+		if got := p.isHostAllowed(tt.host); got != tt.allowed {
+			t.Errorf("isHostAllowed(%s) = %v, want %v", tt.host, got, tt.allowed)
+		}
+	}
+}
+
 func TestEvictOldest(t *testing.T) {
 	p := New(testLogger())
 	p.pool = map[string]*poolEntry{

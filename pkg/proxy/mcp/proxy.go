@@ -31,6 +31,14 @@ type Proxy struct {
 	workingDir string
 	stdio      *stdioProcess
 
+	// http/sse upstream sessions, keyed by the caller's session_id; sessionMu
+	// guards every field in this group.
+	sessionMu        sync.Mutex
+	sessions         map[string]*mcpSession
+	sessionlessUntil time.Time
+	stopSweep        chan struct{}
+	closed           bool
+
 	// oauth2 token cache
 	oauthMu    sync.Mutex
 	oauthToken string
@@ -43,7 +51,8 @@ type Proxy struct {
 // New creates a new MCP proxy.
 func New(logger *slog.Logger) *Proxy {
 	return &Proxy{
-		logger: logger,
+		logger:   logger,
+		sessions: make(map[string]*mcpSession),
 		client: &http.Client{
 			Timeout: 120 * time.Second,
 		},
@@ -74,6 +83,12 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		if p.url == "" {
 			return fmt.Errorf("url is required for MCP %s transport", p.transport)
 		}
+		p.sessionMu.Lock()
+		if p.stopSweep == nil && !p.closed {
+			p.stopSweep = make(chan struct{})
+			go p.sweepSessions(p.stopSweep)
+		}
+		p.sessionMu.Unlock()
 	case "stdio":
 		if v, ok := config["command"].(string); ok {
 			p.command = v
@@ -104,10 +119,8 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
 	switch p.transport {
-	case "http":
-		return p.handleHTTP(ctx, req)
-	case "sse":
-		return p.handleSSE(ctx, req)
+	case "http", "sse":
+		return p.handleWithSession(ctx, req)
 	case "stdio":
 		return p.handleStdio(ctx, req)
 	default:
@@ -138,67 +151,9 @@ func (p *Proxy) buildRequestBody(req *proxy.ActionRequest) ([]byte, error) {
 	return nil, fmt.Errorf("no request body or params provided")
 }
 
-func (p *Proxy) handleHTTP(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
-	body, err := p.buildRequestBody(req)
-	if err != nil {
-		return nil, fmt.Errorf("building MCP request body: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating MCP request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	if err := p.injectAuth(httpReq); err != nil {
-		return nil, fmt.Errorf("MCP auth: %w", err)
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("MCP request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading MCP response: %w", err)
-	}
-
-	return &proxy.ActionResponse{
-		StatusCode: resp.StatusCode,
-		Data:       string(respBody),
-	}, nil
-}
-
-func (p *Proxy) handleSSE(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
-	body, err := p.buildRequestBody(req)
-	if err != nil {
-		return nil, fmt.Errorf("building MCP request body: %w", err)
-	}
-
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.url, bytes.NewReader(body))
-	if err != nil {
-		return nil, fmt.Errorf("creating MCP SSE request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-	if err := p.injectAuth(httpReq); err != nil {
-		return nil, fmt.Errorf("MCP SSE auth: %w", err)
-	}
-
-	resp, err := p.client.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("MCP SSE request failed: %w", err)
-	}
-	defer func() { _ = resp.Body.Close() }()
-
-	// Read entire body first to support fallback for non-SSE responses
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("reading MCP SSE response: %w", err)
-	}
-
-	// Parse SSE response — collect all "data:" lines into a single JSON-RPC response
+// parseSSE collects the "data:" lines of an SSE-framed response into one
+// JSON-RPC payload, falling back to the raw body when there are none.
+func parseSSE(respBody []byte) (string, error) {
 	var result strings.Builder
 	scanner := bufio.NewScanner(bytes.NewReader(respBody))
 	for scanner.Scan() {
@@ -212,19 +167,12 @@ func (p *Proxy) handleSSE(ctx context.Context, req *proxy.ActionRequest) (*proxy
 		}
 	}
 	if err := scanner.Err(); err != nil {
-		return nil, fmt.Errorf("reading MCP SSE stream: %w", err)
+		return "", fmt.Errorf("reading MCP SSE stream: %w", err)
 	}
-
-	responseData := result.String()
-	if responseData == "" {
-		// Fallback: use entire response body if no SSE data lines were found
-		responseData = string(respBody)
+	if result.Len() == 0 {
+		return string(respBody), nil
 	}
-
-	return &proxy.ActionResponse{
-		StatusCode: resp.StatusCode,
-		Data:       responseData,
-	}, nil
+	return result.String(), nil
 }
 
 func (p *Proxy) handleStdio(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
@@ -399,6 +347,23 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 }
 
 func (p *Proxy) Close() error {
+	p.sessionMu.Lock()
+	p.closed = true
+	if p.stopSweep != nil {
+		close(p.stopSweep)
+		p.stopSweep = nil
+	}
+	p.sessionMu.Unlock()
+	// In parallel so a hung MCP server delays shutdown by one timeout, not one per session.
+	var wg sync.WaitGroup
+	for _, id := range p.takeSessions(func(*mcpSession) bool { return true }) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			p.terminateSession(id)
+		}()
+	}
+	wg.Wait()
 	p.client.CloseIdleConnections()
 	if p.stdio != nil {
 		return p.stdio.close()

@@ -44,6 +44,12 @@ type DiscoveryDatasource struct {
 	// KnownHostsFile enables SSH host key verification when set.
 	KnownHostsFile string `mapstructure:"known_hosts_file"`
 
+	// SSHAccess also exposes the in-scope hosts for ad-hoc commands through
+	// a sibling ssh-proxy datasource, using the same credentials. Off by
+	// default: it widens what the credentials were granted for. Requires
+	// signing_public_key, known_hosts_file and a non-empty allowed_hosts.
+	SSHAccess bool `mapstructure:"ssh_access"`
+
 	Port           int `mapstructure:"port"`
 	Concurrency    int `mapstructure:"concurrency"`
 	HostTimeoutS   int `mapstructure:"host_timeout_seconds"`

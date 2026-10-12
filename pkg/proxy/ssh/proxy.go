@@ -209,7 +209,18 @@ func (p *Proxy) parseAllowedHosts(hosts []string) error {
 			p.allowedNets = append(p.allowedNets, ipNet)
 			continue
 		}
-		// Not a CIDR — treat as hostname or IP
+		// A bare address is a single-host network, as in discovery's
+		// allowed_cidrs. Keeping it as a string would only match a request
+		// using that exact spelling, never a hostname resolving to it.
+		if ip := net.ParseIP(h); ip != nil {
+			// Store v4 in its 4-byte form so IP and mask lengths agree.
+			if ip4 := ip.To4(); ip4 != nil {
+				p.allowedNets = append(p.allowedNets, &net.IPNet{IP: ip4, Mask: net.CIDRMask(32, 32)})
+			} else {
+				p.allowedNets = append(p.allowedNets, &net.IPNet{IP: ip, Mask: net.CIDRMask(128, 128)})
+			}
+			continue
+		}
 		p.allowedHosts = append(p.allowedHosts, h)
 	}
 	return nil

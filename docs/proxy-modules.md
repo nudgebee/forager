@@ -53,6 +53,14 @@ Forwards JSON-RPC requests to MCP (Model Context Protocol) servers. Supports thr
 **Auth types:** `basic`, `bearer`, `custom_header`, `api_key`
 **Creds (api_key):** `api_key_name`, `api_key_value`, `api_key_location` (`header` or `query`)
 
+### http/sse session handling
+
+- Opens an MCP session with the `initialize` handshake (plus `notifications/initialized`) and sends `Mcp-Session-Id` on later requests; servers that return no session id are used sessionless
+- One upstream session per `session_id` request param, so concurrent conversations don't share state on stateful servers (browser, shell, database); requests without `session_id` share one session
+- Sessions close after 30 min idle (each use extends it) and on proxy close, via a best-effort HTTP `DELETE`
+- A `404` for a sent session (server restarted or expired it) re-initializes and retries once
+- Replies framed as SSE are unwrapped to the JSON-RPC payload
+
 ### stdio transport details
 
 - Lazy-starts the subprocess on first request
@@ -61,6 +69,7 @@ Forwards JSON-RPC requests to MCP (Model Context Protocol) servers. Supports thr
 - Process lifecycle: SIGTERM → 5s grace → SIGKILL
 - Stderr is captured and logged
 - Health check: `Signal(0)` to verify process is alive
+- One process per datasource, shared by all callers: `session_id` does not isolate state on stdio
 
 ## MongoDB Proxy (`mongo-proxy`)
 

@@ -156,7 +156,7 @@ func (s *fakeSSHServer) handleSession(ch ssh.Channel, reqs <-chan *ssh.Request) 
 			continue
 		}
 		_ = req.Reply(true, nil)
-		cmd := string(req.Payload[4:])
+		cmd := string(req.Payload[4:]) //nolint:staticcheck // SA6001: converted once, used for four lookups
 
 		done := s.trackExec()
 		commandDelay := s.delay

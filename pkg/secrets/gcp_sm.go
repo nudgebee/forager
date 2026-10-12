@@ -5,8 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
 	"sync"
 
+	"cloud.google.com/go/auth"
 	"cloud.google.com/go/auth/credentials"
 	secretmanager "cloud.google.com/go/secretmanager/apiv1"
 	"cloud.google.com/go/secretmanager/apiv1/secretmanagerpb"
@@ -59,10 +61,7 @@ func (g *GCPSM) ensureClient(ctx context.Context) error {
 	g.initOnce.Do(func() {
 		var opts []option.ClientOption
 		if g.credentialsFile != "" {
-			creds, err := credentials.DetectDefault(&credentials.DetectOptions{
-				CredentialsFile: g.credentialsFile,
-				Scopes:          []string{"https://www.googleapis.com/auth/cloud-platform"},
-			})
+			creds, err := loadCredentialsFile(g.credentialsFile)
 			if err != nil {
 				g.initErr = fmt.Errorf("gcp_sm: load credentials from %s: %w", g.credentialsFile, err)
 				return
@@ -77,4 +76,28 @@ func (g *GCPSM) ensureClient(ctx context.Context) error {
 		g.client = client
 	})
 	return g.initErr
+}
+
+// loadCredentialsFile loads the operator-configured credentials file.
+// DetectOptions.CredentialsFile is deprecated because it accepts any
+// credential type implicitly; the loader now takes the type explicitly, so
+// read it from the file. The path comes from forager's own config, not from
+// a request, so every type the file may declare is trusted as before.
+func loadCredentialsFile(path string) (*auth.Credentials, error) {
+	b, err := os.ReadFile(path) // #nosec G304 -- operator-configured path
+	if err != nil {
+		return nil, err
+	}
+	var head struct {
+		Type string `json:"type"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil {
+		return nil, fmt.Errorf("parsing credentials file: %w", err)
+	}
+	if head.Type == "" {
+		return nil, fmt.Errorf("credentials file has no \"type\" field")
+	}
+	return credentials.NewCredentialsFromJSON(credentials.CredType(head.Type), b, &credentials.DetectOptions{
+		Scopes: []string{"https://www.googleapis.com/auth/cloud-platform"},
+	})
 }

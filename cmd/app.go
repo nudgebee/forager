@@ -56,7 +56,7 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 	registry := proxy.NewRegistry()
 
 	for _, ds := range cfg.Datasources {
-		configureDatasource(logger, registry, secretsMgr, ds)
+		configureDatasource(logger, registry, secretsMgr, verifier.Enabled(), ds)
 	}
 
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
@@ -98,7 +98,7 @@ func (a *app) run(ctx context.Context) error {
 	return a.client.Run(ctx)
 }
 
-func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, ds config.LocalDatasource) {
+func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, signingEnabled bool, ds config.LocalDatasource) {
 	logger.Info("configuring datasource", "name", ds.Name, "type", ds.Type, "credential_source", ds.CredentialSource)
 
 	cfg := map[string]any{}
@@ -240,6 +240,16 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		CredentialSource: credSource,
 	}
 	registry.Register(entry.ID, entry, p)
+
+	if proxyType == "discovery-proxy" && proxydiscovery.SSHAccessEnabled(cfg) {
+		sibling, sp, err := proxydiscovery.SSHAccessSibling(entry, cfg, creds, signingEnabled, logger)
+		if err != nil {
+			logger.Error("ssh_access not enabled", "name", ds.Name, "err", err)
+			return
+		}
+		registry.Register(sibling.ID, sibling, sp)
+		logger.Info("ssh access enabled for discovery scope", "name", ds.Name, "id", sibling.ID)
+	}
 }
 
 // applyDiscoveryConfig copies the discovery block from local YAML into the
@@ -256,6 +266,9 @@ func applyDiscoveryConfig(cfg map[string]any, d *config.DiscoveryDatasource) {
 	setIfNotEmpty(cfg, "pack_public_key", d.PackPublicKey)
 	setIfNotEmpty(cfg, "pack_dir", d.PackDir)
 	setIfNotEmpty(cfg, "known_hosts_file", d.KnownHostsFile)
+	if d.SSHAccess {
+		cfg["ssh_access"] = true
+	}
 
 	setIfPositive(cfg, "port", d.Port)
 	setIfPositive(cfg, "concurrency", d.Concurrency)
