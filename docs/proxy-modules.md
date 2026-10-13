@@ -65,6 +65,34 @@ With more than one forager in an account the relay queue is shared, so a request
 - A health update is sent immediately after each `datasource_config_sync`, so a newly connected store reports without waiting for the next interval.
 - A request without `datasource_id` is only accepted when exactly one `http-proxy` datasource exists; otherwise it fails with `ambiguous_datasource` (HTTP 400). Always send `datasource_id`.
 
+### `vm_service_map`
+
+An action of the `http-proxy` on a Prometheus datasource that holds node-agent series. It answers "which service calls which" for a VM fleet from the store, so the server never has to pull the raw series over the relay. It reads the same series the Kubernetes runner's service map reads, with the same failure verdict (HTTP 4xx/5xx, `failed` for other protocols).
+
+**Params:** `start`, `end` (RFC3339; default the 15 minutes ending now; at most 24h).
+
+The queries are a fixed set — nothing from the request reaches PromQL, so the action cannot be used to read anything else from the store:
+
+| Source series | Used for |
+|---|---|
+| `node_cloud_info`, `node_info`, `node_net_interface_ip` | the hosts that reported in the window: instance id, hostname, addresses |
+| `container_info`, `container_application_type`, `container_net_tcp_listen_info` | the active services on each host — systemd units and containers — with image, application types and listen addresses |
+| `container_<protocol>_{requests,queries}_total` and `..._duration_seconds_total` | requests, errors and average latency per call, for http, postgres, mysql, redis, memcached, mongo, kafka, cassandra, clickhouse, zookeeper, foundationdb, dubbo |
+| `container_net_tcp_{successful,failed}_connects_total`, `..._connection_time_seconds_total` | calls on destinations with no application protocol seen (reported as `tcp`) |
+| `container_net_tcp_bytes_{sent,received}_total` | bytes per call |
+
+A service is a container id the node-agent reports: `/system.slice/<unit>.service` (systemd), `/docker/<name>` (docker), or an orchestrator path whose last element is the workload. Login sessions, slices and scopes are not services.
+
+Each edge goes from a service to a destination. The forager resolves a destination address that belongs to a reporting host: `destination_host` is that host, and `destination_service` is the service listening on that port there (an exact address match wins over a wildcard listener; a port several services share is left unresolved). A call to a loopback address resolves to the service listening locally; a service calling itself, and the name `localhost`, are left out.
+
+Response (`result`): `window`, `hosts[]`, `services[]`, `edges[]`, and `truncated` when more than 5000 edges were found. The shape is the contract the api-server's `vmservicemap` package reads.
+
+To see what the agent would return without a relay, run it against the store directly:
+
+```bash
+nudgebee-forager servicemap --url http://127.0.0.1:9090 --window 15m
+```
+
 ## MCP Proxy (`mcp-proxy`)
 
 Forwards JSON-RPC requests to MCP (Model Context Protocol) servers. Supports three transports:

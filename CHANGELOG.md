@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `vm_service_map` action on `http-proxy` Prometheus datasources: builds the service map of a
+  VM fleet — the active systemd units and containers on each host, and requests/errors/latency/
+  bytes per call between them — from node-agent series, with a fixed query set. A destination is
+  resolved to the host and service listening on it. Also available offline as
+  `nudgebee-forager servicemap --url ...`.
 - Prometheus datasources: health check now requires a 2xx from `/-/ready`
   (fallback `/api/v1/status/buildinfo`) instead of treating any status below
   500 as healthy.

@@ -267,6 +267,10 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 		return nil, fmt.Errorf("http proxy not configured")
 	}
 
+	if req.Action == ActionVMServiceMap {
+		return p.handleVMServiceMap(ctx, req)
+	}
+
 	targetURL, err := p.resolveTargetURL(baseParsed, req.URL)
 	if err != nil {
 		return nil, err

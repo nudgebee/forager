@@ -27,6 +27,7 @@ import (
 
 	"nudgebee/forager/pkg/proxy"
 	proxydiscovery "nudgebee/forager/pkg/proxy/discovery"
+	proxyhttp "nudgebee/forager/pkg/proxy/http"
 )
 
 // runStandalone dispatches a subcommand. Returns false if args[0] is not one,
@@ -40,6 +41,8 @@ func runStandalone(args []string) bool {
 		exitOn(cmdSweep(args[1:]))
 	case "inventory":
 		exitOn(cmdInventory(args[1:]))
+	case "servicemap":
+		exitOn(cmdServiceMap(args[1:]))
 	case "pack":
 		exitOn(cmdPack(args[1:]))
 	case "help":
@@ -69,6 +72,11 @@ Run discovery directly, without a relay or an account:
   nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5,10.0.1.6 \
                              --user nudgebee-ro --key ~/.ssh/id_ed25519 \
                              --pack ./linux-inventory-v2.yaml --pack-key <base64>
+
+Build the call graph of a VM fleet from the node-agent series in a
+Prometheus-compatible store:
+  nudgebee-forager servicemap --url http://127.0.0.1:9090 [--window 15m] \
+                              [--bearer-env TOKEN | --user u --password-env PW]
 
 Content packs:
   nudgebee-forager pack keygen
@@ -329,4 +337,71 @@ func toAnySlice(ss []string) []any {
 		out[i] = s
 	}
 	return out
+}
+
+// cmdServiceMap runs the vm_service_map action against a store directly, through
+// the same http proxy the agent uses, so what it prints is what the relay gets.
+func cmdServiceMap(args []string) error {
+	fs := flag.NewFlagSet("servicemap", flag.ExitOnError)
+	storeURL := fs.String("url", "", "base URL of the Prometheus-compatible store (required)")
+	window := fs.Duration("window", 15*time.Minute, "how far back to look, ending now")
+	user := fs.String("user", "", "basic-auth username")
+	passwordEnv := fs.String("password-env", "", "environment variable holding the basic-auth password")
+	bearerEnv := fs.String("bearer-env", "", "environment variable holding a bearer token")
+	insecure := fs.Bool("insecure", false, "skip TLS certificate verification")
+	verbose := fs.Bool("v", false, "log progress to stderr")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *storeURL == "" {
+		return fmt.Errorf("--url is required")
+	}
+	if *passwordEnv != "" && *bearerEnv != "" {
+		return fmt.Errorf("--password-env and --bearer-env are mutually exclusive")
+	}
+
+	cfg := map[string]any{"base_url": *storeURL, "tls_skip_verify": *insecure}
+	creds := map[string]string{}
+	switch {
+	case *bearerEnv != "":
+		token := os.Getenv(*bearerEnv)
+		if token == "" {
+			return fmt.Errorf("environment variable %s is empty", *bearerEnv)
+		}
+		cfg["auth_type"] = "bearer"
+		creds["bearer_token"] = token
+	case *passwordEnv != "":
+		pw := os.Getenv(*passwordEnv)
+		if pw == "" {
+			return fmt.Errorf("environment variable %s is empty", *passwordEnv)
+		}
+		cfg["auth_type"] = "basic"
+		creds["username"], creds["password"] = *user, pw
+	}
+
+	p := proxyhttp.New(stderrLogger(*verbose))
+	if err := p.Configure(cfg, creds); err != nil {
+		return err
+	}
+	defer func() { _ = p.Close() }()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+
+	end := time.Now()
+	resp, err := p.HandleRequest(ctx, &proxy.ActionRequest{
+		Action: proxyhttp.ActionVMServiceMap,
+		Params: map[string]any{
+			"start": end.Add(-*window).UTC().Format(time.RFC3339),
+			"end":   end.UTC().Format(time.RFC3339),
+		},
+	})
+	if err != nil {
+		return err
+	}
+	var out any
+	if err := json.Unmarshal(resp.Result, &out); err != nil {
+		return fmt.Errorf("parsing result: %w", err)
+	}
+	return emit(out)
 }
