@@ -3,6 +3,7 @@ package ws
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strconv"
@@ -98,7 +99,14 @@ type Handler struct {
 	secretsMgr *secrets.Manager
 	verifier   *signing.Verifier
 	logger     *slog.Logger
+
+	// onConfigSynced, if set, runs after a datasource_config_sync is applied
+	// so the cloud learns the reachability of new datasources promptly.
+	onConfigSynced func()
 }
+
+// SetOnConfigSynced registers a callback invoked after each applied config push.
+func (h *Handler) SetOnConfigSynced(fn func()) { h.onConfigSynced = fn }
 
 // NewHandler creates a new message handler.
 func NewHandler(registry *proxy.Registry, credStore *secrets.CloudPushStore, secretsMgr *secrets.Manager, verifier *signing.Verifier, logger *slog.Logger) *Handler {
@@ -165,7 +173,7 @@ func (h *Handler) handleRequest(ctx context.Context, msg []byte, requestID, data
 
 	p, ok := h.registry.Get(datasourceID)
 	if !ok {
-		return h.buildErrorResponse(requestID, 404, fmt.Sprintf("datasource %s not found", datasourceID)), nil
+		return h.buildCodedErrorResponse(requestID, 404, proxy.ErrCodeDatasourceNotFound, fmt.Sprintf("datasource %s not found", datasourceID)), nil
 	}
 
 	var req proxy.ActionRequest
@@ -177,7 +185,7 @@ func (h *Handler) handleRequest(ctx context.Context, msg []byte, requestID, data
 	h.registry.RecordRequestResult(ctx, datasourceID, err)
 	if err != nil {
 		h.logger.Error("proxy request failed", "action", req.Action, "datasource", datasourceID, "err", err)
-		return h.buildErrorResponse(requestID, 500, err.Error()), nil
+		return h.buildProxyErrorResponse(requestID, err), nil
 	}
 
 	resp.RequestID = requestID
@@ -205,27 +213,35 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 
 		p, ok := h.registry.Get(datasourceID)
 		if !ok {
-			return h.buildErrorResponse(requestID, 404, fmt.Sprintf("datasource %s not found", datasourceID)), nil
+			return h.buildCodedErrorResponse(requestID, 404, proxy.ErrCodeDatasourceNotFound, fmt.Sprintf("datasource %s not found", datasourceID)), nil
 		}
 
-		req := &proxy.ActionRequest{
-			RequestID:    actionReq.RequestID,
-			Action:       actionReq.Body.ActionName,
-			DatasourceID: datasourceID,
-			Params:       actionReq.Body.ActionParams,
+		// action_params uses the same field names as ActionRequest, so decode it the
+		// same way. Otherwise the HTTP fields (method, url, header, body) stay empty
+		// and the request goes to the datasource's base URL. Best effort: a param
+		// whose type does not match (say a non-string "body" for a db action) is
+		// skipped by the decoder, and it is still available in Params.
+		var req proxy.ActionRequest
+		if raw, err := json.Marshal(actionReq.Body.ActionParams); err == nil {
+			_ = json.Unmarshal(raw, &req)
 		}
+		req.RequestID = actionReq.RequestID
+		req.Action = actionReq.Body.ActionName
+		req.DatasourceID = datasourceID
+		req.Params = actionReq.Body.ActionParams
 
-		resp, err := p.HandleRequest(ctx, req)
+		resp, err := p.HandleRequest(ctx, &req)
 		h.registry.RecordRequestResult(ctx, datasourceID, err)
 		if err != nil {
 			h.logger.Error("legacy proxy request failed", "action", req.Action, "datasource", datasourceID, "err", err)
-			return h.buildErrorResponse(requestID, 500, err.Error()), nil
+			return h.buildProxyErrorResponse(requestID, err), nil
 		}
 		resp.RequestID = requestID
 		return json.Marshal(resp)
 	}
 
-	// Try as HTTP proxy request (no datasource routing — picks first http-proxy)
+	// Try as HTTP proxy request (no datasource routing — only valid when exactly
+	// one http-proxy exists; otherwise the target would be arbitrary)
 	var httpReq struct {
 		Method string              `json:"method"`
 		URL    string              `json:"url"`
@@ -233,24 +249,32 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 		Body   string              `json:"body"`
 	}
 	if err := json.Unmarshal(msg, &httpReq); err == nil && httpReq.URL != "" {
+		var httpProxies []proxy.Proxy
 		for _, id := range h.registry.All() {
-			p, _ := h.registry.Get(id)
-			if p != nil && p.Type() == "http-proxy" {
-				req := &proxy.ActionRequest{
-					Method: httpReq.Method,
-					URL:    httpReq.URL,
-					Header: httpReq.Header,
-					Body:   httpReq.Body,
-				}
-				resp, err := p.HandleRequest(ctx, req)
-				if err != nil {
-					return h.buildErrorResponse(requestID, 500, err.Error()), nil
-				}
-				resp.RequestID = requestID
-				return json.Marshal(resp)
+			if p, _ := h.registry.Get(id); p != nil && p.Type() == "http-proxy" {
+				httpProxies = append(httpProxies, p)
 			}
 		}
-		return h.buildErrorResponse(requestID, 404, "no http-proxy datasource configured"), nil
+		switch len(httpProxies) {
+		case 0:
+			return h.buildCodedErrorResponse(requestID, 404, proxy.ErrCodeDatasourceNotFound, "no http-proxy datasource configured"), nil
+		case 1:
+			req := &proxy.ActionRequest{
+				Method: httpReq.Method,
+				URL:    httpReq.URL,
+				Header: httpReq.Header,
+				Body:   httpReq.Body,
+			}
+			resp, err := httpProxies[0].HandleRequest(ctx, req)
+			if err != nil {
+				return h.buildProxyErrorResponse(requestID, err), nil
+			}
+			resp.RequestID = requestID
+			return json.Marshal(resp)
+		default:
+			return h.buildCodedErrorResponse(requestID, 400, proxy.ErrCodeAmbiguousDatasource,
+				fmt.Sprintf("%d http-proxy datasources configured; datasource_id is required", len(httpProxies))), nil
+		}
 	}
 
 	return h.buildErrorResponse(requestID, 400, "unrecognized message format"), nil
@@ -284,6 +308,7 @@ func normalizeConfigValues(config map[string]any) {
 func newProxyByType(proxyType, dsType string, config map[string]any, allowedHosts []string, logger *slog.Logger) (proxy.Proxy, error) {
 	switch proxyType {
 	case "http-proxy":
+		config["datasource_type"] = dsType
 		return httpproxy.New(logger), nil
 	case "db-proxy":
 		dbType, _ := config["db_type"].(string)
@@ -425,6 +450,10 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		}
 	}
 
+	if h.onConfigSynced != nil {
+		h.onConfigSynced()
+	}
+
 	// Return ACK response
 	ack := map[string]any{
 		"action":     "datasource_config_sync_ack",
@@ -508,11 +537,27 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 }
 
 func (h *Handler) buildErrorResponse(requestID string, statusCode int, message string) []byte {
+	return h.buildCodedErrorResponse(requestID, statusCode, "", message)
+}
+
+// buildCodedErrorResponse is buildErrorResponse plus a machine-readable error_code.
+func (h *Handler) buildCodedErrorResponse(requestID string, statusCode int, code, message string) []byte {
 	resp := proxy.ActionResponse{
 		StatusCode: statusCode,
 		RequestID:  requestID,
+		ErrorCode:  code,
 		Data:       fmt.Sprintf(`{"error": %q}`, message),
 	}
 	b, _ := json.Marshal(resp)
 	return b
+}
+
+// buildProxyErrorResponse maps a proxy failure to a 500, tagging network-level
+// failures so the server can retry on a forager that can reach the target.
+func (h *Handler) buildProxyErrorResponse(requestID string, err error) []byte {
+	code := ""
+	if errors.Is(err, proxy.ErrUpstreamUnreachable) {
+		code = proxy.ErrCodeUpstreamUnreachable
+	}
+	return h.buildCodedErrorResponse(requestID, 500, code, err.Error())
 }

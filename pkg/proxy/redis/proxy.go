@@ -240,9 +240,7 @@ func (p *Proxy) handleCommand(ctx context.Context, client *redis.Client, req *pr
 	}
 
 	argsRaw, _ := req.Params["args"].([]any)
-	cmdArgs := make([]any, 0, len(argsRaw)+1)
-	cmdArgs = append(cmdArgs, command)
-	cmdArgs = append(cmdArgs, argsRaw...)
+	cmdArgs := append([]any{command}, argsRaw...)
 
 	result, err := client.Do(ctx, cmdArgs...).Result()
 	if err != nil {

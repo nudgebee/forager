@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sort"
 	"sync"
@@ -307,5 +308,100 @@ func TestRegistry_HealthReport_RecoversFromPanic(t *testing.T) {
 	}
 	if hOK.Status != "healthy" {
 		t.Errorf("expected status 'healthy', got %q", hOK.Status)
+	}
+}
+
+type healthStub struct{ err error }
+
+func (h *healthStub) Type() string                                      { return "http-proxy" }
+func (h *healthStub) Configure(map[string]any, map[string]string) error { return nil }
+func (h *healthStub) HandleRequest(context.Context, *ActionRequest) (*ActionResponse, error) {
+	return &ActionResponse{StatusCode: 200}, nil
+}
+func (h *healthStub) HealthCheck(context.Context) error { return h.err }
+func (h *healthStub) Close() error                      { return nil }
+
+func TestRegistry_HealthReport_Reachability(t *testing.T) {
+	r := NewRegistry()
+	stub := &healthStub{}
+	r.Register("d", DatasourceEntry{ID: "d", Type: "prometheus", ProxyType: "http-proxy"}, stub)
+
+	h := r.HealthReport(context.Background())["d"]
+	if !h.Reachable || h.Status != "healthy" || h.LastSuccess == "" {
+		t.Fatalf("expected reachable with last_success, got %+v", h)
+	}
+	first := h.LastSuccess
+
+	stub.err = errors.New("down")
+	h = r.HealthReport(context.Background())["d"]
+	if h.Reachable || h.Status != "error" {
+		t.Fatalf("expected unreachable, got %+v", h)
+	}
+	if h.LastSuccess != first {
+		t.Fatalf("last_success should persist across failures: %q vs %q", h.LastSuccess, first)
+	}
+}
+
+// swapProxy replaces itself in the registry while its health check is in flight, the
+// way a config sync does.
+type swapProxy struct {
+	healthStub
+	onCheck func()
+}
+
+func (s *swapProxy) HealthCheck(context.Context) error {
+	s.onCheck()
+	return errors.New("proxy closed")
+}
+
+func TestRegistry_HealthReport_SkipsDatasourceReplacedMidCheck(t *testing.T) {
+	r := NewRegistry()
+	entry := DatasourceEntry{ID: "d", Type: "prometheus", ProxyType: "http-proxy"}
+	old := &swapProxy{onCheck: func() { r.Register("d", entry, &healthStub{}) }}
+	r.Register("d", entry, old)
+
+	if _, ok := r.HealthReport(context.Background())["d"]; ok {
+		t.Fatal("a check against a replaced proxy must not be reported as unreachable")
+	}
+	if h := r.HealthReport(context.Background())["d"]; !h.Reachable {
+		t.Fatalf("the replacement should report on the next run, got %+v", h)
+	}
+}
+
+func TestRegistry_HealthReport_RemovedMidCheckLeavesNoLastSuccess(t *testing.T) {
+	r := NewRegistry()
+	entry := DatasourceEntry{ID: "d", Type: "prometheus", ProxyType: "http-proxy"}
+	p := &removingProxy{r: r}
+	r.Register("d", entry, p)
+
+	r.HealthReport(context.Background())
+	r.mu.RLock()
+	_, leaked := r.lastSuccess["d"]
+	r.mu.RUnlock()
+	if leaked {
+		t.Fatal("last_success re-added for a removed datasource")
+	}
+}
+
+type removingProxy struct {
+	healthStub
+	r *Registry
+}
+
+func (p *removingProxy) HealthCheck(context.Context) error {
+	_ = p.r.Remove("d")
+	return nil
+}
+
+func TestRegistry_RegisterResetsLastSuccess(t *testing.T) {
+	r := NewRegistry()
+	entry := DatasourceEntry{ID: "d", Type: "prometheus", ProxyType: "http-proxy"}
+	r.Register("d", entry, &healthStub{})
+	r.HealthReport(context.Background())
+
+	repointed := &healthStub{err: errors.New("down")}
+	r.Register("d", entry, repointed)
+	if h := r.HealthReport(context.Background())["d"]; h.LastSuccess != "" {
+		t.Fatalf("last_success carried over from the previous target: %q", h.LastSuccess)
 	}
 }

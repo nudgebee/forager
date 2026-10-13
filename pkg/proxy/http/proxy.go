@@ -4,11 +4,15 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -29,9 +33,15 @@ type Proxy struct {
 	creds           map[string]string
 	tlsSkipVerify   bool
 	followRedirects bool
+	dsType          string // datasource type label, e.g. "prometheus"
+	maxRespBytes    int64
 	client          *http.Client
 	logger          *slog.Logger
 }
+
+// defaultMaxResponseBytes caps buffered upstream responses (256 MiB). Responses
+// are held in memory and base64-encoded into one websocket message.
+const defaultMaxResponseBytes int64 = 256 << 20
 
 // New creates a new HTTP proxy.
 func New(logger *slog.Logger) *Proxy {
@@ -86,6 +96,29 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		followRedirects = v
 	}
 
+	dsType, _ := config["datasource_type"].(string)
+
+	maxRespBytes := defaultMaxResponseBytes
+	switch v := config["max_response_bytes"].(type) {
+	case int:
+		if v > 0 {
+			maxRespBytes = int64(v)
+		}
+	case int64:
+		if v > 0 {
+			maxRespBytes = v
+		}
+	case float64:
+		// Converting a float64 beyond the int64 range is implementation-defined
+		// (negative on amd64), which would reject every response. Clamp instead.
+		switch {
+		case v >= math.MaxInt64:
+			maxRespBytes = math.MaxInt64
+		case v >= 1:
+			maxRespBytes = int64(v)
+		}
+	}
+
 	var checkRedirect func(req *http.Request, via []*http.Request) error
 	if !followRedirects {
 		checkRedirect = func(req *http.Request, via []*http.Request) error {
@@ -127,6 +160,9 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
 	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
+	if err := applyTLSMaterial(transport.TLSClientConfig, creds); err != nil {
+		return err
+	}
 
 	newClient := &http.Client{
 		Timeout:       120 * time.Second,
@@ -157,6 +193,8 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.authType = authType
 	p.tlsSkipVerify = skipVerify
 	p.followRedirects = followRedirects
+	p.dsType = dsType
+	p.maxRespBytes = maxRespBytes
 	p.creds = credsCopy
 	p.client = newClient
 	p.mu.Unlock()
@@ -222,6 +260,7 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 	authType := p.authType
 	creds := p.creds
 	client := p.client
+	maxRespBytes := p.maxRespBytes
 	p.mu.RUnlock()
 
 	if client == nil || baseParsed == nil {
@@ -265,13 +304,25 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 
 	resp, err := client.Do(httpReq)
 	if err != nil {
+		if isNetworkError(err) {
+			return nil, fmt.Errorf("executing request: %w: %w", proxy.ErrUpstreamUnreachable, err)
+		}
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap to tell "exactly at the limit" from "over it".
+	// Guard the +1 so a cap of MaxInt64 cannot wrap negative and read nothing.
+	readLimit := maxRespBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if int64(len(respBody)) > maxRespBytes {
+		return nil, fmt.Errorf("response exceeds max_response_bytes (%d)", maxRespBytes)
 	}
 
 	// Build response in the same format as the K8s agent HTTPResponse
@@ -295,13 +346,19 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("proxy is closed")
 	}
 	baseURL := p.baseURL
+	baseParsed := p.baseParsed
 	authType := p.authType
 	creds := p.creds
 	client := p.client
+	dsType := p.dsType
 	p.mu.RUnlock()
 
 	if client == nil || baseURL == "" {
 		return fmt.Errorf("http proxy not configured")
+	}
+
+	if dsType == "prometheus" {
+		return p.prometheusHealthCheck(ctx, client, baseParsed, authType, creds)
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "GET", baseURL, nil)
@@ -320,6 +377,99 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 		return fmt.Errorf("health check returned status %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// prometheusHealthCheck requires a 2xx from /-/ready, falling back to the
+// buildinfo API for Prometheus-compatible stores (Mimir, VictoriaMetrics,
+// Thanos) that do not serve /-/ready under the base path. A bare 404 or 401
+// from a wrong host or reverse proxy must not count as a reachable store.
+func (p *Proxy) prometheusHealthCheck(ctx context.Context, client *http.Client, base *url.URL, authType string, creds map[string]string) error {
+	var lastErr error
+	for _, path := range []string{"/-/ready", "/api/v1/status/buildinfo"} {
+		target, err := p.resolveTargetURL(base, path)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
+		if err != nil {
+			return err
+		}
+		p.injectAuthWith(req, authType, creds)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Unreachable on the first path means unreachable on the second.
+			return fmt.Errorf("health check failed: %w", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("health check %s returned status %d", path, resp.StatusCode)
+	}
+	return lastErr
+}
+
+// applyTLSMaterial loads optional custom CA and client certificate (mTLS)
+// material from credentials: ca_cert, client_cert and client_key, all PEM.
+func applyTLSMaterial(cfg *tls.Config, creds map[string]string) error {
+	if ca := creds["ca_cert"]; ca != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM([]byte(ca)) {
+			return fmt.Errorf("ca_cert contains no valid PEM certificates")
+		}
+		cfg.RootCAs = pool
+	}
+
+	cert, key := creds["client_cert"], creds["client_key"]
+	if (cert == "") != (key == "") {
+		return fmt.Errorf("client_cert and client_key must be provided together")
+	}
+	if cert != "" {
+		pair, err := tls.X509KeyPair([]byte(cert), []byte(key))
+		if err != nil {
+			return fmt.Errorf("invalid client_cert/client_key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+	}
+	return nil
+}
+
+// isNetworkError reports whether err means the request never reached the upstream:
+// DNS, dial, or TLS handshake failures. These are safe to retry on another forager.
+//
+// Timeouts and connection resets that happen after the request was written are
+// deliberately not included. The upstream may have accepted the work, so retrying
+// would run a heavy query twice or repeat a non-idempotent POST.
+func isNetworkError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// http.Client.Do wraps every failure in *url.Error, which itself satisfies
+	// net.Error. Look at what it wraps, or a redirect loop or unsupported scheme
+	// would be reported as the target being unreachable.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &recordErr) {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	return errors.As(err, &certErr)
 }
 
 func (p *Proxy) Close() error {

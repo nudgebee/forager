@@ -8,6 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Prometheus datasources: health check now requires a 2xx from `/-/ready`
+  (fallback `/api/v1/status/buildinfo`) instead of treating any status below
+  500 as healthy.
+- `http-proxy` TLS material for customer-run stores: `ca_cert`, and
+  `client_cert`/`client_key` for mTLS (also as `*_file` paths), plus
+  `max_response_bytes`. `tls_skip_verify`, `follow_redirects` and
+  `max_response_bytes` can now be set from local YAML.
+- Error responses carry a machine-readable `error_code`
+  (`datasource_not_found`, `upstream_unreachable`, `ambiguous_datasource`) so
+  the server can retry on another forager when several share an account.
+- Health reports include `reachable`, `latency_ms` and `last_success`, and a
+  report is sent right after each `datasource_config_sync`.
 - OpenSSF Scorecard workflow (`scorecard.yml`) publishing results to the
   OpenSSF API, plus a Scorecard badge in the README.
 - CodeQL static analysis workflow (`codeql.yml`) for Go.
@@ -18,6 +30,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical-JSON normalization, and signature envelope verification.
 
 ### Changed
+- A request without `datasource_id` now fails with `ambiguous_datasource`
+  when more than one `http-proxy` datasource exists, instead of going to an
+  arbitrary one.
 - Pinned all GitHub Actions to full commit SHAs (Dependabot keeps the
   `# vX.Y.Z` comments and SHAs current).
 - Pinned Dockerfile base images (`golang`, `debian`) by digest and
