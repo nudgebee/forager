@@ -359,6 +359,9 @@ func cmdServiceMap(args []string) error {
 	if *passwordEnv != "" && *bearerEnv != "" {
 		return fmt.Errorf("--password-env and --bearer-env are mutually exclusive")
 	}
+	if *user != "" && *passwordEnv == "" {
+		return fmt.Errorf("--user requires --password-env")
+	}
 
 	cfg := map[string]any{"base_url": *storeURL, "tls_skip_verify": *insecure}
 	creds := map[string]string{}

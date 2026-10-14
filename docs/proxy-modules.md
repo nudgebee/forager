@@ -67,7 +67,7 @@ With more than one forager in an account the relay queue is shared, so a request
 
 ### `vm_service_map`
 
-An action of the `http-proxy` on a Prometheus datasource that holds node-agent series. It answers "which service calls which" for a VM fleet from the store, so the server never has to pull the raw series over the relay. It reads the same series the Kubernetes runner's service map reads, with the same failure verdict (HTTP 4xx/5xx, `failed` for other protocols).
+An action of the `http-proxy` on a Prometheus datasource that holds node-agent series. It answers "which service calls which" for a VM fleet from the store, so the server never has to pull the raw series over the relay. A call fails on an HTTP 5xx status (plus a non-OK gRPC status, since gRPC rides over the same HTTP counters), or `failed` for other protocols.
 
 **Params:** `start`, `end` (RFC3339; default the 15 minutes ending now; at most 24h).
 
@@ -83,9 +83,9 @@ The queries are a fixed set — nothing from the request reaches PromQL, so the 
 
 A service is a container id the node-agent reports: `/system.slice/<unit>.service` (systemd), `/docker/<name>` (docker), or an orchestrator path whose last element is the workload. Login sessions, slices and scopes are not services.
 
-Each edge goes from a service to a destination. The forager resolves a destination address that belongs to a reporting host: `destination_host` is that host, and `destination_service` is the service listening on that port there (an exact address match wins over a wildcard listener; a port several services share is left unresolved). A call to a loopback address resolves to the service listening locally; a service calling itself, and the name `localhost`, are left out.
+Each edge goes from a service to a destination. The forager resolves a destination address that belongs to a reporting host: `destination_host` is that host, and `destination_service` is the service listening on that port there (an exact address match wins over a wildcard listener; a port several services share is left unresolved). A same-host call is reported by the agent as the name `localhost` with no address, so it is never resolved to a specific local service — it still appears as an edge to `localhost` so the call stays visible. A service calling its own address directly is left out.
 
-Response (`result`): `window`, `hosts[]`, `services[]`, `edges[]`, and `truncated` when more than 5000 edges were found. The shape is the contract the api-server's `vmservicemap` package reads.
+Response (`result`): `window`, `hosts[]`, `services[]`, `edges[]`, and `truncated` when more than 5000 edges were found. The shape is the contract the server reads.
 
 To see what the agent would return without a relay, run it against the store directly:
 

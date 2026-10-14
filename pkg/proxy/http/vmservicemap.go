@@ -53,9 +53,15 @@ var l7Protocols = []struct{ name, requests, duration string }{
 }
 
 // failedStatus matches what the node-agent records for a failed request: an HTTP
-// 4xx or 5xx code (the same verdict the Kubernetes runner's service map uses), or
-// "failed" for every other protocol (ebpftracer/l7 Status.String).
-const failedStatus = `status=~"[45][0-9][0-9]|failed"`
+// 5xx code, or "failed" for every other protocol (ebpftracer/l7 Status.String).
+const failedStatus = `status=~"5[0-9][0-9]|failed"`
+
+// grpcFailedStatus matches a gRPC status recorded on an HTTP/2 call: the
+// node-agent writes it as status="grpc:<CODE>" on container_http_requests_total
+// (containers/container.go, Status.GRPC()), so it never matches failedStatus's
+// HTTP-code pattern and gRPC failures would otherwise count as zero errors.
+// PromQL has no negative lookahead, so this is a second, separate query.
+const grpcFailedStatus = `status=~"grpc:.*",status!="grpc:OK"`
 
 type serviceMapListener struct {
 	Addr string `json:"addr"`
@@ -199,7 +205,11 @@ func (p *Proxy) instantQuerier() promQuerier {
 			return nil, fmt.Errorf("querying store: %w", err)
 		}
 		defer func() { _ = resp.Body.Close() }()
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxResp+1))
+		readLimit := maxResp
+		if readLimit < math.MaxInt64 {
+			readLimit++
+		}
+		body, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 		if err != nil {
 			return nil, fmt.Errorf("reading store response: %w", err)
 		}
@@ -255,8 +265,11 @@ func parsePromVector(body []byte) ([]promSample, error) {
 }
 
 // queryAll runs the queries with bounded concurrency and returns the results
-// by index. The first error wins.
+// by index. The first error wins and cancels the rest.
 func queryAll(ctx context.Context, q promQuerier, at time.Time, queries []string) ([][]promSample, error) {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	results := make([][]promSample, len(queries))
 	errs := make([]error, len(queries))
 	sem := make(chan struct{}, serviceMapConcurrency)
@@ -268,6 +281,9 @@ func queryAll(ctx context.Context, q promQuerier, at time.Time, queries []string
 			defer wg.Done()
 			defer func() { <-sem }()
 			results[i], errs[i] = q(ctx, promql, at)
+			if errs[i] != nil {
+				cancel()
+			}
 		}(i, promql)
 	}
 	wg.Wait()
@@ -311,6 +327,9 @@ func buildServiceMap(ctx context.Context, q promQuerier, start, end time.Time) (
 			fmt.Sprintf("sum by (%s) (increase(%s_count[%s]))", group, pr.duration, w),
 		)
 	}
+	grpcErrIdx := len(queries)
+	queries = append(queries,
+		fmt.Sprintf("sum by (%s) (increase(container_http_requests_total{%s}[%s]))", group, grpcFailedStatus, w))
 
 	res, err := queryAll(ctx, q, end, queries)
 	if err != nil {
@@ -331,11 +350,8 @@ func buildServiceMap(ctx context.Context, q promQuerier, start, end time.Time) (
 		if !isServiceContainer(container) {
 			return nil
 		}
-		if isLocalhostName(dest) {
-			return nil
-		}
 		target := resolver.resolve(instance, dest)
-		if target.skip(src) || target.loopbackUnresolved {
+		if target.skip(src) {
 			return nil
 		}
 		k := edgeKey{instance, container, dest, s.Metric["destination_workload_kind"], s.Metric["destination_workload_name"], protocol}
@@ -389,6 +405,14 @@ func buildServiceMap(ctx context.Context, q promQuerier, start, end time.Time) (
 			if e := touch(s, pr.name); e != nil {
 				e.LatencyMs = sums[edgeIdentity(s)] / s.Value * 1000
 			}
+		}
+	}
+
+	// gRPC failures ride on container_http_requests_total with a grpc: status
+	// that failedStatus's HTTP-code pattern cannot match; count them separately.
+	for _, s := range res[grpcErrIdx] {
+		if e := touch(s, "http"); e != nil {
+			e.Errors += s.Value
 		}
 	}
 
@@ -576,7 +600,6 @@ func parseListener(addr string) (serviceMapListener, bool) {
 type resolvedDestination struct {
 	hostname, instanceID, service, container string
 	ownerInstance                            string // store instance the address belongs to
-	loopbackUnresolved                       bool   // a loopback call with no service to name: nothing to draw
 }
 
 // skip is true for a service calling itself.
@@ -610,6 +633,11 @@ func newDestinationResolver(byInstance map[string]serviceMapHost, services []ser
 // resolve finds the host that owns dest's address and the service listening on
 // its port there. An address shared by several hosts, or a port several
 // services listen on, is left unresolved rather than guessed.
+//
+// There is no loopback case here: with the agent's default config, a same-host
+// call is already reported by the store as the name "localhost/localhost"
+// (kind "localhost"), not as a loopback IP, and carries no port to resolve
+// against a listener — it stays an edge to "localhost", left unresolved.
 func (r *destinationResolver) resolve(srcInstance, dest string) resolvedDestination {
 	host, portStr, err := net.SplitHostPort(dest)
 	if err != nil {
@@ -621,18 +649,13 @@ func (r *destinationResolver) resolve(srcInstance, dest string) resolvedDestinat
 		return resolvedDestination{}
 	}
 
-	ip := net.ParseIP(host)
-	loopback := ip != nil && (ip.IsLoopback() || ip.IsUnspecified())
-
 	owner := ""
-	if loopback {
-		owner = srcInstance
-	} else if owners := r.instancesByIP[host]; len(owners) == 1 {
+	if owners := r.instancesByIP[host]; len(owners) == 1 {
 		owner = owners[0]
 	}
 	h, known := r.hosts[owner]
 	if owner == "" || !known {
-		return resolvedDestination{loopbackUnresolved: loopback}
+		return resolvedDestination{}
 	}
 
 	out := resolvedDestination{hostname: h.Hostname, instanceID: h.InstanceID, ownerInstance: owner}
@@ -644,14 +667,11 @@ func (r *destinationResolver) resolve(srcInstance, dest string) resolvedDestinat
 			}
 			lh, _, _ := net.SplitHostPort(l.Addr)
 			lh = strings.Trim(lh, "[]")
-			lip := net.ParseIP(lh)
 			switch {
 			case lh == host:
 				exact = append(exact, sv)
-			case lip != nil && lip.IsUnspecified():
+			case net.ParseIP(lh) != nil && net.ParseIP(lh).IsUnspecified():
 				wildcard = append(wildcard, sv)
-			case loopback && lip != nil && lip.IsLoopback():
-				exact = append(exact, sv)
 			default:
 				continue
 			}
@@ -662,11 +682,8 @@ func (r *destinationResolver) resolve(srcInstance, dest string) resolvedDestinat
 	if len(pick) == 0 {
 		pick = uniqueByContainer(wildcard)
 	}
-	switch {
-	case len(pick) == 1:
+	if len(pick) == 1 {
 		out.service, out.container = pick[0].Name, pick[0].ContainerID
-	case loopback:
-		out.loopbackUnresolved = true
 	}
 	return out
 }
@@ -684,7 +701,9 @@ func uniqueByContainer(in []serviceMapService) []serviceMapService {
 }
 
 // collectHosts folds the four per-node series into one record per reporting
-// node, keyed by the store's `instance` label (the node-agent's machine id).
+// node, keyed by the store's `instance` label: the node-agent's machine id, or
+// md5(machine_id + system_uuid) when a system UUID is present. Joins are
+// unaffected either way since every series for a host carries the same value.
 func collectHosts(cloud, info, ips, listen []promSample) ([]serviceMapHost, map[string]serviceMapHost) {
 	by := map[string]*serviceMapHost{}
 	get := func(instance string) *serviceMapHost {
@@ -784,20 +803,9 @@ func indexByEdge(samples []promSample) map[string]float64 {
 	return out
 }
 
-// isLocalhostName catches the name "localhost" (the agent also reports it as
-// "localhost/localhost"), which carries no address to resolve.
-func isLocalhostName(dest string) bool {
-	host := dest
-	if h, _, err := net.SplitHostPort(dest); err == nil {
-		host = h
-	}
-	host = strings.ToLower(strings.Trim(host, "[]"))
-	return host == "localhost" || strings.HasPrefix(host, "localhost/")
-}
-
 func normalizeKind(kind string) string {
 	switch kind {
-	case "vm", "private", "external":
+	case "vm", "private", "external", "localhost":
 		return kind
 	default:
 		return "external"

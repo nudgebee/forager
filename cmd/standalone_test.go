@@ -96,6 +96,16 @@ func TestCmdSweep_RejectsBothKeyAndPasswordEnv(t *testing.T) {
 	}
 }
 
+// --user with no --password-env was silently ignored by the basic-auth switch
+// below it, so the request went out unauthenticated instead of failing the
+// way a typo'd invocation should.
+func TestCmdServiceMap_RejectsUserWithoutPasswordEnv(t *testing.T) {
+	err := cmdServiceMap([]string{"--url", "http://127.0.0.1:9090", "--user", "nudgebee-ro"})
+	if err == nil {
+		t.Fatal("accepted --user with no --password-env, which would run unauthenticated")
+	}
+}
+
 // The pack version comes from the file so the caller does not have to repeat
 // it, and a mismatch would make the proxy refuse the pack.
 func TestStagePack(t *testing.T) {

@@ -130,7 +130,7 @@ func TestServicesAreTheActiveUnitsAndContainersOnEachHost(t *testing.T) {
 func TestEdgeIsFromAServiceToTheServiceListeningOnTheDestination(t *testing.T) {
 	d := []string{"instance", web, "container_id", webSvc, "destination", "172.31.0.10:8080", "destination_workload_kind", "private", "destination_workload_name", "172.31.0.10"}
 	res := run(t, map[string][]promSample{
-		"increase(container_http_requests_total{status=~":                {sample(4, d...)},
+		`increase(container_http_requests_total{status=~"5`:              {sample(4, d...)},
 		"increase(container_http_requests_total[":                        {sample(400, d...)},
 		"increase(container_http_requests_duration_seconds_total_sum[":   {sample(20, d...)},
 		"increase(container_http_requests_duration_seconds_total_count[": {sample(400, d...)},
@@ -153,6 +153,20 @@ func TestEdgeIsFromAServiceToTheServiceListeningOnTheDestination(t *testing.T) {
 	}
 }
 
+func TestGRPCFailuresAreCountedAsHTTPErrors(t *testing.T) {
+	d := []string{"instance", web, "container_id", webSvc, "destination", "172.31.0.10:8080", "destination_workload_kind", "private", "destination_workload_name", "172.31.0.10"}
+	res := run(t, map[string][]promSample{
+		"increase(container_http_requests_total[":               {sample(100, d...)},
+		`increase(container_http_requests_total{status=~"5`:     {sample(0, d...)},
+		`increase(container_http_requests_total{status=~"grpc:`: {sample(6, d...)},
+	})
+
+	e := edgeTo(t, res, "orders-web.service", "172.31.0.10:8080")
+	if e.Errors != 6 {
+		t.Errorf("errors = %v, want the 6 non-OK grpc statuses counted since none are HTTP 5xx", e.Errors)
+	}
+}
+
 func TestDestinationOnAKnownHostWithNoMatchingListenerKeepsTheHost(t *testing.T) {
 	d := []string{"instance", web, "container_id", webSvc, "destination", "172.31.0.10:9090", "destination_workload_kind", "private", "destination_workload_name", "172.31.0.10"}
 	res := run(t, map[string][]promSample{"increase(container_http_requests_total[": {sample(10, d...)}})
@@ -163,21 +177,31 @@ func TestDestinationOnAKnownHostWithNoMatchingListenerKeepsTheHost(t *testing.T)
 	}
 }
 
-func TestLoopbackCallsResolveToTheLocalServiceAndSelfCallsAreDropped(t *testing.T) {
-	toDB := []string{"instance", api, "container_id", apiSvc, "destination", "127.0.0.1:5432", "destination_workload_kind", "private", "destination_workload_name", "127.0.0.1"}
-	toSelf := []string{"instance", api, "container_id", apiSvc, "destination", "127.0.0.1:8080", "destination_workload_kind", "private", "destination_workload_name", "127.0.0.1"}
-	toNothing := []string{"instance", api, "container_id", apiSvc, "destination", "127.0.0.1:6379", "destination_workload_kind", "private", "destination_workload_name", "127.0.0.1"}
-	toName := []string{"instance", api, "container_id", apiSvc, "destination", "localhost/localhost", "destination_workload_kind", "external", "destination_workload_name", "localhost"}
+func TestLoopbackCallsShowAsAnUnresolvedLocalhostEdge(t *testing.T) {
+	// This is the label set the agent actually writes for a same-host call: no
+	// loopback IP or port survives, just the collapsed name and its kind.
+	toLocalhost := []string{"instance", api, "container_id", apiSvc, "destination", "localhost/localhost", "destination_workload_kind", "localhost", "destination_workload_name", "localhost"}
 	res := run(t, map[string][]promSample{
-		"increase(container_postgres_queries_total[": {sample(30, toDB...), sample(5, toSelf...), sample(3, toNothing...), sample(2, toName...)},
+		"increase(container_postgres_queries_total[": {sample(30, toLocalhost...)},
 	})
 
-	if len(res.Edges) != 1 {
-		t.Fatalf("edges = %+v, want only api -> db", res.Edges)
+	e := edgeTo(t, res, "orders-api.service", "localhost/localhost")
+	if e.DestinationKind != "localhost" || e.DestinationName != "localhost" {
+		t.Errorf("destination kind/name = %q/%q, want localhost/localhost", e.DestinationKind, e.DestinationName)
 	}
-	e := edgeTo(t, res, "orders-api.service", "127.0.0.1:5432")
-	if e.DestinationService != "orders-db" || e.DestinationHost != "orders-api-host" {
-		t.Errorf("destination = %q @ %q, want the docker container on the same host", e.DestinationService, e.DestinationHost)
+	if e.DestinationHost != "" || e.DestinationService != "" {
+		t.Errorf("destination host/service = %q/%q, want unresolved: there is no port to match against a listener", e.DestinationHost, e.DestinationService)
+	}
+	if e.Requests != 30 {
+		t.Errorf("requests = %v, want 30", e.Requests)
+	}
+}
+
+func TestServiceCallingItsOwnAddressIsDropped(t *testing.T) {
+	self := []string{"instance", api, "container_id", apiSvc, "destination", "172.31.0.10:8080", "destination_workload_kind", "private", "destination_workload_name", "172.31.0.10"}
+	res := run(t, map[string][]promSample{"increase(container_http_requests_total[": {sample(20, self...)}})
+	if len(res.Edges) != 0 {
+		t.Errorf("edges = %+v, want none: a service calling its own address is not an edge", res.Edges)
 	}
 }
 
