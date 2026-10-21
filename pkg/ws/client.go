@@ -118,13 +118,13 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 
 		start := time.Now()
-		err := c.connectAndServe(ctx)
+		established, err := c.connectAndServe(ctx)
 		if err != nil {
 			c.logger.Warn("websocket session ended", "err", err)
 		}
 
-		// Reset exponential backoff if the connection was sustained.
-		if time.Since(start) > maxReconnectDelay {
+		// Reset exponential backoff if the connection was established and sustained.
+		if established && time.Since(start) > maxReconnectDelay {
 			delay = initialDelay
 		}
 
@@ -143,7 +143,7 @@ func (c *Client) Run(ctx context.Context) error {
 	}
 }
 
-func (c *Client) connectAndServe(ctx context.Context) error {
+func (c *Client) connectAndServe(ctx context.Context) (bool, error) {
 	// Build auth header
 	auth := base64.StdEncoding.EncodeToString([]byte(c.accessKey + ":" + c.accessSecret))
 	header := http.Header{}
@@ -159,9 +159,9 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 				body, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
 				resp.Body.Close() // nolint:errcheck
 			}
-			return fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
+			return false, fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
 		}
-		return fmt.Errorf("dial failed: %w", err)
+		return false, fmt.Errorf("dial failed: %w", err)
 	}
 
 	c.connMu.Lock()
@@ -197,7 +197,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	}
 	greetingBytes, _ := json.Marshal(greeting)
 	if err := conn.WriteMessage(websocket.TextMessage, greetingBytes); err != nil {
-		return fmt.Errorf("greeting send failed: %w", err)
+		return false, fmt.Errorf("greeting send failed: %w", err)
 	}
 
 	c.logger.Info("connected to relay, greeting sent")
@@ -266,7 +266,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	cancel()
 	wg.Wait()
-	return err
+	return true, err
 }
 
 func (c *Client) readLoop(ctx context.Context, conn *websocket.Conn) error {
