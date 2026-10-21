@@ -117,9 +117,15 @@ func (c *Client) Run(ctx context.Context) error {
 		default:
 		}
 
+		start := time.Now()
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			c.logger.Warn("websocket session ended", "err", err)
+		}
+
+		// Reset exponential backoff if the connection was sustained.
+		if time.Since(start) > maxReconnectDelay {
+			delay = initialDelay
 		}
 
 		select {
