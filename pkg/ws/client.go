@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/gorilla/websocket"
@@ -119,7 +122,11 @@ func (c *Client) Run(ctx context.Context) error {
 
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			if isRoutineDisconnect(err) {
+				c.logger.Warn("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 
 		select {
@@ -153,7 +160,11 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 				body, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
 				resp.Body.Close() // nolint:errcheck
 			}
-			return fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
+			return &dialHTTPError{
+				StatusCode: resp.StatusCode,
+				Body:       body,
+				Err:        err,
+			}
 		}
 		return fmt.Errorf("dial failed: %w", err)
 	}
@@ -439,4 +450,57 @@ func (c *Client) Send(msg []byte) {
 	default:
 		c.logger.Warn("send channel full, dropping message")
 	}
+}
+
+type dialHTTPError struct {
+	StatusCode int
+	Body       []byte
+	Err        error
+}
+
+func (e *dialHTTPError) Error() string {
+	return fmt.Sprintf("dial failed: %v (status=%d body=%q)", e.Err, e.StatusCode, e.Body)
+}
+
+func (e *dialHTTPError) Unwrap() error {
+	return e.Err
+}
+
+// isRoutineDisconnect returns true if err is a routine network drop, timeout,
+// normal/abnormal websocket closure, or temporary dial failure.
+func isRoutineDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	var httpErr *dialHTTPError
+	if errors.As(err, &httpErr) {
+		// 4xx status codes (such as 401 Unauthorized or 403 Forbidden) are
+		// persistent client/auth configuration errors.
+		if httpErr.StatusCode >= 400 && httpErr.StatusCode < 500 {
+			return false
+		}
+		// 5xx status codes are temporary upstream/relay server issues.
+		return true
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return true
+	}
+
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
+
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
