@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -119,7 +121,11 @@ func (c *Client) Run(ctx context.Context) error {
 
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			if isExpectedDisconnect(err) {
+				c.logger.Warn("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 
 		select {
@@ -135,6 +141,25 @@ func (c *Client) Run(ctx context.Context) error {
 		}
 		c.logger.Info("reconnecting to relay", "delay", delay)
 	}
+}
+
+func isExpectedDisconnect(err error) bool {
+	if errors.Is(err, context.Canceled) || errors.Is(err, net.ErrClosed) || errors.Is(err, io.EOF) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		return websocket.IsCloseError(closeErr,
+			websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+			websocket.CloseAbnormalClosure,
+		)
+	}
+	return websocket.IsCloseError(err,
+		websocket.CloseNormalClosure,
+		websocket.CloseGoingAway,
+		websocket.CloseAbnormalClosure,
+	)
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
