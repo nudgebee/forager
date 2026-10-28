@@ -1,6 +1,6 @@
 # golang 1.26.9: fixes the Go stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
 # traversal) / CVE-2026-42505 (crypto/tls ECH) that 1.26.4 builds carry.
-FROM golang:1.26.9-bookworm@sha256:d9c68c2c51161e12fd77e4c6320687c9cd86e1af1e3ad6e6cd63ff970641453c AS build-stage
+FROM golang:1.27.3-bookworm@sha256:972b4110ba0f47539a975c31e52c64765e1ff19f2d74469ae4a595c6676e80a5 AS build-stage
 # Always compile with the base image's Go, never an auto-downloaded toolchain.
 ENV GOTOOLCHAIN=local
 
