@@ -22,9 +22,12 @@ const (
 	pingPeriod = 30 * time.Second
 
 	maxReconnectDelay   = 30 * time.Second
-	initialDelay        = 3 * time.Second
 	defaultHealthPeriod = 10 * time.Minute
 	initialHealthDelay  = 10 * time.Second
+)
+
+var (
+	initialDelay = 3 * time.Second
 )
 
 // HealthReportFunc returns per-datasource health to be sent to the relay.
@@ -119,7 +122,7 @@ func (c *Client) Run(ctx context.Context) error {
 
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			c.logger.Warn("websocket session ended", "err", err)
 		}
 
 		select {
