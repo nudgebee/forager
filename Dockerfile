@@ -51,7 +51,7 @@ FROM debian:bookworm-slim@sha256:0104b334637a5f19aa9c983a91b54c89887c0984081f206
 # DEBIAN_FRONTEND=noninteractive keeps upgraded packages from opening debconf
 # prompts and hanging the non-TTY CI build; scoped via `export` so it does not
 # persist into the image.
-ARG OS_PKG_EPOCH=2026-W29
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
     export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
