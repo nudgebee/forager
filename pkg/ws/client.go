@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -119,7 +121,11 @@ func (c *Client) Run(ctx context.Context) error {
 
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			if isTransientCloseError(err) {
+				c.logger.Warn("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 
 		select {
@@ -439,4 +445,27 @@ func (c *Client) Send(msg []byte) {
 	default:
 		c.logger.Warn("send channel full, dropping message")
 	}
+}
+
+func isTransientCloseError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+			websocket.CloseNoStatusReceived,
+			websocket.CloseAbnormalClosure,
+			websocket.CloseServiceRestart,
+			websocket.CloseTryAgainLater:
+			return true
+		}
+	}
+	var netErr net.Error
+	return errors.As(err, &netErr)
 }
