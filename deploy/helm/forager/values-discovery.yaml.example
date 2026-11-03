@@ -81,7 +81,7 @@ forager:
 # Mount the signed content pack. Until the publish pipeline exists (#116),
 # create this from a hand-signed pack:
 #   kubectl create configmap forager-packs \
-#     --from-file=linux-inventory-v1.yaml=./linux-inventory-v1.yaml
+#     --from-file=linux-inventory-v2.yaml=./linux-inventory-v2.yaml
 extraVolumes:
   - name: packs
     configMap:
