@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -130,7 +131,13 @@ func (c *Client) Run(ctx context.Context) error {
 		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			var closeErr *websocket.CloseError
+			if errors.Is(err, context.Canceled) || ctx.Err() != nil ||
+				(errors.As(err, &closeErr) && (closeErr.Code == websocket.CloseNormalClosure || closeErr.Code == websocket.CloseGoingAway)) {
+				c.logger.Info("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 		// A session that held for a while starts the backoff over.
 		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
