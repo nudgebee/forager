@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -21,7 +23,11 @@ const (
 	pongWait   = 40 * time.Second
 	pingPeriod = 30 * time.Second
 
-	maxReconnectDelay   = 30 * time.Second
+	// A reconnect waits a random time up to initialDelay, doubling after each
+	// reconnect that does not hold a session, up to maxReconnectDelay. The
+	// randomness keeps the agents of a relay that restarts from all redialing
+	// it at once and then retrying in step.
+	maxReconnectDelay   = 10 * time.Second
 	initialDelay        = 3 * time.Second
 	defaultHealthPeriod = 10 * time.Minute
 	initialHealthDelay  = 10 * time.Second
@@ -63,6 +69,10 @@ type Client struct {
 
 	logger *slog.Logger
 	done   chan struct{}
+
+	// connectedAt is when the current session was established; zero while
+	// dialing. Written by connectAndServe and read by Run, on one goroutine.
+	connectedAt time.Time
 }
 
 // MessageHandler processes incoming messages from the relay server.
@@ -108,7 +118,7 @@ func (c *Client) SetMetadataReporter(fn MetadataReportFunc) {
 // Run connects and maintains the WebSocket connection with auto-reconnect.
 // Blocks until context is cancelled.
 func (c *Client) Run(ctx context.Context) error {
-	delay := initialDelay
+	attempt := 0 // reconnects since the last session that held
 
 	for {
 		select {
@@ -117,24 +127,46 @@ func (c *Client) Run(ctx context.Context) error {
 		default:
 		}
 
+		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
 		if err != nil {
 			c.logger.Error("websocket session ended", "err", err)
 		}
+		// A session that held for a while starts the backoff over.
+		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
+			attempt = 0
+		}
+		wait := reconnectWait(initialDelay, maxReconnectDelay, attempt, rand.Int64N)
+		attempt++
+		c.logger.Info("reconnecting to relay", "delay", wait.Round(time.Millisecond))
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(wait):
 		}
-
-		// Exponential backoff
-		delay = delay * 2
-		if delay > maxReconnectDelay {
-			delay = maxReconnectDelay
-		}
-		c.logger.Info("reconnecting to relay", "delay", delay)
 	}
+}
+
+// reconnectWait is how long to wait before reconnect number attempt
+// (0-based): a uniformly random duration up to base doubled attempt times,
+// capped at limit ("full jitter"). randN returns a value in [0, n).
+func reconnectWait(base, limit time.Duration, attempt int, randN func(n int64) int64) time.Duration {
+	ceiling := min(base, limit)
+	for i := 0; i < attempt && ceiling < limit; i++ {
+		if ceiling > limit/2 { // doubling would pass limit, or overflow
+			ceiling = limit
+			break
+		}
+		ceiling *= 2
+	}
+	if ceiling <= 0 {
+		return 0
+	}
+	if ceiling == math.MaxInt64 {
+		return time.Duration(randN(math.MaxInt64))
+	}
+	return time.Duration(randN(int64(ceiling) + 1))
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
@@ -158,6 +190,7 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		return fmt.Errorf("dial failed: %w", err)
 	}
 
+	c.connectedAt = time.Now()
 	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
