@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -130,7 +132,11 @@ func (c *Client) Run(ctx context.Context) error {
 		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+			if isRoutineDisconnect(err) {
+				c.logger.Warn("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 		// A session that held for a while starts the backoff over.
 		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
@@ -472,4 +478,28 @@ func (c *Client) Send(msg []byte) {
 	default:
 		c.logger.Warn("send channel full, dropping message")
 	}
+}
+
+// isRoutineDisconnect returns true if err represents a routine network disconnection or closure
+// that will be resolved by the reconnect loop.
+func isRoutineDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure,
+			websocket.CloseGoingAway,
+			websocket.CloseAbnormalClosure,
+			websocket.CloseServiceRestart,
+			websocket.CloseTryAgainLater:
+			return true
+		}
+	}
+	var opErr *net.OpError
+	return errors.As(err, &opErr)
 }
