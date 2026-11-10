@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `db_query` takes `read_only: true`, which runs the statement in a read-only transaction
+  (`BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL) so the database
+  itself refuses a write, and echoes `read_only: true` in the response. Other database types
+  refuse the parameter rather than run the statement read-write. Without it, `db_query` behaves
+  as before.
 - `vm_service_map` action on `http-proxy` Prometheus datasources: builds the service map of a
   VM fleet — the active systemd units and containers on each host, and requests/errors/latency/
   bytes per call between them — from node-agent series, with a fixed query set. A destination is
