@@ -129,8 +129,8 @@ func (c *Client) Run(ctx context.Context) error {
 
 		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
-		if err != nil {
-			c.logger.Error("websocket session ended", "err", err)
+		if err != nil && ctx.Err() == nil {
+			c.logger.Warn("websocket session ended", "err", err)
 		}
 		// A session that held for a while starts the backoff over.
 		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
