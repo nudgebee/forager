@@ -1,10 +1,16 @@
 package ws
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"math"
 	"math/rand/v2"
+	"net"
 	"testing"
 	"time"
+
+	"github.com/gorilla/websocket"
 )
 
 func TestReconnectWaitBounds(t *testing.T) {
@@ -46,5 +52,71 @@ func TestReconnectWaitSpreadsAgents(t *testing.T) {
 	}
 	if len(buckets) < 5 {
 		t.Fatalf("redials fell in %d half-second buckets, want spread over ~6", len(buckets))
+	}
+}
+
+func TestIsRoutineDisconnect(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{name: "nil error", err: nil, want: false},
+		{name: "io.EOF", err: io.EOF, want: true},
+		{name: "io.ErrUnexpectedEOF", err: io.ErrUnexpectedEOF, want: true},
+		{name: "wrapped EOF", err: fmt.Errorf("read: %w", io.EOF), want: true},
+		{
+			name: "websocket CloseNormalClosure",
+			err:  &websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "normal closure"},
+			want: true,
+		},
+		{
+			name: "websocket CloseGoingAway",
+			err:  &websocket.CloseError{Code: websocket.CloseGoingAway, Text: "going away"},
+			want: true,
+		},
+		{
+			name: "websocket CloseAbnormalClosure",
+			err:  &websocket.CloseError{Code: websocket.CloseAbnormalClosure, Text: "abnormal closure"},
+			want: true,
+		},
+		{
+			name: "websocket CloseServiceRestart",
+			err:  &websocket.CloseError{Code: websocket.CloseServiceRestart, Text: "service restart"},
+			want: true,
+		},
+		{
+			name: "websocket CloseTryAgainLater",
+			err:  &websocket.CloseError{Code: websocket.CloseTryAgainLater, Text: "try again later"},
+			want: true,
+		},
+		{
+			name: "websocket CloseProtocolError",
+			err:  &websocket.CloseError{Code: websocket.CloseProtocolError, Text: "protocol error"},
+			want: false,
+		},
+		{
+			name: "net.OpError",
+			err:  &net.OpError{Op: "dial", Net: "tcp", Err: errors.New("connection refused")},
+			want: true,
+		},
+		{
+			name: "wrapped net.OpError",
+			err:  fmt.Errorf("dial failed: %w", &net.OpError{Op: "read", Net: "tcp", Err: errors.New("reset by peer")}),
+			want: true,
+		},
+		{
+			name: "generic error",
+			err:  errors.New("unhandled failure"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isRoutineDisconnect(tt.err); got != tt.want {
+				t.Errorf("isRoutineDisconnect(%v) = %v, want %v", tt.err, got, tt.want)
+			}
+		})
 	}
 }
