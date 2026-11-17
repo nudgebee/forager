@@ -51,7 +51,10 @@ func runProbeWithFakeCurl(t *testing.T, env ...string) string {
 		t.Fatal(err)
 	}
 	cmd := exec.Command(sh, "-c", cloudIdentityProbeCmd)
-	cmd.Env = append([]string{"PATH=" + dir + string(os.PathListSeparator) + os.Getenv("PATH")}, env...)
+	// Keep the parent environment; os/exec uses the last value for a
+	// duplicated key, so the fake curl's PATH entry still takes precedence.
+	cmd.Env = append(os.Environ(), "PATH="+dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	cmd.Env = append(cmd.Env, env...)
 	out, err := cmd.Output()
 	if err != nil {
 		t.Fatalf("probe failed: %v\n%s", err, out)
