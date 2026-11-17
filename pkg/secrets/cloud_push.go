@@ -20,28 +20,19 @@ import (
 // sync that names a different host but carries no credentials must not reuse
 // them: that is how a forged sync would point a stored token at another
 // server (see Handler.handleConfigSync).
+//
+// On disk, credentials.enc keeps the format every forager version reads (a
+// map of datasource id → credentials), so rolling the agent back never stops
+// it from starting. The host bindings live beside it in credential_hosts.enc;
+// an older forager ignores that file.
 type CloudPushStore struct {
-	mu       sync.RWMutex
-	entries  map[string]credEntry // datasourceID → entry
-	filePath string
-	key      []byte // AES-256 key derived from access_secret
+	mu        sync.RWMutex
+	creds     map[string]map[string]string // datasourceID → credentials
+	hosts     map[string]string            // datasourceID → bound host
+	filePath  string
+	hostsPath string
+	key       []byte // AES-256 key derived from access_secret
 }
-
-type credEntry struct {
-	Creds map[string]string `json:"creds"`
-	// Host is the host the credentials belong to ("" for entries written
-	// before host binding existed).
-	Host string `json:"host,omitempty"`
-}
-
-// diskFormat is what credentials.enc holds once decrypted. Version 1 was a
-// bare map of datasource id → credentials; loadFromDisk still reads it.
-type diskFormat struct {
-	Version int                  `json:"v"`
-	Entries map[string]credEntry `json:"entries"`
-}
-
-const diskFormatVersion = 2
 
 // NewCloudPushStore creates a credential store for cloud-pushed credentials.
 func NewCloudPushStore(dataDir, accessSecret string) (*CloudPushStore, error) {
@@ -49,9 +40,11 @@ func NewCloudPushStore(dataDir, accessSecret string) (*CloudPushStore, error) {
 	hash := sha256.Sum256([]byte(accessSecret))
 
 	store := &CloudPushStore{
-		entries:  make(map[string]credEntry),
-		filePath: filepath.Join(dataDir, "credentials.enc"),
-		key:      hash[:],
+		creds:     make(map[string]map[string]string),
+		hosts:     make(map[string]string),
+		filePath:  filepath.Join(dataDir, "credentials.enc"),
+		hostsPath: filepath.Join(dataDir, "credential_hosts.enc"),
+		key:       hash[:],
 	}
 
 	// Try to load existing credentials from disk
@@ -75,7 +68,12 @@ func (s *CloudPushStore) SetBound(datasourceID string, creds map[string]string, 
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.entries[datasourceID] = credEntry{Creds: creds, Host: host}
+	s.creds[datasourceID] = creds
+	if host != "" {
+		s.hosts[datasourceID] = host
+	} else {
+		delete(s.hosts, datasourceID)
+	}
 	return s.saveToDisk()
 }
 
@@ -84,8 +82,8 @@ func (s *CloudPushStore) Get(datasourceID string) (map[string]string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	e, ok := s.entries[datasourceID]
-	return e.Creds, ok
+	creds, ok := s.creds[datasourceID]
+	return creds, ok
 }
 
 // Host returns the host a datasource's credentials were stored for, or ""
@@ -94,7 +92,7 @@ func (s *CloudPushStore) Host(datasourceID string) string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	return s.entries[datasourceID].Host
+	return s.hosts[datasourceID]
 }
 
 // IDs lists every datasource with stored credentials, so a sync can delete
@@ -104,8 +102,8 @@ func (s *CloudPushStore) IDs() []string {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	ids := make([]string, 0, len(s.entries))
-	for id := range s.entries {
+	ids := make([]string, 0, len(s.creds))
+	for id := range s.creds {
 		ids = append(ids, id)
 	}
 	return ids
@@ -116,62 +114,69 @@ func (s *CloudPushStore) Delete(datasourceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	if _, ok := s.entries[datasourceID]; !ok {
+	if _, ok := s.creds[datasourceID]; !ok {
 		return nil
 	}
-	delete(s.entries, datasourceID)
+	delete(s.creds, datasourceID)
+	delete(s.hosts, datasourceID)
 	return s.saveToDisk()
 }
 
-// saveToDisk encrypts and writes all credentials to the file.
+// saveToDisk encrypts and writes all credentials, then their host bindings.
 func (s *CloudPushStore) saveToDisk() error {
-	plaintext, err := json.Marshal(diskFormat{Version: diskFormatVersion, Entries: s.entries})
-	if err != nil {
-		return fmt.Errorf("marshaling credentials: %w", err)
-	}
-
-	encrypted, err := encryptAESGCM(s.key, plaintext)
-	if err != nil {
-		return fmt.Errorf("encrypting: %w", err)
-	}
-
-	dir := filepath.Dir(s.filePath)
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.filePath), 0700); err != nil {
 		return fmt.Errorf("creating data dir: %w", err)
 	}
-
-	return os.WriteFile(s.filePath, encrypted, 0600)
+	if err := s.writeEncrypted(s.filePath, s.creds); err != nil {
+		return err
+	}
+	return s.writeEncrypted(s.hostsPath, s.hosts)
 }
 
-// loadFromDisk decrypts and loads credentials from the file, accepting both
-// the current format and the version-1 bare map.
-func (s *CloudPushStore) loadFromDisk() error {
-	data, err := os.ReadFile(s.filePath)
+func (s *CloudPushStore) writeEncrypted(path string, v any) error {
+	plaintext, err := json.Marshal(v)
+	if err != nil {
+		return fmt.Errorf("marshaling %s: %w", filepath.Base(path), err)
+	}
+	encrypted, err := encryptAESGCM(s.key, plaintext)
+	if err != nil {
+		return fmt.Errorf("encrypting %s: %w", filepath.Base(path), err)
+	}
+	return os.WriteFile(path, encrypted, 0600)
+}
+
+func (s *CloudPushStore) readEncrypted(path string, v any) error {
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
-
 	plaintext, err := decryptAESGCM(s.key, data)
 	if err != nil {
-		return fmt.Errorf("decrypting: %w", err)
+		return fmt.Errorf("decrypting %s: %w", filepath.Base(path), err)
+	}
+	return json.Unmarshal(plaintext, v)
+}
+
+// loadFromDisk decrypts and loads credentials, then their host bindings. A
+// missing hosts file (credentials written by a forager before host binding)
+// leaves every entry unbound. Bindings for datasources without credentials
+// — left behind if an older forager rewrote credentials.enc — are dropped.
+func (s *CloudPushStore) loadFromDisk() error {
+	if err := s.readEncrypted(s.filePath, &s.creds); err != nil {
+		return err
+	}
+	if s.creds == nil {
+		s.creds = make(map[string]map[string]string)
 	}
 
-	var current diskFormat
-	if err := json.Unmarshal(plaintext, &current); err == nil && current.Version == diskFormatVersion {
-		if current.Entries == nil {
-			current.Entries = make(map[string]credEntry)
+	hosts := map[string]string{}
+	if err := s.readEncrypted(s.hostsPath, &hosts); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("loading credential host bindings: %w", err)
+	}
+	for id, host := range hosts {
+		if _, ok := s.creds[id]; ok {
+			s.hosts[id] = host
 		}
-		s.entries = current.Entries
-		return nil
-	}
-
-	var legacy map[string]map[string]string
-	if err := json.Unmarshal(plaintext, &legacy); err != nil {
-		return fmt.Errorf("credentials file is neither the current nor the legacy format: %w", err)
-	}
-	s.entries = make(map[string]credEntry, len(legacy))
-	for id, creds := range legacy {
-		s.entries[id] = credEntry{Creds: creds}
 	}
 	return nil
 }

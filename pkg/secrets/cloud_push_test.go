@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -192,19 +193,87 @@ func TestCloudPushStore_LoadsLegacyFormat(t *testing.T) {
 		t.Fatal("legacy entry must be unbound")
 	}
 
-	// The next write upgrades the file; a further reload reads the new format.
 	if err := reloaded.SetBound("ds-new", map[string]string{"a": "b"}, "h"); err != nil {
 		t.Fatal(err)
 	}
 	again, err := NewCloudPushStore(dir, "secret")
 	if err != nil {
-		t.Fatalf("reload upgraded: %v", err)
+		t.Fatalf("reload: %v", err)
 	}
 	if _, ok := again.Get("ds-old"); !ok {
-		t.Fatal("legacy entry lost on upgrade")
+		t.Fatal("legacy entry lost")
 	}
 	if again.Host("ds-new") != "h" {
-		t.Fatal("new entry lost its host on upgrade")
+		t.Fatal("new entry lost its host")
+	}
+}
+
+// Rolling the agent back must not stop it from starting: credentials.enc stays
+// the bare id → credentials map every forager version reads, and the host
+// bindings live in a separate file an older forager ignores.
+func TestCloudPushStore_CredentialsFileStaysReadableByOlderForager(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"bearer_token": "tk"}, "tempo.internal"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "credentials.enc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptAESGCM(store.key, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asOlderForagerReadsIt map[string]map[string]string
+	if err := json.Unmarshal(plaintext, &asOlderForagerReadsIt); err != nil {
+		t.Fatalf("credentials.enc is no longer the legacy format: %v", err)
+	}
+	if asOlderForagerReadsIt["ds-1"]["bearer_token"] != "tk" {
+		t.Fatalf("legacy view %v", asOlderForagerReadsIt)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credential_hosts.enc")); err != nil {
+		t.Fatalf("host bindings file: %v", err)
+	}
+}
+
+// A binding whose credentials are gone (an older forager rewrote
+// credentials.enc without that datasource) is dropped on load.
+func TestCloudPushStore_DropsBindingsWithoutCredentials(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-gone", map[string]string{"a": "b"}, "old.internal"); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an older forager rewriting credentials.enc without ds-gone.
+	encrypted, err := encryptAESGCM(store.key, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.enc"), encrypted, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Host("ds-gone") != "" {
+		t.Fatal("a binding without credentials must be dropped")
+	}
+	// A later push for the same id starts unbound, not bound to the stale host.
+	if err := reloaded.Set("ds-gone", map[string]string{"a": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Host("ds-gone") != "" {
+		t.Fatal("stale binding resurfaced")
 	}
 }
 

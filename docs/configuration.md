@@ -113,7 +113,9 @@ new key).
 
 ### Host binding
 
-Stored credentials remember the host they were pushed for. A later config sync
+Stored credentials remember the host they were pushed for, in
+`{data_dir}/credential_hosts.enc` beside `credentials.enc` (whose format is
+unchanged, so an older forager still starts from the same data dir). A later config sync
 that moves a datasource to a different host without carrying its credentials is
 refused (`host_changed`), so a stored token can never be redirected to another
 server. A change of host must come with the credentials — Nudgebee always sends
