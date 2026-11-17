@@ -71,6 +71,7 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
 	handler.SetEncKeypair(encKeys)
+	handler.SetSecretRefAllowlist(cfg.SecretRefAllowlist)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
 	client.SetAgentFacts(ws.AgentFacts{
 		SigningEnforced: verifier.Enabled(),

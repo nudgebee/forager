@@ -9,6 +9,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"time"
 
 	"nudgebee/forager/pkg/proxy"
 	dbproxy "nudgebee/forager/pkg/proxy/db"
@@ -101,6 +102,14 @@ type Handler struct {
 	verifier   *signing.Verifier
 	logger     *slog.Logger
 
+	// secretRefPrefixes is the forager.yaml allow-list for secret-manager
+	// references of http-proxy datasources: once set, a ref must start with
+	// one of them. Unset keeps the earlier behaviour (any ref resolves, with a
+	// warning) so upgrading the forager does not break an existing HTTP Proxy
+	// integration that reads its secret from a secret manager. Other proxy
+	// types are never restricted.
+	secretRefPrefixes []string
+
 	// encKeys opens credentials the cloud encrypted to this forager
 	// (credentials_enc on a pushed datasource). nil means such a push is
 	// refused with no_encryption_key.
@@ -113,6 +122,31 @@ type Handler struct {
 
 // SetOnConfigSynced registers a callback invoked after each applied config push.
 func (h *Handler) SetOnConfigSynced(fn func()) { h.onConfigSynced = fn }
+
+// SetSecretRefAllowlist sets the secret-manager reference prefixes an
+// http-proxy datasource may use.
+func (h *Handler) SetSecretRefAllowlist(prefixes []string) { h.secretRefPrefixes = prefixes }
+
+// secretRefAllowed reports whether ref may be resolved for a datasource of
+// proxyType. Only http-proxy datasources are restricted: whoever can edit an
+// integration chooses both its base_url and its secret_ref, so without a list
+// any secret the forager's cloud role can read could be sent to a server of
+// their choosing.
+func (h *Handler) secretRefAllowed(proxyType, ref string) bool {
+	if proxyType != "http-proxy" {
+		return true
+	}
+	if len(h.secretRefPrefixes) == 0 {
+		h.logger.Warn("http-proxy datasource reads a secret-manager secret and no secret_ref_allowlist is set; set one to restrict which secrets can be sent to an integration's base_url", "secret_ref", ref)
+		return true
+	}
+	for _, prefix := range h.secretRefPrefixes {
+		if prefix != "" && strings.HasPrefix(ref, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // SetEncKeypair sets the keypair that opens cloud-encrypted credentials.
 func (h *Handler) SetEncKeypair(k *secrets.EncKeypair) { h.encKeys = k }
@@ -391,6 +425,9 @@ const (
 	errCodeResolveFailed   = "credential_resolve_failed"
 	errCodeUnknownProxy    = "unknown_proxy_type"
 	errCodeConfigureFailed = "configure_failed"
+	errCodeSecretRefDenied = "secret_ref_not_allowed"
+	errCodeBadCredentials  = "bad_credentials"
+	errCodeProbeFailed     = "probe_failed"
 )
 
 // datasourceHost is the host a datasource's credentials are for, read from
@@ -478,6 +515,9 @@ func (h *Handler) resolveCredentials(ctx context.Context, ds pushedDatasource) (
 		return stored, nil, "", nil
 
 	case ds.CredentialSource != "local" && ds.CredentialSource != "":
+		if !h.secretRefAllowed(ds.ProxyType, ds.CredentialRef) {
+			return nil, nil, errCodeSecretRefDenied, fmt.Errorf("secret %q is not in this forager's secret_ref_allowlist", ds.CredentialRef)
+		}
 		resolved, err := h.secretsMgr.Resolve(ctx, ds.CredentialSource, ds.CredentialRef)
 		if err != nil {
 			return nil, nil, errCodeResolveFailed, err
@@ -671,8 +711,25 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 		})
 	}
 
-	// Configure tests connectivity (e.g. db ping, ssh dial)
+	// Configure tests connectivity (e.g. db ping, ssh dial). An http-proxy
+	// datasource that carries a probe also proves its credentials here, so a
+	// wrong key is refused before it is saved.
 	err = p.Configure(ds.Config, creds)
+	code = ""
+	if err != nil {
+		code = errCodeConfigureFailed
+	} else if ds.Config["probe"] != nil && ds.ProxyType == "http-proxy" {
+		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err = p.HealthCheck(probeCtx)
+		cancel()
+		var probeErr *httpproxy.ProbeError
+		switch {
+		case errors.As(err, &probeErr) && probeErr.BadCredentials:
+			code = errCodeBadCredentials
+		case err != nil:
+			code = errCodeProbeFailed
+		}
+	}
 	_ = p.Close()
 
 	resp := map[string]any{
@@ -682,6 +739,7 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 	}
 	if err != nil {
 		resp["error"] = err.Error()
+		resp["error_code"] = code
 		h.logger.Warn("datasource config test failed", "type", ds.Type, "err", err)
 	} else {
 		h.logger.Info("datasource config test succeeded", "type", ds.Type)

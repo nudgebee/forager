@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -941,5 +942,79 @@ func TestHandler_LegacyHTTP_NoProxyIsCodedNotFound(t *testing.T) {
 	_ = json.Unmarshal(resp, &r)
 	if r.StatusCode != 404 || r.ErrorCode != proxy.ErrCodeDatasourceNotFound {
 		t.Fatalf("got %d %q", r.StatusCode, r.ErrorCode)
+	}
+}
+
+// The pre-save test runs an http-proxy datasource's probe, so a wrong key is
+// refused (bad_credentials) before Nudgebee stores it; a datasource without a
+// probe keeps today's configure-only test.
+func TestHandler_TestDatasourceConfig_RunsProbe(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer good" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	h := newTestHandler(t)
+	run := func(token string, withProbe bool) (bool, string) {
+		cfg := `{"base_url":"` + srv.URL + `","auth_type":"bearer"`
+		if withProbe {
+			cfg += `,"probe":{"path":"/api/v2/search/tags"}`
+		}
+		cfg += `}`
+		resp, err := h.HandleMessage(context.Background(), []byte(`{"action":"test_datasource_config","request_id":"r","datasource":{"type":"grafana_tempo","proxy_type":"http-proxy","config":`+cfg+`,"credentials":{"bearer_token":"`+token+`"},"credential_source":"cloud_push"}}`))
+		if err != nil {
+			t.Fatalf("HandleMessage: %v", err)
+		}
+		var r struct {
+			Success   bool   `json:"success"`
+			ErrorCode string `json:"error_code"`
+		}
+		_ = json.Unmarshal(resp, &r)
+		return r.Success, r.ErrorCode
+	}
+
+	if ok, code := run("good", true); !ok {
+		t.Fatalf("right key should pass, got %s", code)
+	}
+	if ok, code := run("wrong", true); ok || code != errCodeBadCredentials {
+		t.Fatalf("wrong key: success=%v code=%q", ok, code)
+	}
+	if ok, _ := run("wrong", false); !ok {
+		t.Fatal("without a probe the test stays configure-only")
+	}
+	// "probe": null is no probe, not a fall-through to the generic health check.
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"action":"test_datasource_config","request_id":"r","datasource":{"type":"grafana_tempo","proxy_type":"http-proxy","config":{"base_url":"`+srv.URL+`","auth_type":"bearer","probe":null},"credentials":{"bearer_token":"wrong"},"credential_source":"cloud_push"}}`))
+	if err != nil || !strings.Contains(string(resp), `"success":true`) {
+		t.Fatalf("probe:null should stay configure-only: %s %v", resp, err)
+	}
+}
+
+// http-proxy datasources may only resolve allow-listed secret refs; other
+// proxy types are not restricted.
+func TestHandler_SecretRefAllowlist(t *testing.T) {
+	h := newTestHandler(t)
+	sync := func(proxyType, ref string) syncAck {
+		return syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[`+
+			`{"id":"ds","type":"x","proxy_type":"`+proxyType+`","config":{"base_url":"http://localhost:1","host":"db"},`+
+			`"credential_source":"aws_sm","credential_ref":"`+ref+`"}]}`)
+	}
+
+	// No list keeps the earlier behaviour, so an upgrade breaks nothing.
+	if ack := sync("http-proxy", "arn:aws:secretsmanager:eu:1:secret:prod-db"); ack.Datasources[0].ErrorCode == errCodeSecretRefDenied {
+		t.Fatalf("no allow-list must not deny: %+v", ack)
+	}
+	h.SetSecretRefAllowlist([]string{"arn:aws:secretsmanager:eu:1:secret:nudgebee/"})
+	if ack := sync("http-proxy", "arn:aws:secretsmanager:eu:1:secret:prod-db"); ack.Datasources[0].ErrorCode != errCodeSecretRefDenied {
+		t.Fatalf("outside the prefix: %+v", ack)
+	}
+	if ack := sync("http-proxy", "arn:aws:secretsmanager:eu:1:secret:nudgebee/tempo"); ack.Datasources[0].ErrorCode == errCodeSecretRefDenied {
+		t.Fatalf("inside the prefix must reach the secret manager: %+v", ack)
+	}
+	if ack := sync("db-proxy", "arn:aws:secretsmanager:eu:1:secret:prod-db"); ack.Datasources[0].ErrorCode == errCodeSecretRefDenied {
+		t.Fatalf("db-proxy is not restricted: %+v", ack)
 	}
 }

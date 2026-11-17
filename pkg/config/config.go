@@ -30,6 +30,13 @@ type Config struct {
 	// here, switch the relay, then remove the old one.
 	SigningPublicKeys []SigningKey `mapstructure:"signing_public_keys"`
 
+	// SecretRefAllowlist lists the secret-manager reference prefixes an
+	// http-proxy datasource pushed from Nudgebee may resolve (for example
+	// "arn:aws:secretsmanager:eu-west-1:123456789012:secret:nudgebee/").
+	// Empty: http-proxy datasources cannot use a secret manager. Other proxy
+	// types are not restricted.
+	SecretRefAllowlist []string `mapstructure:"secret_ref_allowlist"`
+
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
