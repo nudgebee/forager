@@ -35,6 +35,7 @@ type Proxy struct {
 	followRedirects bool
 	dsType          string // datasource type label, e.g. "prometheus"
 	maxRespBytes    int64
+	probe           *probeSpec // authenticated credential check, from config.probe
 	client          *http.Client
 	logger          *slog.Logger
 }
@@ -80,10 +81,20 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if baseParsed.Hostname() == "" {
 		return fmt.Errorf("base_url must specify a host")
 	}
+	if err := refuseMetadataHost(baseParsed.Hostname()); err != nil {
+		return fmt.Errorf("invalid base_url: %w", err)
+	}
 
 	var authType string
 	if v, ok := config["auth_type"].(string); ok {
 		authType = v
+	}
+	if authType == "custom_headers" {
+		// A malformed value would otherwise send every request with no
+		// credentials and fail confusingly upstream.
+		if err := validateCustomHeaders(creds["custom_headers"]); err != nil {
+			return err
+		}
 	}
 
 	skipVerify := false
@@ -97,6 +108,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 
 	dsType, _ := config["datasource_type"].(string)
+
+	probe, err := parseProbe(config["probe"])
+	if err != nil {
+		return err
+	}
 
 	maxRespBytes := defaultMaxResponseBytes
 	switch v := config["max_response_bytes"].(type) {
@@ -159,6 +175,17 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 	}
 	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
+	// Every connection is checked on its resolved address: never a cloud
+	// instance-metadata endpoint, whatever base_url says.
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   refuseMetadataDial,
+	}).DialContext
+	// HTTPS must dial through DialContext too: a DialTLSContext (or legacy
+	// DialTLS) cloned from the default transport would bypass the guard.
+	transport.DialTLSContext = nil
+	transport.DialTLS = nil //nolint:staticcheck // cleared on purpose, see above
 	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
 	if err := applyTLSMaterial(transport.TLSClientConfig, creds); err != nil {
 		return err
@@ -195,6 +222,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.followRedirects = followRedirects
 	p.dsType = dsType
 	p.maxRespBytes = maxRespBytes
+	p.probe = probe
 	p.creds = credsCopy
 	p.client = newClient
 	p.mu.Unlock()
@@ -231,15 +259,24 @@ func (p *Proxy) resolveTargetURL(base *url.URL, reqURL string) (string, error) {
 	// request URL. Collapse a duplicated slash at the join boundary so a
 	// trailing-slash base_url plus a leading-slash request path does not produce
 	// "//"; otherwise the path is appended verbatim to preserve existing routing.
-	basePath, refPath := base.Path, ref.Path
+	// Joined on the escaped forms, so an encoded "/" (%2F) inside a segment —
+	// a label key like app.kubernetes.io/name in a tag path — stays one
+	// segment instead of being decoded into two.
+	basePath, refPath := base.EscapedPath(), ref.EscapedPath()
 	if strings.HasSuffix(basePath, "/") && strings.HasPrefix(refPath, "/") {
 		refPath = refPath[1:]
+	}
+	rawPath := basePath + refPath
+	path, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid request path %q: %w", rawPath, err)
 	}
 	out := &url.URL{
 		Scheme:   base.Scheme,
 		User:     base.User,
 		Host:     base.Host,
-		Path:     basePath + refPath,
+		Path:     path,
+		RawPath:  rawPath,
 		RawQuery: ref.RawQuery,
 		Fragment: ref.Fragment,
 	}
@@ -355,10 +392,15 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 	creds := p.creds
 	client := p.client
 	dsType := p.dsType
+	probe := p.probe
 	p.mu.RUnlock()
 
 	if client == nil || baseURL == "" {
 		return fmt.Errorf("http proxy not configured")
+	}
+
+	if probe != nil {
+		return p.runProbe(ctx, client, probe, authType, creds)
 	}
 
 	if dsType == "prometheus" {
@@ -520,6 +562,17 @@ func (p *Proxy) injectAuthWith(req *http.Request, authType string, creds map[str
 		if name := creds["custom_header_name"]; name != "" {
 			req.Header.Set(name, creds["custom_header_value"])
 		}
+	case "custom_headers":
+		// Several fixed headers (Datadog's DD-API-KEY and DD-APPLICATION-KEY),
+		// carried as a JSON object in one credential.
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(creds["custom_headers"]), &headers); err == nil {
+			for name, value := range headers {
+				if name != "" {
+					req.Header.Set(name, value)
+				}
+			}
+		}
 	}
 }
 
@@ -539,4 +592,22 @@ func effectivePort(u *url.URL) string {
 	default:
 		return ""
 	}
+}
+
+// validateCustomHeaders checks a custom_headers credential: a non-empty JSON
+// object of header name to value, with no empty names.
+func validateCustomHeaders(raw string) error {
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(raw), &headers); err != nil {
+		return fmt.Errorf("custom_headers must be a JSON object of header names to values: %w", err)
+	}
+	if len(headers) == 0 {
+		return fmt.Errorf("custom_headers is empty")
+	}
+	for name := range headers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("custom_headers has an empty header name")
+		}
+	}
+	return nil
 }

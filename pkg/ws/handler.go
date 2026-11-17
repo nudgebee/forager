@@ -13,6 +13,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"nudgebee/forager/pkg/proxy"
 	dbproxy "nudgebee/forager/pkg/proxy/db"
@@ -110,6 +111,13 @@ type Handler struct {
 	verifier   *signing.Verifier
 	logger     *slog.Logger
 
+	// secretRefPrefixes is the forager.yaml allow-list for secret-manager
+	// references of http-proxy datasources: once set, a ref must start with
+	// one of them. Unset, only legacySecretRefTypes resolve refs (any ref), so
+	// upgrading the forager breaks no existing integration while every new
+	// http-proxy type is denied. Other proxy types are never restricted.
+	secretRefPrefixes []string
+
 	// encKeys opens credentials the cloud encrypted to this forager
 	// (credentials_enc on a pushed datasource). nil means such a push is
 	// refused with no_encryption_key.
@@ -122,6 +130,43 @@ type Handler struct {
 
 // SetOnConfigSynced registers a callback invoked after each applied config push.
 func (h *Handler) SetOnConfigSynced(fn func()) { h.onConfigSynced = fn }
+
+// SetSecretRefAllowlist sets the secret-manager reference prefixes an
+// http-proxy datasource may use. With none set, only the http-proxy types that
+// read secret managers before the list existed keep doing so (see
+// legacySecretRefTypes), and that is logged once here rather than per sync.
+func (h *Handler) SetSecretRefAllowlist(prefixes []string) {
+	h.secretRefPrefixes = prefixes
+	if len(prefixes) == 0 {
+		h.logger.Warn("no secret_ref_allowlist set: HTTP Proxy, Prometheus, Loki and SigNoz datasources may read any secret-manager secret; other HTTP datasources may read none. Set secret_ref_allowlist to restrict which secrets can reach an integration's base_url")
+	}
+}
+
+// legacySecretRefTypes are the http-proxy datasource types that could read a
+// secret manager before secret_ref_allowlist existed. With no list set they
+// keep doing so, so upgrading the forager breaks no existing integration;
+// every other http-proxy type needs a matching prefix.
+var legacySecretRefTypes = map[string]bool{"http_proxy": true, "prometheus": true, "loki": true, "signoz": true}
+
+// secretRefAllowed reports whether ref may be resolved for a datasource of
+// proxyType and dsType. Only http-proxy datasources are restricted: whoever can
+// edit an integration chooses both its base_url and its secret_ref, so without
+// a list any secret the forager's cloud role can read could be sent to a
+// server of their choosing.
+func (h *Handler) secretRefAllowed(proxyType, dsType, ref string) bool {
+	if proxyType != "http-proxy" {
+		return true
+	}
+	if len(h.secretRefPrefixes) == 0 {
+		return legacySecretRefTypes[strings.ToLower(dsType)]
+	}
+	for _, prefix := range h.secretRefPrefixes {
+		if prefix != "" && strings.HasPrefix(ref, prefix) {
+			return true
+		}
+	}
+	return false
+}
 
 // SetEncKeypair sets the keypair that opens cloud-encrypted credentials.
 func (h *Handler) SetEncKeypair(k *secrets.EncKeypair) { h.encKeys = k }
@@ -400,6 +445,9 @@ const (
 	errCodeResolveFailed   = "credential_resolve_failed"
 	errCodeUnknownProxy    = "unknown_proxy_type"
 	errCodeConfigureFailed = "configure_failed"
+	errCodeSecretRefDenied = "secret_ref_not_allowed"
+	errCodeBadCredentials  = "bad_credentials"
+	errCodeProbeFailed     = "probe_failed"
 )
 
 // tearDownOnFailure are failures that mean the pushed credentials cannot be
@@ -411,6 +459,7 @@ var tearDownOnFailure = map[string]bool{
 	errCodeHostChanged:     true,
 	errCodeNoEncryptionKey: true,
 	errCodeUnknownProxy:    true,
+	errCodeSecretRefDenied: true,
 }
 
 // datasourceBinding is what a pushed datasource's credentials are bound to:
@@ -622,6 +671,12 @@ func (h *Handler) resolveCredentials(ctx context.Context, ds pushedDatasource) (
 		return stored, nil, "", nil
 
 	case ds.CredentialSource != "local" && ds.CredentialSource != "":
+		if !h.secretRefAllowed(ds.ProxyType, ds.Type, ds.CredentialRef) {
+			if len(h.secretRefPrefixes) == 0 {
+				return nil, nil, errCodeSecretRefDenied, fmt.Errorf("no secret_ref_allowlist is set on this forager, so %s datasources may not read secret %q; set secret_ref_allowlist in forager.yaml", ds.Type, ds.CredentialRef)
+			}
+			return nil, nil, errCodeSecretRefDenied, fmt.Errorf("secret %q is not in this forager's secret_ref_allowlist", ds.CredentialRef)
+		}
 		resolved, err := h.secretsMgr.Resolve(ctx, ds.CredentialSource, ds.CredentialRef)
 		if err != nil {
 			return nil, nil, errCodeResolveFailed, err
@@ -865,8 +920,25 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 		})
 	}
 
-	// Configure tests connectivity (e.g. db ping, ssh dial)
+	// Configure tests connectivity (e.g. db ping, ssh dial). An http-proxy
+	// datasource that carries a probe also proves its credentials here, so a
+	// wrong key is refused before it is saved.
 	err = p.Configure(ds.Config, creds)
+	code = ""
+	if err != nil {
+		code = errCodeConfigureFailed
+	} else if ds.Config["probe"] != nil && ds.ProxyType == "http-proxy" {
+		probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+		err = p.HealthCheck(probeCtx)
+		cancel()
+		var probeErr *httpproxy.ProbeError
+		switch {
+		case errors.As(err, &probeErr) && probeErr.BadCredentials:
+			code = errCodeBadCredentials
+		case err != nil:
+			code = errCodeProbeFailed
+		}
+	}
 	_ = p.Close()
 
 	resp := map[string]any{
@@ -876,6 +948,7 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 	}
 	if err != nil {
 		resp["error"] = err.Error()
+		resp["error_code"] = code
 		h.logger.Warn("datasource config test failed", "type", ds.Type, "err", err)
 	} else {
 		h.logger.Info("datasource config test succeeded", "type", ds.Type)
