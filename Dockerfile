@@ -1,6 +1,6 @@
 # golang 1.26.10: fixes GO-2026-6809 (crypto/x509 trusts compromised intermediates),
 # which govulncheck finds reachable from the websocket client in 1.26.9.
-FROM golang:1.26.10-bookworm@sha256:23ce71337b726608afb1bc00986e630a05034a87a87ea1fc2cd1ae5cf33387eb AS build-stage
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS build-stage
 # Always compile with the base image's Go, never an auto-downloaded toolchain.
 ENV GOTOOLCHAIN=local
 
