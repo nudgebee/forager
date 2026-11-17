@@ -277,6 +277,32 @@ func TestCloudPushStore_DropsBindingsWithoutCredentials(t *testing.T) {
 	}
 }
 
+// Writes go through a temp file and a rename; none is left behind.
+func TestCloudPushStore_WritesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"a": "b"}, "h"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"credentials.enc.tmp", "credential_hosts.enc.tmp"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s left behind", name)
+		}
+	}
+	for _, name := range []string{"credentials.enc", "credential_hosts.enc"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("%s mode %v, want 0600", name, info.Mode().Perm())
+		}
+	}
+}
+
 func TestCloudPushStore_DeleteMissingIsNoop(t *testing.T) {
 	store, err := NewCloudPushStore(t.TempDir(), "secret")
 	if err != nil {

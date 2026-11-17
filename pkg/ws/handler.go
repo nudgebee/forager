@@ -542,6 +542,8 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		}
 
 		if err := p.Configure(ds.Config, creds); err != nil {
+			// Release whatever a partial Configure opened (pools, sockets).
+			_ = p.Close()
 			fail(ds, errCodeConfigureFailed, err)
 			continue
 		}
