@@ -133,6 +133,9 @@ func (s *CloudPushStore) saveToDisk() error {
 	return s.writeEncrypted(s.hostsPath, s.hosts)
 }
 
+// writeEncrypted writes v encrypted to path through a temp file and a rename,
+// so a crash or a full disk mid-write leaves the previous file intact instead
+// of a truncated one the next start cannot decrypt.
 func (s *CloudPushStore) writeEncrypted(path string, v any) error {
 	plaintext, err := json.Marshal(v)
 	if err != nil {
@@ -142,7 +145,16 @@ func (s *CloudPushStore) writeEncrypted(path string, v any) error {
 	if err != nil {
 		return fmt.Errorf("encrypting %s: %w", filepath.Base(path), err)
 	}
-	return os.WriteFile(path, encrypted, 0600)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, encrypted, 0600); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("writing %s: %w", filepath.Base(tmp), err)
+	}
+	if err := os.Rename(tmp, path); err != nil {
+		_ = os.Remove(tmp)
+		return fmt.Errorf("installing %s: %w", filepath.Base(path), err)
+	}
+	return nil
 }
 
 func (s *CloudPushStore) readEncrypted(path string, v any) error {

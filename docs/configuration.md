@@ -54,6 +54,8 @@ NB_RELAY_URL=wss://relay.nudgebee.com/register
 NB_ACCESS_KEY=key
 NB_ACCESS_SECRET=secret
 NB_DATA_DIR=/var/lib/nudgebee
+NB_ENC_PRIVATE_KEY=<base64 of 32 bytes>
+NB_ENC_PRIVATE_KEY_FILE=/etc/nudgebee/enc_key
 ```
 
 ## Message Signing
@@ -93,13 +95,45 @@ Cloud-pushed credentials are encrypted at rest using AES-GCM with a key derived 
 
 ### End-to-end encryption of pushed credentials
 
-On first start the forager creates an X25519 keypair in `{data_dir}/enc_key` (mode
-0600) and sends the public key in its greeting (`enc_public_key`, named by
-`enc_key_id`). Nudgebee seals credentials to that key before they leave its
-servers, so relay-server and the message broker carry only an opaque blob
-(`credentials_enc`); only this forager can open it. A push sealed to another key
-— a reinstall, or a second forager — is refused per datasource with
-`key_mismatch`, and the forager keeps whatever it was serving before.
+The forager holds an X25519 keypair and sends the public key in its greeting
+(`enc_public_key`, named by `enc_key_id`). Nudgebee seals credentials to that key
+before they leave its servers, so relay-server and the message broker carry only
+an opaque blob (`credentials_enc`); only a forager holding the private key can
+open it. A push sealed to another key — a reinstall, or a second forager — is
+refused per datasource with `key_mismatch`.
+
+The private key is taken from the first of:
+
+| Source | Form |
+|--------|------|
+| `enc_private_key` (`NB_ENC_PRIVATE_KEY`) | base64 of 32 bytes |
+| `enc_private_key_file` (`NB_ENC_PRIVATE_KEY_FILE`) | a file holding the base64, or the 32 raw bytes |
+| `{data_dir}/enc_key` | 32 raw bytes, written by an earlier start |
+| generated | written to `{data_dir}/enc_key` (mode 0600); the forager logs a warning |
+
+Replicas of one forager identity (several pods with the same access key) must
+share one key, set through `enc_private_key` or `enc_private_key_file`;
+otherwise each replica would generate its own and could not open what Nudgebee
+sealed for another. A configured key that is not base64 of 32 bytes, or a key
+file that cannot be read, stops the forager at start — it never falls back to
+generating one. Only the key id is logged. Generate a key with
+`head -c 32 /dev/urandom | base64`.
+
+The Helm chart does this for you: it puts `forager.encPrivateKey` into the
+release Secret and passes it to every pod as `NB_ENC_PRIVATE_KEY`. Left empty,
+the chart generates a key on install and reads it back from the Secret on every
+upgrade, so it does not change.
+
+**GitOps installs (Argo CD, Flux, `helm template`) must set `forager.encPrivateKey`**
+(or mount an existing Secret through `enc_private_key_file`). Those tools render
+without cluster access, so the chart's `lookup` finds nothing and would generate
+a new key on every render — every sync would rotate the key. A key file must not
+be readable by group or others; for a Secret volume set `defaultMode: 0400`.
+
+Rotating the key (changing `enc_private_key`, or a new data dir without one)
+gives the forager a new `enc_key_id`. Nudgebee re-pushes every credential sealed
+to the new key after the forager reconnects; until it does, pushes sealed to the
+old key are refused with `key_mismatch`.
 
 The datasource id and host are sealed together with the credentials and checked
 when the blob is opened, so a blob captured from one push cannot be replayed to
@@ -107,19 +141,44 @@ point the same credentials at another datasource or host
 (`sealed_for_other_datasource`). Credentials are stored only after the proxy has
 accepted them, never for a datasource that failed to configure.
 
-Back up `enc_key` with `credentials.enc`; a lost key means Nudgebee must re-push
-every credential (it does so automatically after the forager reconnects with its
-new key).
+Back up `enc_key` (or the configured key) with `credentials.enc`; a lost key
+means Nudgebee must re-push every credential (it does so automatically after the
+forager reconnects with its new key).
+
+### A datasource that fails to apply
+
+When a config sync cannot apply a datasource, the ack reports the error for it.
+What happens to a datasource that was already running depends on why:
+
+- **The credentials cannot be used** (`key_mismatch`, `decrypt_failed`,
+  `sealed_for_other_datasource`, `host_changed`, `no_encryption_key`), the proxy
+  type is unknown, **or the push changed the credentials or the binding** (a
+  rotation or a move): the previous proxy is removed and closed, so it does not
+  keep serving what the push replaced. If the push carried credentials, the
+  stored ones are deleted too, so a rotated-out token cannot come back.
+- **Nothing changed and the failure is not about credentials** — a database
+  briefly unreachable during a reconnect sync (`configure_failed`), a secret
+  manager timing out: the working proxy and its stored credentials are kept.
 
 ### Host binding
 
-Stored credentials remember the host they were pushed for, in
+Stored credentials remember what they were pushed for, in
 `{data_dir}/credential_hosts.enc` beside `credentials.enc` (whose format is
-unchanged, so an older forager still starts from the same data dir). A later config sync
-that moves a datasource to a different host without carrying its credentials is
-refused (`host_changed`), so a stored token can never be redirected to another
-server. A change of host must come with the credentials — Nudgebee always sends
-them on save.
+unchanged, so an older forager still starts from the same data dir):
+
+| Proxy | Bound to |
+|---|---|
+| http-proxy, mcp-proxy | the URL's origin, `scheme://host:port` |
+| db, redis, mongo, ssh with a host | the host |
+| kafka | the broker list, sorted |
+| ssh without a host, discovery | the allowed hosts or CIDRs (`scope:…`) |
+
+A later config sync that changes the binding without carrying the credentials
+is refused (`host_changed`), so a stored token is never redirected to another
+server, sent over plain http instead of https, or sent to another port. A scope
+may narrow but not grow. Credentials stored by a forager older than host
+binding are reused only for the datasource as it is registered right now; any
+other sync must carry them. Nudgebee always sends credentials on save.
 
 ### Removal
 

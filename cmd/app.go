@@ -57,11 +57,15 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 		return nil, fmt.Errorf("signing verifier: %w", err)
 	}
 
-	encKeys, err := secrets.LoadOrCreateEncKeypair(cfg.DataDir)
+	encKeys, encKeySource, err := secrets.LoadEncKeypair(cfg.EncPrivateKey, cfg.EncPrivateKeyFile, cfg.DataDir)
 	if err != nil {
 		return nil, fmt.Errorf("encryption key: %w", err)
 	}
-	logger.Info("credential encryption key ready", "enc_key_id", encKeys.KeyID())
+	logger.Info("credential encryption key ready", "enc_key_id", encKeys.KeyID(), "source", encKeySource)
+	if encKeySource == secrets.EncKeyGenerated {
+		logger.Warn("generated a new credential encryption key; replicas of one forager must share a key — set enc_private_key or enc_private_key_file",
+			"enc_key_id", encKeys.KeyID())
+	}
 
 	registry := proxy.NewRegistry()
 

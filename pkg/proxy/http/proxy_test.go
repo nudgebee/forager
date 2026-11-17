@@ -405,6 +405,69 @@ func TestProxy_HandleRequest_FollowRedirects_BlocksCrossOrigin(t *testing.T) {
 	}
 }
 
+// A redirect to another origin is refused before it is sent, so a custom
+// auth header (DD-API-KEY, X-SF-TOKEN — which Go's client, unlike
+// Authorization, keeps across hosts) never reaches the second host. A
+// redirect within the origin still carries it.
+func TestProxy_FollowRedirects_CustomHeaderStaysOnOrigin(t *testing.T) {
+	var mu sync.Mutex
+	var externalHits int
+	external := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		externalHits++
+		mu.Unlock()
+		_, _ = w.Write([]byte(r.Header.Get("X-Api-Key")))
+	}))
+	defer external.Close()
+
+	origin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/same":
+			http.Redirect(w, r, "/landing", http.StatusFound)
+		case "/landing":
+			_, _ = w.Write([]byte("key=" + r.Header.Get("X-Api-Key")))
+		default:
+			http.Redirect(w, r, external.URL+"/steal", http.StatusFound)
+		}
+	}))
+	defer origin.Close()
+
+	p := New(testLogger())
+	err := p.Configure(map[string]any{
+		"base_url":         origin.URL,
+		"auth_type":        "custom_header",
+		"follow_redirects": true,
+	}, map[string]string{"custom_header_name": "X-Api-Key", "custom_header_value": "secret-key"})
+	if err != nil {
+		t.Fatalf("Configure: %v", err)
+	}
+
+	resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{Method: "GET", URL: "/same"})
+	if err != nil {
+		t.Fatalf("same-origin redirect: %v", err)
+	}
+	var httpResp struct {
+		StatusCode int    `json:"status_code"`
+		Body       string `json:"body"`
+	}
+	if err := json.Unmarshal([]byte(resp.Data), &httpResp); err != nil {
+		t.Fatalf("unmarshal response data: %v", err)
+	}
+	body, _ := base64.StdEncoding.DecodeString(httpResp.Body)
+	if httpResp.StatusCode != http.StatusOK || string(body) != "key=secret-key" {
+		t.Fatalf("same-origin redirect: status %d body %q", httpResp.StatusCode, body)
+	}
+
+	if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{Method: "GET", URL: "/cross"}); err == nil {
+		t.Fatal("cross-origin redirect must fail")
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if externalHits != 0 {
+		t.Fatalf("the other origin was contacted %d time(s)", externalHits)
+	}
+}
+
 func TestEffectivePort(t *testing.T) {
 	uHTTP, _ := url.Parse("http://example.com/path")
 	if port := effectivePort(uHTTP); port != "80" {

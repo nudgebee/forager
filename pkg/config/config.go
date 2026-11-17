@@ -14,6 +14,14 @@ type Config struct {
 	AccessSecret string `mapstructure:"access_secret"`
 	DataDir      string `mapstructure:"data_dir"`
 
+	// EncPrivateKey is base64 of the 32-byte X25519 private key pushed
+	// credentials are sealed to; EncPrivateKeyFile names a file holding the
+	// same (base64, or the 32 raw bytes). Every replica of one forager
+	// identity must share it. Neither set: {data_dir}/enc_key, created on
+	// first start.
+	EncPrivateKey     string `mapstructure:"enc_private_key"`
+	EncPrivateKeyFile string `mapstructure:"enc_private_key_file"`
+
 	// Local datasource overrides (credential_source: local)
 	Datasources []LocalDatasource `mapstructure:"datasources"`
 
@@ -177,6 +185,8 @@ func Load(configPath string) (*Config, error) {
 	// env vars for keys absent from the config file.
 	_ = v.BindEnv("access_key")
 	_ = v.BindEnv("access_secret")
+	_ = v.BindEnv("enc_private_key")
+	_ = v.BindEnv("enc_private_key_file")
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
 	_ = v.BindEnv("health_check_interval_min")

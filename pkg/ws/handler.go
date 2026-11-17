@@ -6,9 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"maps"
+	"net"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
+	"sync"
 
 	"nudgebee/forager/pkg/proxy"
 	dbproxy "nudgebee/forager/pkg/proxy/db"
@@ -95,6 +99,11 @@ var signedActions = map[string]bool{
 
 // Handler dispatches incoming relay messages to the appropriate proxy module.
 type Handler struct {
+	// bindings is the datasourceBinding each registered datasource runs with,
+	// so an unbound stored entry is reused only where it already runs.
+	bindingsMu sync.Mutex
+	bindings   map[string]string
+
 	registry   *proxy.Registry
 	credStore  *secrets.CloudPushStore
 	secretsMgr *secrets.Manager
@@ -393,40 +402,152 @@ const (
 	errCodeConfigureFailed = "configure_failed"
 )
 
-// datasourceHost is the host a datasource's credentials are for, read from
-// the config key the proxy of that type actually dials (http-proxy reads
-// base_url, mcp-proxy url, the others host or brokers), or "" for a type
-// with no single host. No key is tried for a type that does not dial it,
-// so a sync cannot satisfy the check with one key and dial another.
-// Stored credentials are bound to it (F2): a later sync that names another
-// host without carrying the credentials cannot reuse them.
-func datasourceHost(proxyType string, config map[string]any) string {
-	hostOfURL := func(key string) string {
-		raw, _ := config[key].(string)
-		if raw == "" {
-			return ""
-		}
-		u, err := url.Parse(raw)
-		if err != nil {
-			return ""
-		}
-		return strings.ToLower(u.Hostname())
-	}
+// tearDownOnFailure are failures that mean the pushed credentials cannot be
+// used, so the datasource must stop serving whatever it ran with before.
+var tearDownOnFailure = map[string]bool{
+	errCodeKeyMismatch:     true,
+	errCodeDecryptFailed:   true,
+	errCodeSealedForOther:  true,
+	errCodeHostChanged:     true,
+	errCodeNoEncryptionKey: true,
+	errCodeUnknownProxy:    true,
+}
+
+// datasourceBinding is what a pushed datasource's credentials are bound to:
+// stored credentials are reused only while it stays the same, and sealed
+// credentials name it inside the seal (Nudgebee computes the same value; see
+// testdata/datasource_binding_vectors.json, mirrored in api-server).
+//
+//   - http-proxy, mcp-proxy: the URL's origin, scheme://host:port, so moving a
+//     token from https to http or to another port on the host is a change.
+//   - db, redis, mongo, and ssh with a host: the host.
+//   - kafka: the broker list, normalised and sorted (order is not a change).
+//   - ssh without a host, discovery: "scope:" and the sorted allowed hosts or
+//     CIDRs; see bindingAllows.
+//
+// Everything is lower-cased. "" means the type has nothing to bind to.
+func datasourceBinding(ds pushedDatasource) string {
+	config := ds.Config
 	plain := func(key string) string {
 		v, _ := config[key].(string)
 		return strings.ToLower(strings.TrimSpace(v))
 	}
-	switch proxyType {
+	switch ds.ProxyType {
 	case "http-proxy":
-		return hostOfURL("base_url")
+		return urlOrigin(config["base_url"])
 	case "mcp-proxy":
-		return hostOfURL("url")
-	case "db-proxy", "redis-proxy", "mongo-proxy", "ssh-proxy":
+		return urlOrigin(config["url"])
+	case "db-proxy", "redis-proxy", "mongo-proxy":
 		return plain("host")
+	case "ssh-proxy":
+		if h := plain("host"); h != "" {
+			return h
+		}
+		return scopeBinding(append(stringList(config["allowed_hosts"]), ds.AllowedHosts...))
+	case "discovery-proxy":
+		cidrs := stringList(config["allowed_cidrs"])
+		if len(cidrs) == 0 {
+			cidrs = ds.AllowedHosts
+		}
+		return scopeBinding(cidrs)
 	case "kafka-proxy":
-		return plain("brokers")
+		parts := strings.Split(plain("brokers"), ",")
+		out := parts[:0]
+		for _, b := range parts {
+			if b = strings.TrimSpace(b); b != "" {
+				out = append(out, b)
+			}
+		}
+		sort.Strings(out)
+		return strings.Join(out, ",")
 	}
 	return ""
+}
+
+// urlOrigin is scheme://host:port of a URL value, lower-cased, with the
+// scheme's default port filled in; "" when it is not an absolute URL.
+func urlOrigin(v any) string {
+	raw, _ := v.(string)
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Hostname() == "" || u.Scheme == "" {
+		return ""
+	}
+	scheme := strings.ToLower(u.Scheme)
+	port := u.Port()
+	if port == "" {
+		switch scheme {
+		case "https", "wss":
+			port = "443"
+		case "http", "ws":
+			port = "80"
+		}
+	}
+	host := strings.ToLower(strings.TrimSuffix(u.Hostname(), "."))
+	if port == "" {
+		return scheme + "://" + host
+	}
+	return scheme + "://" + net.JoinHostPort(host, port)
+}
+
+const scopeBindingPrefix = "scope:"
+
+// scopeBinding binds credentials used against a list of hosts or CIDRs.
+func scopeBinding(items []string) string {
+	seen := map[string]bool{}
+	var out []string
+	for _, it := range items {
+		it = strings.ToLower(strings.TrimSpace(it))
+		if it != "" && !seen[it] {
+			seen[it] = true
+			out = append(out, it)
+		}
+	}
+	if len(out) == 0 {
+		return ""
+	}
+	sort.Strings(out)
+	return scopeBindingPrefix + strings.Join(out, ",")
+}
+
+// bindingAllows reports whether credentials bound to bound may be reused for
+// current. A scope may stay the same or narrow, never grow: a sync that adds
+// a host to an ssh or discovery scope must carry the credentials.
+func bindingAllows(bound, current string) bool {
+	if bound == current {
+		return true
+	}
+	if !strings.HasPrefix(bound, scopeBindingPrefix) || !strings.HasPrefix(current, scopeBindingPrefix) {
+		return false
+	}
+	allowed := map[string]bool{}
+	for _, it := range strings.Split(strings.TrimPrefix(bound, scopeBindingPrefix), ",") {
+		allowed[it] = true
+	}
+	for _, it := range strings.Split(strings.TrimPrefix(current, scopeBindingPrefix), ",") {
+		if !allowed[it] {
+			return false
+		}
+	}
+	return true
+}
+
+// stringList reads a config value that is a list of strings.
+func stringList(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		return t
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, x := range t {
+			if s, ok := x.(string); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		return strings.Split(t, ",")
+	}
+	return nil
 }
 
 // credentialBinding says what to store once the datasource is configured.
@@ -435,14 +556,34 @@ type credentialBinding struct {
 	host  string
 }
 
+func (h *Handler) registeredBinding(id string) string {
+	h.bindingsMu.Lock()
+	defer h.bindingsMu.Unlock()
+	return h.bindings[id]
+}
+
+func (h *Handler) setRegisteredBinding(id, binding string) {
+	h.bindingsMu.Lock()
+	defer h.bindingsMu.Unlock()
+	if h.bindings == nil {
+		h.bindings = map[string]string{}
+	}
+	if binding == "" {
+		delete(h.bindings, id)
+		return
+	}
+	h.bindings[id] = binding
+}
+
 // resolveCredentials returns the credentials a pushed datasource runs with
 // and, when they should be persisted, the binding to store after Configure
 // succeeds (storing first would keep credentials a failed configure never
 // used). A cloud_push datasource that carries none reuses the stored ones
-// only for the host they were stored for; an entry from before host binding
-// is bound to the current host on that first reuse.
+// only while its binding allows it (see datasourceBinding). An entry stored
+// before bindings existed is reused only for the binding the datasource is
+// registered with right now — never bound to whatever the first sync names.
 func (h *Handler) resolveCredentials(ctx context.Context, ds pushedDatasource) (creds map[string]string, toStore *credentialBinding, code string, err error) {
-	host := datasourceHost(ds.ProxyType, ds.Config)
+	host := datasourceBinding(ds)
 
 	switch {
 	case ds.CredentialsEnc != "":
@@ -469,10 +610,13 @@ func (h *Handler) resolveCredentials(ctx context.Context, ds pushedDatasource) (
 			return nil, nil, "", nil
 		}
 		bound := h.credStore.Host(ds.ID)
-		if bound != "" && bound != host {
+		switch {
+		case bound != "" && !bindingAllows(bound, host):
 			return nil, nil, errCodeHostChanged, fmt.Errorf("stored credentials are for %s; a change to %s must carry the credentials", bound, host)
-		}
-		if bound == "" && host != "" {
+		case bound == "" && host != "":
+			if h.registeredBinding(ds.ID) != host {
+				return nil, nil, errCodeHostChanged, fmt.Errorf("stored credentials predate host binding and %s is not where this datasource runs now; the push must carry the credentials", host)
+			}
 			return stored, &credentialBinding{creds: stored, host: host}, "", nil
 		}
 		return stored, nil, "", nil
@@ -511,9 +655,56 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 	// Track which datasources are in the new config
 	newIDs := make(map[string]bool)
 	results := make([]datasourceResult, 0, len(push.Datasources))
-	fail := func(ds pushedDatasource, code string, err error) {
+	// A datasource that fails stops serving: a proxy registered by an earlier
+	// sync would otherwise keep answering with the configuration and
+	// credentials this sync replaced. Its stored credentials stay — the
+	// datasource is still in the account, they remain bound to their host,
+	// and the next good sync can use them without a re-push.
+	// fail reports a datasource that could not be applied. A previously
+	// registered proxy is torn down only when keeping it would serve stale
+	// credentials: the failure is about the credentials themselves, or the
+	// push changed the credentials or the binding (a rotation or a move).
+	// A transient failure with nothing changed — a database briefly
+	// unreachable during a reconnect sync — keeps the working proxy, as before.
+	fail := func(ds pushedDatasource, code string, err error, changed bool) {
 		h.logger.Error("datasource not applied", "datasource_id", ds.ID, "type", ds.Type, "error_code", code, "err", err)
 		results = append(results, datasourceResult{ID: ds.ID, Status: "error", ErrorCode: code, Error: err.Error()})
+		if strings.HasPrefix(ds.ID, "local:") {
+			return
+		}
+		if !changed && !tearDownOnFailure[code] {
+			if _, ok := h.registry.Get(ds.ID); ok {
+				h.logger.Warn("keeping the previous registration: the push changed nothing and the failure is not about credentials",
+					"datasource_id", ds.ID, "error_code", code)
+			}
+			return
+		}
+		if _, ok := h.registry.Get(ds.ID); ok {
+			h.logger.Warn("removing previously configured datasource after failed reconfigure", "datasource_id", ds.ID)
+			if err := h.registry.Remove(ds.ID); err != nil {
+				h.logger.Error("failed to close removed datasource", "datasource_id", ds.ID, "err", err)
+			}
+		}
+		h.setRegisteredBinding(ds.ID, "")
+		// A push that carried credentials replaced the stored ones: the old
+		// credentials (a rotated, possibly leaked token) must not come back on
+		// the next sync. A failure without new credentials (host_changed)
+		// keeps them for a later clean push.
+		if ds.CredentialsEnc != "" || len(ds.Credentials) > 0 {
+			if err := h.credStore.Delete(ds.ID); err != nil {
+				h.logger.Error("failed to delete replaced credentials", "datasource_id", ds.ID, "err", err)
+			}
+		}
+	}
+
+	// changedFromRunning reports whether a push differs from what the
+	// datasource runs with now: another binding, or other credentials.
+	changedFromRunning := func(ds pushedDatasource, creds map[string]string) bool {
+		if h.registeredBinding(ds.ID) != datasourceBinding(ds) {
+			return true
+		}
+		stored, _ := h.credStore.Get(ds.ID)
+		return !maps.Equal(stored, creds)
 	}
 
 	for _, ds := range push.Datasources {
@@ -521,7 +712,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 
 		creds, toStore, code, err := h.resolveCredentials(ctx, ds)
 		if err != nil {
-			fail(ds, code, err)
+			fail(ds, code, err, false)
 			continue
 		}
 
@@ -537,12 +728,14 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		// Create or reconfigure the proxy
 		p, proxyErr := newProxyByType(ds.ProxyType, ds.Type, ds.Config, ds.AllowedHosts, h.logger.With("datasource", ds.ID, "type", ds.Type))
 		if proxyErr != nil {
-			fail(ds, errCodeUnknownProxy, proxyErr)
+			fail(ds, errCodeUnknownProxy, proxyErr, true)
 			continue
 		}
 
 		if err := p.Configure(ds.Config, creds); err != nil {
-			fail(ds, errCodeConfigureFailed, err)
+			// Release whatever a partial Configure opened (pools, sockets).
+			_ = p.Close()
+			fail(ds, errCodeConfigureFailed, err, changedFromRunning(ds, creds))
 			continue
 		}
 
@@ -550,7 +743,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		if toStore != nil {
 			if err := h.credStore.SetBound(ds.ID, toStore.creds, toStore.host); err != nil {
 				_ = p.Close()
-				fail(ds, errCodeStoreFailed, err)
+				fail(ds, errCodeStoreFailed, err, changedFromRunning(ds, creds))
 				continue
 			}
 		}
@@ -564,6 +757,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 			CredentialRef:    ds.CredentialRef,
 		}
 		h.registry.Register(ds.ID, entry, p)
+		h.setRegisteredBinding(ds.ID, datasourceBinding(ds))
 		h.logger.Info("datasource configured", "id", ds.ID, "type", ds.Type, "proxy_type", ds.ProxyType)
 
 		result := datasourceResult{ID: ds.ID, Status: "ok"}
@@ -591,6 +785,7 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 		if !newIDs[id] && !strings.HasPrefix(id, "local:") {
 			h.logger.Info("removing datasource not in config", "id", id)
 			h.registry.Remove(id) // nolint:errcheck
+			h.setRegisteredBinding(id, "")
 		}
 	}
 	for _, id := range h.credStore.IDs() {
@@ -665,6 +860,7 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 			"action":     "test_datasource_config_result",
 			"request_id": requestID,
 			"success":    false,
+			"error_code": errCodeUnknownProxy,
 			"error":      proxyErr.Error(),
 		})
 	}

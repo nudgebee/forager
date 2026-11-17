@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -314,7 +315,7 @@ func sealedDatasource(t *testing.T, pubB64, id, baseURL string, creds map[string
 // pushedURL, so a test can present a blob for one host under another.
 func sealedDatasourceAt(t *testing.T, pubB64, id, sealedFor, pushedURL string, creds map[string]string) string {
 	t.Helper()
-	host := datasourceHost("http-proxy", map[string]any{"base_url": sealedFor})
+	host := datasourceBinding(pushedDatasource{ProxyType: "http-proxy", Config: map[string]any{"base_url": sealedFor}})
 	blob, keyID, err := secrets.SealCredentials(pubB64, id, host, creds)
 	if err != nil {
 		t.Fatalf("SealCredentials: %v", err)
@@ -337,7 +338,7 @@ func TestHandler_ConfigSync_SealedBlobBoundToDatasourceAndHost(t *testing.T) {
 	}
 
 	// Same blob content, pushed under a different datasource id.
-	host := datasourceHost("http-proxy", map[string]any{"base_url": "https://good.internal"})
+	host := datasourceBinding(pushedDatasource{ProxyType: "http-proxy", Config: map[string]any{"base_url": "https://good.internal"}})
 	blob, keyID, _ := secrets.SealCredentials(k.PublicKey(), "ds-a", host, creds)
 	otherID := `{"id":"ds-b","type":"grafana_tempo","proxy_type":"http-proxy","config":{"base_url":"https://good.internal"},` +
 		`"credential_source":"cloud_push","credentials_enc":"` + blob + `","enc_key_id":"` + keyID + `"}`
@@ -373,23 +374,69 @@ func TestHandler_ConfigSync_StoresCredentialsOnlyAfterConfigure(t *testing.T) {
 
 // An entry written before host binding (no host) is bound to the host of
 // its first reuse, after which a move without credentials is refused.
-func TestHandler_ConfigSync_LegacyUnboundEntryBoundOnFirstReuse(t *testing.T) {
+// An entry stored before bindings existed is not bound to whatever the first
+// sync names (trust on first use): it is reused only where the datasource is
+// registered right now, and bound to that.
+func TestHandler_ConfigSync_LegacyUnboundEntryOnlyWhereItRuns(t *testing.T) {
 	h := newTestHandler(t)
 	if err := h.credStore.Set("ds-old", map[string]string{"bearer_token": "tk"}); err != nil {
 		t.Fatal(err)
 	}
 	reuse := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
 		{"id":"ds-old","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"http://a.internal:9090"},"credential_source":"cloud_push"}]}`
-	if ack := syncAndParse(t, h, reuse); ack.Status != "ok" {
-		t.Fatalf("reuse %+v", ack)
+	if ack := syncAndParse(t, h, reuse); ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
+		t.Fatalf("an unbound entry must not bind to the first host it is asked for: %+v", ack)
 	}
-	if got := h.credStore.Host("ds-old"); got != "a.internal" {
+
+	h.setRegisteredBinding("ds-old", "http://a.internal:9090") // registered there by an earlier push
+	if ack := syncAndParse(t, h, reuse); ack.Status != "ok" {
+		t.Fatalf("reuse where it runs %+v", ack)
+	}
+	if got := h.credStore.Host("ds-old"); got != "http://a.internal:9090" {
 		t.Fatalf("legacy entry not bound on reuse: %q", got)
 	}
 	moved := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
 		{"id":"ds-old","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"http://b.internal:9090"},"credential_source":"cloud_push"}]}`
 	if ack := syncAndParse(t, h, moved); ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
 		t.Fatalf("moved %+v", ack)
+	}
+}
+
+// The binding is the origin: same host but another scheme or port must carry
+// the credentials, so a token never goes out in the clear or to another
+// service on the host.
+func TestHandler_ConfigSync_SchemeOrPortChangeNeedsCredentials(t *testing.T) {
+	h := newTestHandler(t)
+	first := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-o","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"https://prom.internal"},
+		 "credentials":{"bearer_token":"tk"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, first); ack.Status != "ok" {
+		t.Fatalf("first %+v", ack)
+	}
+	for _, u := range []string{"http://prom.internal", "https://prom.internal:8443"} {
+		moved := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+			{"id":"ds-o","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"` + u + `"},"credential_source":"cloud_push"}]}`
+		if ack := syncAndParse(t, h, moved); ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
+			t.Fatalf("%s: %+v", u, ack)
+		}
+	}
+}
+
+// A dynamic ssh scope may narrow without new credentials, never grow.
+func TestHandler_ConfigSync_SSHScopeCannotGrowWithStoredCredentials(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.credStore.SetBound("ds-ssh", map[string]string{"password": "p"}, "scope:10.0.0.1,10.0.0.2"); err != nil {
+		t.Fatal(err)
+	}
+	ds := pushedDatasource{ID: "ds-ssh", ProxyType: "ssh-proxy", Config: map[string]any{}, CredentialSource: "cloud_push"}
+
+	ds.AllowedHosts = []string{"10.0.0.1"}
+	if _, _, code, err := h.resolveCredentials(context.Background(), ds); err != nil {
+		t.Fatalf("narrowed scope should reuse: %s %v", code, err)
+	}
+	ds.AllowedHosts = []string{"10.0.0.1", "10.0.0.2", "10.9.9.9"}
+	if _, _, code, err := h.resolveCredentials(context.Background(), ds); err == nil || code != errCodeHostChanged {
+		t.Fatalf("grown scope must carry credentials: %s %v", code, err)
 	}
 }
 
@@ -422,7 +469,7 @@ func TestHandler_ConfigSync_EncryptedCredentials_StoredAndBound(t *testing.T) {
 	if !ok || creds["bearer_token"] != "tk_123" {
 		t.Fatalf("stored creds %v %v", creds, ok)
 	}
-	if got := h.credStore.Host("ds-enc"); got != "tempo.acme.internal" {
+	if got := h.credStore.Host("ds-enc"); got != "https://tempo.acme.internal:443" {
 		t.Fatalf("bound host %q", got)
 	}
 }
@@ -468,8 +515,8 @@ func TestHandler_ConfigSync_EncryptedCredentials_Refusals(t *testing.T) {
 }
 
 // A sync that moves a datasource to another host without carrying its
-// credentials cannot reuse the stored ones; the datasource keeps serving the
-// host the credentials were pushed for.
+// credentials cannot reuse the stored ones: the datasource stops serving,
+// and its stored credentials stay bound to the host they were pushed for.
 func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	h := newTestHandler(t)
 	first := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
@@ -495,11 +542,11 @@ func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	if ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
 		t.Fatalf("moved sync %+v", ack)
 	}
-	if got := h.credStore.Host("ds-1"); got != "prom.internal" {
+	if got := h.credStore.Host("ds-1"); got != "http://prom.internal:9090" {
 		t.Fatalf("stored host changed to %q", got)
 	}
-	if _, ok := h.registry.Get("ds-1"); !ok {
-		t.Fatal("the previous registration must survive a refused sync")
+	if _, ok := h.registry.Get("ds-1"); ok {
+		t.Fatal("a refused sync must not leave the previous registration serving")
 	}
 
 	// Other host WITH credentials: accepted and re-bound.
@@ -509,8 +556,46 @@ func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	if ack := syncAndParse(t, h, movedWithCreds); ack.Status != "ok" {
 		t.Fatalf("moved-with-creds sync %+v", ack)
 	}
-	if got := h.credStore.Host("ds-1"); got != "new.internal" {
+	if got := h.credStore.Host("ds-1"); got != "http://new.internal:9090" {
 		t.Fatalf("host not re-bound: %q", got)
+	}
+}
+
+// A datasource whose reconfigure fails stops serving: the proxy an earlier
+// sync registered would otherwise keep answering with the configuration and
+// credentials this sync replaced. The ack still reports the failure, and the
+// stored credentials stay for the next good sync.
+func TestHandler_ConfigSync_FailedReconfigureRemovesOldProxy(t *testing.T) {
+	h := newTestHandler(t)
+	good := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-a","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://localhost:1"},
+		 "credentials":{"bearer_token":"tk"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, good); ack.Status != "ok" {
+		t.Fatalf("first sync %+v", ack)
+	}
+	old, ok := h.registry.Get("ds-a")
+	if !ok {
+		t.Fatal("ds-a should be registered after the first sync")
+	}
+
+	// A rotation that carries new credentials but a base_url the http proxy
+	// refuses at Configure.
+	bad := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-a","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"ftp://localhost:1"},
+		 "credentials":{"bearer_token":"rotated"},"credential_source":"cloud_push"}]}`
+	ack := syncAndParse(t, h, bad)
+	if ack.Status != "partial" || len(ack.Datasources) != 1 ||
+		ack.Datasources[0].ID != "ds-a" || ack.Datasources[0].ErrorCode != errCodeConfigureFailed {
+		t.Fatalf("failed sync ack %+v", ack)
+	}
+	if _, ok := h.registry.Get("ds-a"); ok {
+		t.Fatal("a failed reconfigure must remove the previously registered proxy")
+	}
+	if _, err := old.HandleRequest(context.Background(), &proxy.ActionRequest{Method: "GET", URL: "/"}); err == nil {
+		t.Fatal("the removed proxy must be closed")
+	}
+	if _, ok := h.credStore.Get("ds-a"); ok {
+		t.Fatal("a failed push that carried credentials must drop the old ones, or the next sync serves the rotated-out token")
 	}
 }
 
@@ -588,30 +673,47 @@ func TestHandler_TestDatasourceConfig_EncryptedCredentials_NotStored(t *testing.
 	}
 }
 
-func TestDatasourceHost(t *testing.T) {
-	cases := []struct {
-		proxyType string
-		config    map[string]any
-		want      string
-	}{
-		{"http-proxy", map[string]any{"base_url": "https://Tempo.Acme.internal:3200/prefix"}, "tempo.acme.internal"},
-		{"mcp-proxy", map[string]any{"url": "http://mcp.local:8080/sse"}, "mcp.local"},
-		{"db-proxy", map[string]any{"host": "DB.internal", "port": 5432}, "db.internal"},
-		{"redis-proxy", map[string]any{"host": "cache.internal"}, "cache.internal"},
-		{"mongo-proxy", map[string]any{"host": "mongo.internal"}, "mongo.internal"},
-		{"ssh-proxy", map[string]any{"host": "Bastion"}, "bastion"},
-		{"kafka-proxy", map[string]any{"brokers": "b1:9092,b2:9092"}, "b1:9092,b2:9092"},
-		// Only the key the proxy dials counts: a sync cannot satisfy the
-		// check with one key and dial another.
-		{"mcp-proxy", map[string]any{"base_url": "http://good.internal", "url": "http://evil.example"}, "evil.example"},
-		{"http-proxy", map[string]any{"url": "http://evil.example"}, ""},
-		{"http-proxy", map[string]any{"base_url": "::not a url"}, ""},
-		{"ssh-proxy", map[string]any{"allowed_hosts": []string{"10.0.0.0/8"}}, ""},
-		{"http-proxy", map[string]any{}, ""},
+// The binding vectors are shared with api-server, which seals credentials
+// for the same value the forager checks.
+func TestDatasourceBinding_SharedVectors(t *testing.T) {
+	raw, err := os.ReadFile(filepath.Join("testdata", "datasource_binding_vectors.json"))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, tc := range cases {
-		if got := datasourceHost(tc.proxyType, tc.config); got != tc.want {
-			t.Errorf("%s %v: got %q want %q", tc.proxyType, tc.config, got, tc.want)
+	var file struct {
+		Vectors []struct {
+			ProxyType    string         `json:"proxy_type"`
+			Config       map[string]any `json:"config"`
+			AllowedHosts []string       `json:"allowed_hosts"`
+			Want         string         `json:"want"`
+		} `json:"vectors"`
+	}
+	if err := json.Unmarshal(raw, &file); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range file.Vectors {
+		got := datasourceBinding(pushedDatasource{ProxyType: v.ProxyType, Config: v.Config, AllowedHosts: v.AllowedHosts})
+		if got != v.Want {
+			t.Errorf("%s %v %v: got %q want %q", v.ProxyType, v.Config, v.AllowedHosts, got, v.Want)
+		}
+	}
+}
+
+func TestBindingAllows(t *testing.T) {
+	cases := []struct {
+		bound, current string
+		want           bool
+	}{
+		{"https://es:443", "https://es:443", true},
+		{"https://es:443", "http://es:80", false},
+		{"https://es:443", "https://es:9200", false},
+		{"scope:a,b,c", "scope:a,b", true},
+		{"scope:a,b", "scope:a,b,c", false},
+		{"scope:a", "a", false},
+	}
+	for _, c := range cases {
+		if got := bindingAllows(c.bound, c.current); got != c.want {
+			t.Errorf("bindingAllows(%q, %q) = %v, want %v", c.bound, c.current, got, c.want)
 		}
 	}
 }
@@ -941,5 +1043,23 @@ func TestHandler_LegacyHTTP_NoProxyIsCodedNotFound(t *testing.T) {
 	_ = json.Unmarshal(resp, &r)
 	if r.StatusCode != 404 || r.ErrorCode != proxy.ErrCodeDatasourceNotFound {
 		t.Fatalf("got %d %q", r.StatusCode, r.ErrorCode)
+	}
+}
+
+// A test whose proxy type is unknown reports an error code like every other
+// failure path.
+func TestHandler_TestDatasourceConfig_UnknownProxyTypeHasCode(t *testing.T) {
+	h := newTestHandler(t)
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"action":"test_datasource_config","request_id":"r","datasource":{"type":"x","proxy_type":"nope-proxy","config":{},"credential_source":"local"}}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var r struct {
+		Success   bool   `json:"success"`
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(resp, &r)
+	if r.Success || r.ErrorCode != errCodeUnknownProxy {
+		t.Fatalf("got %+v", r)
 	}
 }
