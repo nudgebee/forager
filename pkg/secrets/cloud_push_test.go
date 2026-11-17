@@ -132,6 +132,92 @@ func TestCloudPushStore_MultipleDatasources(t *testing.T) {
 	}
 }
 
+func TestCloudPushStore_HostBindingPersists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"bearer_token": "tk"}, "tempo.acme.internal"); err != nil {
+		t.Fatalf("SetBound: %v", err)
+	}
+	if err := store.Set("ds-2", map[string]string{"password": "p"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := reloaded.Host("ds-1"); got != "tempo.acme.internal" {
+		t.Fatalf("ds-1 host %q", got)
+	}
+	if got := reloaded.Host("ds-2"); got != "" {
+		t.Fatalf("ds-2 host %q, want none", got)
+	}
+	if got := reloaded.Host("missing"); got != "" {
+		t.Fatalf("missing host %q, want none", got)
+	}
+	if creds, ok := reloaded.Get("ds-1"); !ok || creds["bearer_token"] != "tk" {
+		t.Fatalf("ds-1 creds %v %v", creds, ok)
+	}
+}
+
+// A credentials.enc written before host binding (a bare map) still loads,
+// with every entry unbound.
+func TestCloudPushStore_LoadsLegacyFormat(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"ds-old":{"username":"u","password":"p"}}`)
+	encrypted, err := encryptAESGCM(store.key, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.enc"), encrypted, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload legacy: %v", err)
+	}
+	creds, ok := reloaded.Get("ds-old")
+	if !ok || creds["username"] != "u" {
+		t.Fatalf("legacy entry %v %v", creds, ok)
+	}
+	if reloaded.Host("ds-old") != "" {
+		t.Fatal("legacy entry must be unbound")
+	}
+
+	// The next write upgrades the file; a further reload reads the new format.
+	if err := reloaded.SetBound("ds-new", map[string]string{"a": "b"}, "h"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload upgraded: %v", err)
+	}
+	if _, ok := again.Get("ds-old"); !ok {
+		t.Fatal("legacy entry lost on upgrade")
+	}
+	if again.Host("ds-new") != "h" {
+		t.Fatal("new entry lost its host on upgrade")
+	}
+}
+
+func TestCloudPushStore_DeleteMissingIsNoop(t *testing.T) {
+	store, err := NewCloudPushStore(t.TempDir(), "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete("never-set"); err != nil {
+		t.Fatalf("Delete of a missing id: %v", err)
+	}
+}
+
 func TestEncryptDecryptAESGCM(t *testing.T) {
 	key := make([]byte, 32) // AES-256
 	for i := range key {

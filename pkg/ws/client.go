@@ -51,6 +51,25 @@ type InventoryReportFunc func() []DatasourceInventoryItem
 // Returns datasourceID → metadata map.
 type MetadataReportFunc func(ctx context.Context) map[string]map[string]any
 
+// AgentFacts is what the relay needs to know about this forager before
+// trusting it with credentials: whether it rejects unsigned messages, and
+// the key credentials must be sealed to. Sent in the greeting and repeated
+// on every health report so the relay's copy does not go stale.
+type AgentFacts struct {
+	SigningEnforced bool
+	EncPublicKey    string
+	EncKeyID        string
+}
+
+func (f AgentFacts) fields() map[string]any {
+	out := map[string]any{"signing_enforced": f.SigningEnforced}
+	if f.EncPublicKey != "" {
+		out["enc_public_key"] = f.EncPublicKey
+		out["enc_key_id"] = f.EncKeyID
+	}
+	return out
+}
+
 // Client manages the WebSocket connection to the relay server.
 type Client struct {
 	relayURL     string
@@ -61,6 +80,7 @@ type Client struct {
 	healthPeriod time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
+	facts        AgentFacts
 	healthNow    chan struct{} // triggers an immediate health report
 
 	conn   *websocket.Conn
@@ -113,6 +133,11 @@ func (c *Client) SetInventoryReporter(fn InventoryReportFunc) {
 // SetMetadataReporter sets the function called on connect to collect and send datasource metadata.
 func (c *Client) SetMetadataReporter(fn MetadataReportFunc) {
 	c.metadataFn = fn
+}
+
+// SetAgentFacts sets what the greeting and health reports say about this forager.
+func (c *Client) SetAgentFacts(f AgentFacts) {
+	c.facts = f
 }
 
 // Run connects and maintains the WebSocket connection with auto-reconnect.
@@ -220,7 +245,14 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 			"redis-proxy":     true,
 			"kafka-proxy":     true,
 			"discovery-proxy": true,
+			// Config sync extensions: credentials sealed to enc_public_key,
+			// and an ack that lists every datasource's outcome.
+			"credentials_enc":    true,
+			"per_datasource_ack": true,
 		},
+	}
+	for k, v := range c.facts.fields() {
+		greeting[k] = v
 	}
 	greetingBytes, _ := json.Marshal(greeting)
 	if err := conn.WriteMessage(websocket.TextMessage, greetingBytes); err != nil {
@@ -455,6 +487,9 @@ func (c *Client) sendHealthReport(ctx context.Context) {
 		"datasources":   report,
 		"agent_version": version.Version,
 		"agent_commit":  version.Commit,
+	}
+	for k, v := range c.facts.fields() {
+		msg[k] = v
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {

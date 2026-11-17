@@ -48,10 +48,20 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 		secrets.NewAzureKV(cfg.Azure.VaultURL, cfg.Azure.TenantID, cfg.Azure.ClientID, logger),
 	)
 
-	verifier, err := signing.NewVerifier(cfg.SigningPublicKey, logger)
+	var keyEntries []signing.PublicKeyEntry
+	for _, k := range cfg.SigningKeyEntries() {
+		keyEntries = append(keyEntries, signing.PublicKeyEntry{KeyID: k.KeyID, Key: k.Key})
+	}
+	verifier, err := signing.NewVerifierWithKeys(keyEntries, logger)
 	if err != nil {
 		return nil, fmt.Errorf("signing verifier: %w", err)
 	}
+
+	encKeys, err := secrets.LoadOrCreateEncKeypair(cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("encryption key: %w", err)
+	}
+	logger.Info("credential encryption key ready", "enc_key_id", encKeys.KeyID())
 
 	registry := proxy.NewRegistry()
 
@@ -60,7 +70,13 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 	}
 
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
+	handler.SetEncKeypair(encKeys)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
+	client.SetAgentFacts(ws.AgentFacts{
+		SigningEnforced: verifier.Enabled(),
+		EncPublicKey:    encKeys.PublicKey(),
+		EncKeyID:        encKeys.KeyID(),
+	})
 
 	handler.SetOnConfigSynced(client.TriggerHealthReport)
 

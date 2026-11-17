@@ -21,13 +21,35 @@ type Config struct {
 	HealthCheckIntervalMin int `mapstructure:"health_check_interval_min"`
 
 	// Message signing: base64-encoded Ed25519 public key for verifying relay messages.
-	// If empty, signature verification is disabled (warn-only mode).
+	// If empty and signing_public_keys is empty, signature verification is
+	// disabled (warn-only mode).
 	SigningPublicKey string `mapstructure:"signing_public_key"`
+
+	// SigningPublicKeys lists further verification keys, each with the key_id
+	// the relay signs with, so a relay key can be rotated: add the new key
+	// here, switch the relay, then remove the old one.
+	SigningPublicKeys []SigningKey `mapstructure:"signing_public_keys"`
 
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
 	Azure AzureConfig `mapstructure:"azure"`
+}
+
+// SigningKey is one entry of signing_public_keys.
+type SigningKey struct {
+	KeyID string `mapstructure:"key_id"`
+	Key   string `mapstructure:"key"`
+}
+
+// SigningKeyEntries is every configured verification key: the single
+// signing_public_key (no key id) followed by signing_public_keys.
+func (c *Config) SigningKeyEntries() []SigningKey {
+	var out []SigningKey
+	if c.SigningPublicKey != "" {
+		out = append(out, SigningKey{Key: c.SigningPublicKey})
+	}
+	return append(out, c.SigningPublicKeys...)
 }
 
 // DiscoveryDatasource configures a discovery datasource from local YAML.

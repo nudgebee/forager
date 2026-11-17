@@ -267,6 +267,355 @@ func TestHandler_ConfigSync_CloudPushCredentials(t *testing.T) {
 	}
 }
 
+// syncAck is the per-datasource ack a config sync returns.
+type syncAck struct {
+	Action      string `json:"action"`
+	Status      string `json:"status"`
+	Datasources []struct {
+		ID        string `json:"id"`
+		Status    string `json:"status"`
+		ErrorCode string `json:"error_code"`
+		Error     string `json:"error"`
+	} `json:"datasources"`
+}
+
+func syncAndParse(t *testing.T, h *Handler, msg string) syncAck {
+	t.Helper()
+	resp, err := h.HandleMessage(context.Background(), []byte(msg))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var ack syncAck
+	if err := json.Unmarshal(resp, &ack); err != nil {
+		t.Fatalf("unmarshal ack: %v", err)
+	}
+	return ack
+}
+
+func newTestHandlerWithKey(t *testing.T) (*Handler, *secrets.EncKeypair) {
+	t.Helper()
+	h := newTestHandler(t)
+	k, err := secrets.LoadOrCreateEncKeypair(t.TempDir())
+	if err != nil {
+		t.Fatalf("LoadOrCreateEncKeypair: %v", err)
+	}
+	h.SetEncKeypair(k)
+	return h, k
+}
+
+// sealedDatasource is an http-proxy datasource whose credentials are sealed for
+// id and the host of baseURL — the way api-server seals them at save time.
+func sealedDatasource(t *testing.T, pubB64, id, baseURL string, creds map[string]string) string {
+	t.Helper()
+	return sealedDatasourceAt(t, pubB64, id, baseURL, baseURL, creds)
+}
+
+// sealedDatasourceAt seals for the host of sealedFor but pushes base_url
+// pushedURL, so a test can present a blob for one host under another.
+func sealedDatasourceAt(t *testing.T, pubB64, id, sealedFor, pushedURL string, creds map[string]string) string {
+	t.Helper()
+	host := datasourceHost("http-proxy", map[string]any{"base_url": sealedFor})
+	blob, keyID, err := secrets.SealCredentials(pubB64, id, host, creds)
+	if err != nil {
+		t.Fatalf("SealCredentials: %v", err)
+	}
+	return `{"id":"` + id + `","type":"grafana_tempo","proxy_type":"http-proxy","name":"t",` +
+		`"config":{"base_url":"` + pushedURL + `"},"credential_source":"cloud_push",` +
+		`"credentials_enc":"` + blob + `","enc_key_id":"` + keyID + `"}`
+}
+
+// A captured blob replayed for another host or under another datasource id
+// is refused: the id and host are sealed with the credentials.
+func TestHandler_ConfigSync_SealedBlobBoundToDatasourceAndHost(t *testing.T) {
+	h, k := newTestHandlerWithKey(t)
+	creds := map[string]string{"bearer_token": "tk"}
+
+	otherHost := sealedDatasourceAt(t, k.PublicKey(), "ds-a", "https://good.internal", "https://evil.example", creds)
+	ack := syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[`+otherHost+`]}`)
+	if ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeSealedForOther {
+		t.Fatalf("other host: ack %+v", ack)
+	}
+
+	// Same blob content, pushed under a different datasource id.
+	host := datasourceHost("http-proxy", map[string]any{"base_url": "https://good.internal"})
+	blob, keyID, _ := secrets.SealCredentials(k.PublicKey(), "ds-a", host, creds)
+	otherID := `{"id":"ds-b","type":"grafana_tempo","proxy_type":"http-proxy","config":{"base_url":"https://good.internal"},` +
+		`"credential_source":"cloud_push","credentials_enc":"` + blob + `","enc_key_id":"` + keyID + `"}`
+	ack = syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[`+otherID+`]}`)
+	if ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeSealedForOther {
+		t.Fatalf("other id: ack %+v", ack)
+	}
+
+	for _, id := range []string{"ds-a", "ds-b"} {
+		if _, ok := h.credStore.Get(id); ok {
+			t.Fatalf("%s: refused blob must store nothing", id)
+		}
+		if _, ok := h.registry.Get(id); ok {
+			t.Fatalf("%s: refused blob must not register", id)
+		}
+	}
+}
+
+// Credentials are persisted only once a proxy accepted them, so a failed
+// configure leaves nothing a later stored-credential fallback could use.
+func TestHandler_ConfigSync_StoresCredentialsOnlyAfterConfigure(t *testing.T) {
+	h := newTestHandler(t)
+	ack := syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-fail","type":"unknown","proxy_type":"grpc-proxy","config":{"host":"x"},
+		 "credentials":{"password":"p"},"credential_source":"cloud_push"}]}`)
+	if ack.Status != "partial" {
+		t.Fatalf("ack %+v", ack)
+	}
+	if _, ok := h.credStore.Get("ds-fail"); ok {
+		t.Fatal("credentials of a datasource that never configured must not be stored")
+	}
+}
+
+// An entry written before host binding (no host) is bound to the host of
+// its first reuse, after which a move without credentials is refused.
+func TestHandler_ConfigSync_LegacyUnboundEntryBoundOnFirstReuse(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.credStore.Set("ds-old", map[string]string{"bearer_token": "tk"}); err != nil {
+		t.Fatal(err)
+	}
+	reuse := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-old","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"http://a.internal:9090"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, reuse); ack.Status != "ok" {
+		t.Fatalf("reuse %+v", ack)
+	}
+	if got := h.credStore.Host("ds-old"); got != "a.internal" {
+		t.Fatalf("legacy entry not bound on reuse: %q", got)
+	}
+	moved := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-old","type":"prometheus","proxy_type":"http-proxy","config":{"base_url":"http://b.internal:9090"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, moved); ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
+		t.Fatalf("moved %+v", ack)
+	}
+}
+
+// Stored credentials of a datasource that never registered are deleted when
+// a sync does not list it, like those of a registered one.
+func TestHandler_ConfigSync_DeletesOrphanStoredCredentials(t *testing.T) {
+	h := newTestHandler(t)
+	if err := h.credStore.Set("ds-orphan", map[string]string{"password": "p"}); err != nil {
+		t.Fatal(err)
+	}
+	syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[]}`)
+	if _, ok := h.credStore.Get("ds-orphan"); ok {
+		t.Fatal("orphan stored credentials must be deleted")
+	}
+}
+
+func TestHandler_ConfigSync_EncryptedCredentials_StoredAndBound(t *testing.T) {
+	h, k := newTestHandlerWithKey(t)
+	msg := `{"action":"datasource_config_sync","account_id":"acc","datasources":[` +
+		sealedDatasource(t, k.PublicKey(), "ds-enc", "https://tempo.acme.internal", map[string]string{"bearer_token": "tk_123"}) + `]}`
+
+	ack := syncAndParse(t, h, msg)
+	if ack.Status != "ok" || len(ack.Datasources) != 1 || ack.Datasources[0].Status != "ok" {
+		t.Fatalf("ack %+v", ack)
+	}
+	if _, ok := h.registry.Get("ds-enc"); !ok {
+		t.Fatal("datasource not registered")
+	}
+	creds, ok := h.credStore.Get("ds-enc")
+	if !ok || creds["bearer_token"] != "tk_123" {
+		t.Fatalf("stored creds %v %v", creds, ok)
+	}
+	if got := h.credStore.Host("ds-enc"); got != "tempo.acme.internal" {
+		t.Fatalf("bound host %q", got)
+	}
+}
+
+func TestHandler_ConfigSync_EncryptedCredentials_Refusals(t *testing.T) {
+	h, k := newTestHandlerWithKey(t)
+	other, err := secrets.LoadOrCreateEncKeypair(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cases := []struct {
+		name     string
+		ds       string
+		wantCode string
+	}{
+		{"sealed to another key", sealedDatasource(t, other.PublicKey(), "ds-x", "http://localhost:1", map[string]string{"a": "b"}), errCodeKeyMismatch},
+		{"garbage blob", `{"id":"ds-x","type":"grafana_tempo","proxy_type":"http-proxy","config":{"base_url":"http://localhost:1"},"credential_source":"cloud_push","credentials_enc":"AAAA"}`, errCodeDecryptFailed},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ack := syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[`+tc.ds+`]}`)
+			if ack.Status != "partial" || len(ack.Datasources) != 1 || ack.Datasources[0].ErrorCode != tc.wantCode {
+				t.Fatalf("ack %+v, want error_code %s", ack, tc.wantCode)
+			}
+			if _, ok := h.registry.Get("ds-x"); ok {
+				t.Fatal("refused datasource must not be registered")
+			}
+			if _, ok := h.credStore.Get("ds-x"); ok {
+				t.Fatal("refused datasource must store nothing")
+			}
+		})
+	}
+
+	t.Run("forager without an encryption key", func(t *testing.T) {
+		noKey := newTestHandler(t)
+		ack := syncAndParse(t, noKey, `{"action":"datasource_config_sync","account_id":"acc","datasources":[`+
+			sealedDatasource(t, k.PublicKey(), "ds-x", "http://localhost:1", map[string]string{"a": "b"})+`]}`)
+		if ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeNoEncryptionKey {
+			t.Fatalf("ack %+v", ack)
+		}
+	})
+}
+
+// A sync that moves a datasource to another host without carrying its
+// credentials cannot reuse the stored ones; the datasource keeps serving the
+// host the credentials were pushed for.
+func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
+	h := newTestHandler(t)
+	first := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-1","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://prom.internal:9090"},
+		 "credentials":{"bearer_token":"tk"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, first); ack.Status != "ok" {
+		t.Fatalf("first sync %+v", ack)
+	}
+
+	// Same host, no credentials: reused.
+	same := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-1","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://PROM.internal:9090/prefix"},
+		 "credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, same); ack.Status != "ok" {
+		t.Fatalf("same-host sync %+v", ack)
+	}
+
+	// Other host, no credentials: refused, stored credentials untouched.
+	moved := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-1","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://attacker.example:9090"},
+		 "credential_source":"cloud_push"}]}`
+	ack := syncAndParse(t, h, moved)
+	if ack.Status != "partial" || ack.Datasources[0].ErrorCode != errCodeHostChanged {
+		t.Fatalf("moved sync %+v", ack)
+	}
+	if got := h.credStore.Host("ds-1"); got != "prom.internal" {
+		t.Fatalf("stored host changed to %q", got)
+	}
+	if _, ok := h.registry.Get("ds-1"); !ok {
+		t.Fatal("the previous registration must survive a refused sync")
+	}
+
+	// Other host WITH credentials: accepted and re-bound.
+	movedWithCreds := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-1","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://new.internal:9090"},
+		 "credentials":{"bearer_token":"tk2"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, movedWithCreds); ack.Status != "ok" {
+		t.Fatalf("moved-with-creds sync %+v", ack)
+	}
+	if got := h.credStore.Host("ds-1"); got != "new.internal" {
+		t.Fatalf("host not re-bound: %q", got)
+	}
+}
+
+func TestHandler_ConfigSync_RemovalDeletesStoredCredentials(t *testing.T) {
+	h := newTestHandler(t)
+	with := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-gone","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://localhost:1"},
+		 "credentials":{"password":"p"},"credential_source":"cloud_push"}]}`
+	syncAndParse(t, h, with)
+	if _, ok := h.credStore.Get("ds-gone"); !ok {
+		t.Fatal("credentials should be stored after the first sync")
+	}
+
+	syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[]}`)
+	if _, ok := h.registry.Get("ds-gone"); ok {
+		t.Fatal("datasource should be removed")
+	}
+	if _, ok := h.credStore.Get("ds-gone"); ok {
+		t.Fatal("stored credentials must be deleted with the datasource")
+	}
+}
+
+func TestHandler_ConfigSync_AckListsEveryDatasource(t *testing.T) {
+	h := newTestHandler(t)
+	ack := syncAndParse(t, h, `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-ok","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://localhost:1"},"credential_source":"cloud_push"},
+		{"id":"ds-bad","type":"unknown","proxy_type":"grpc-proxy","name":"b","config":{},"credential_source":"cloud_push"}]}`)
+	if ack.Status != "partial" {
+		t.Fatalf("status %q", ack.Status)
+	}
+	if len(ack.Datasources) != 2 {
+		t.Fatalf("want 2 results, got %d", len(ack.Datasources))
+	}
+	byID := map[string]string{}
+	for _, d := range ack.Datasources {
+		byID[d.ID] = d.Status + "/" + d.ErrorCode
+	}
+	if byID["ds-ok"] != "ok/" || byID["ds-bad"] != "error/"+errCodeUnknownProxy {
+		t.Fatalf("results %v", byID)
+	}
+}
+
+func TestHandler_TestDatasourceConfig_EncryptedCredentials_NotStored(t *testing.T) {
+	h, k := newTestHandlerWithKey(t)
+	resp, err := h.HandleMessage(context.Background(), []byte(`{"action":"test_datasource_config","request_id":"r","datasource":`+
+		sealedDatasource(t, k.PublicKey(), "ds-test", "http://localhost:1", map[string]string{"bearer_token": "tk"})+`}`))
+	if err != nil {
+		t.Fatalf("HandleMessage: %v", err)
+	}
+	var r struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+	_ = json.Unmarshal(resp, &r)
+	if !r.Success {
+		t.Fatalf("test should pass for an http-proxy that does not dial: %s", r.Error)
+	}
+	if _, ok := h.credStore.Get("ds-test"); ok {
+		t.Fatal("a test must not store credentials")
+	}
+	if _, ok := h.registry.Get("ds-test"); ok {
+		t.Fatal("a test must not register the datasource")
+	}
+
+	other, _ := secrets.LoadOrCreateEncKeypair(t.TempDir())
+	resp, _ = h.HandleMessage(context.Background(), []byte(`{"action":"test_datasource_config","request_id":"r","datasource":`+
+		sealedDatasource(t, other.PublicKey(), "ds-test", "http://localhost:1", map[string]string{"bearer_token": "tk"})+`}`))
+	var bad struct {
+		Success   bool   `json:"success"`
+		ErrorCode string `json:"error_code"`
+	}
+	_ = json.Unmarshal(resp, &bad)
+	if bad.Success || bad.ErrorCode != errCodeKeyMismatch {
+		t.Fatalf("want key_mismatch failure, got %+v", bad)
+	}
+}
+
+func TestDatasourceHost(t *testing.T) {
+	cases := []struct {
+		proxyType string
+		config    map[string]any
+		want      string
+	}{
+		{"http-proxy", map[string]any{"base_url": "https://Tempo.Acme.internal:3200/prefix"}, "tempo.acme.internal"},
+		{"mcp-proxy", map[string]any{"url": "http://mcp.local:8080/sse"}, "mcp.local"},
+		{"db-proxy", map[string]any{"host": "DB.internal", "port": 5432}, "db.internal"},
+		{"redis-proxy", map[string]any{"host": "cache.internal"}, "cache.internal"},
+		{"mongo-proxy", map[string]any{"host": "mongo.internal"}, "mongo.internal"},
+		{"ssh-proxy", map[string]any{"host": "Bastion"}, "bastion"},
+		{"kafka-proxy", map[string]any{"brokers": "b1:9092,b2:9092"}, "b1:9092,b2:9092"},
+		// Only the key the proxy dials counts: a sync cannot satisfy the
+		// check with one key and dial another.
+		{"mcp-proxy", map[string]any{"base_url": "http://good.internal", "url": "http://evil.example"}, "evil.example"},
+		{"http-proxy", map[string]any{"url": "http://evil.example"}, ""},
+		{"http-proxy", map[string]any{"base_url": "::not a url"}, ""},
+		{"ssh-proxy", map[string]any{"allowed_hosts": []string{"10.0.0.0/8"}}, ""},
+		{"http-proxy", map[string]any{}, ""},
+	}
+	for _, tc := range cases {
+		if got := datasourceHost(tc.proxyType, tc.config); got != tc.want {
+			t.Errorf("%s %v: got %q want %q", tc.proxyType, tc.config, got, tc.want)
+		}
+	}
+}
+
 func TestHandler_ConfigSync_PreservesLocalDatasources(t *testing.T) {
 	h := newTestHandler(t)
 

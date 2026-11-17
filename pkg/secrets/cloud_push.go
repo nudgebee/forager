@@ -15,12 +15,33 @@ import (
 
 // CloudPushStore manages credentials pushed from Nudgebee cloud.
 // Credentials are stored encrypted on disk and in memory.
+//
+// Each entry remembers the host its credentials were pushed for. A later
+// sync that names a different host but carries no credentials must not reuse
+// them: that is how a forged sync would point a stored token at another
+// server (see Handler.handleConfigSync).
 type CloudPushStore struct {
 	mu       sync.RWMutex
-	creds    map[string]map[string]string // datasourceID → {key: value}
+	entries  map[string]credEntry // datasourceID → entry
 	filePath string
 	key      []byte // AES-256 key derived from access_secret
 }
+
+type credEntry struct {
+	Creds map[string]string `json:"creds"`
+	// Host is the host the credentials belong to ("" for entries written
+	// before host binding existed).
+	Host string `json:"host,omitempty"`
+}
+
+// diskFormat is what credentials.enc holds once decrypted. Version 1 was a
+// bare map of datasource id → credentials; loadFromDisk still reads it.
+type diskFormat struct {
+	Version int                  `json:"v"`
+	Entries map[string]credEntry `json:"entries"`
+}
+
+const diskFormatVersion = 2
 
 // NewCloudPushStore creates a credential store for cloud-pushed credentials.
 func NewCloudPushStore(dataDir, accessSecret string) (*CloudPushStore, error) {
@@ -28,7 +49,7 @@ func NewCloudPushStore(dataDir, accessSecret string) (*CloudPushStore, error) {
 	hash := sha256.Sum256([]byte(accessSecret))
 
 	store := &CloudPushStore{
-		creds:    make(map[string]map[string]string),
+		entries:  make(map[string]credEntry),
 		filePath: filepath.Join(dataDir, "credentials.enc"),
 		key:      hash[:],
 	}
@@ -44,12 +65,17 @@ func NewCloudPushStore(dataDir, accessSecret string) (*CloudPushStore, error) {
 	return store, nil
 }
 
-// Set stores credentials for a datasource (in memory + disk).
+// Set stores credentials for a datasource (in memory + disk) with no host binding.
 func (s *CloudPushStore) Set(datasourceID string, creds map[string]string) error {
+	return s.SetBound(datasourceID, creds, "")
+}
+
+// SetBound stores credentials for a datasource and the host they are for.
+func (s *CloudPushStore) SetBound(datasourceID string, creds map[string]string, host string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.creds[datasourceID] = creds
+	s.entries[datasourceID] = credEntry{Creds: creds, Host: host}
 	return s.saveToDisk()
 }
 
@@ -58,8 +84,31 @@ func (s *CloudPushStore) Get(datasourceID string) (map[string]string, bool) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
-	creds, ok := s.creds[datasourceID]
-	return creds, ok
+	e, ok := s.entries[datasourceID]
+	return e.Creds, ok
+}
+
+// Host returns the host a datasource's credentials were stored for, or ""
+// when unknown (no entry, or one written before host binding).
+func (s *CloudPushStore) Host(datasourceID string) string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	return s.entries[datasourceID].Host
+}
+
+// IDs lists every datasource with stored credentials, so a sync can delete
+// entries for datasources that never registered (a failed configure) as
+// well as registered ones.
+func (s *CloudPushStore) IDs() []string {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+
+	ids := make([]string, 0, len(s.entries))
+	for id := range s.entries {
+		ids = append(ids, id)
+	}
+	return ids
 }
 
 // Delete removes credentials for a datasource.
@@ -67,13 +116,16 @@ func (s *CloudPushStore) Delete(datasourceID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	delete(s.creds, datasourceID)
+	if _, ok := s.entries[datasourceID]; !ok {
+		return nil
+	}
+	delete(s.entries, datasourceID)
 	return s.saveToDisk()
 }
 
 // saveToDisk encrypts and writes all credentials to the file.
 func (s *CloudPushStore) saveToDisk() error {
-	plaintext, err := json.Marshal(s.creds)
+	plaintext, err := json.Marshal(diskFormat{Version: diskFormatVersion, Entries: s.entries})
 	if err != nil {
 		return fmt.Errorf("marshaling credentials: %w", err)
 	}
@@ -91,7 +143,8 @@ func (s *CloudPushStore) saveToDisk() error {
 	return os.WriteFile(s.filePath, encrypted, 0600)
 }
 
-// loadFromDisk decrypts and loads credentials from the file.
+// loadFromDisk decrypts and loads credentials from the file, accepting both
+// the current format and the version-1 bare map.
 func (s *CloudPushStore) loadFromDisk() error {
 	data, err := os.ReadFile(s.filePath)
 	if err != nil {
@@ -103,7 +156,24 @@ func (s *CloudPushStore) loadFromDisk() error {
 		return fmt.Errorf("decrypting: %w", err)
 	}
 
-	return json.Unmarshal(plaintext, &s.creds)
+	var current diskFormat
+	if err := json.Unmarshal(plaintext, &current); err == nil && current.Version == diskFormatVersion {
+		if current.Entries == nil {
+			current.Entries = make(map[string]credEntry)
+		}
+		s.entries = current.Entries
+		return nil
+	}
+
+	var legacy map[string]map[string]string
+	if err := json.Unmarshal(plaintext, &legacy); err != nil {
+		return fmt.Errorf("credentials file is neither the current nor the legacy format: %w", err)
+	}
+	s.entries = make(map[string]credEntry, len(legacy))
+	for id, creds := range legacy {
+		s.entries[id] = credEntry{Creds: creds}
+	}
+	return nil
 }
 
 func encryptAESGCM(key, plaintext []byte) ([]byte, error) {
