@@ -31,37 +31,54 @@ const (
 // indexed array leaves) so no JSON parser is required on the target host.
 // Each attempt is capped at 1s and short-circuits on the first cloud that
 // answers, so a non-cloud host pays at most ~3s total before this prints
-// nothing. Output is unparsed key=value lines, one block for whichever
+// nothing.
+//
+// Every curl uses -f so an HTTP error yields empty output rather than the
+// error page body: Azure's IMDS listens on the same 169.254.169.254 address as
+// AWS's and answers the AWS paths with a 404 HTML page, which without -f was
+// captured as an "instance ID" and reported as provider=aws. As a second
+// guard, an ID is only accepted when it has the provider's shape (AWS
+// i-<hex>, GCP all digits), so an unexpected 200 with junk falls through to
+// the next provider instead of identifying the host wrongly.
+//
+// Output is unparsed key=value lines, one block for whichever
 // provider matched; parsing lives server-side (see resolveOneTarget in
 // nudgebee-enterprise's vmpackage/resource_match.go) so a parser fix never
 // requires an agent release.
 const cloudIdentityProbeCmd = `
-TOKEN=$(curl -s -m 1 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
-AWS_ID=$(curl -s -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+TOKEN=$(curl -sf -m 1 -X PUT http://169.254.169.254/latest/api/token -H "X-aws-ec2-metadata-token-ttl-seconds: 60" 2>/dev/null)
+AWS_ID=$(curl -sf -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null)
+case "$AWS_ID" in
+  i-?*) case "${AWS_ID#i-}" in *[!0-9a-f]*) AWS_ID="" ;; esac ;;
+  *) AWS_ID="" ;;
+esac
 if [ -n "$AWS_ID" ]; then
   echo "provider=aws"
   echo "instance_id=$AWS_ID"
-  echo "region=$(curl -s -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)"
-  echo "public_ip=$(curl -s -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)"
+  echo "region=$(curl -sf -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null)"
+  echo "public_ip=$(curl -sf -m 1 -H "X-aws-ec2-metadata-token: $TOKEN" http://169.254.169.254/latest/meta-data/public-ipv4 2>/dev/null)"
   exit 0
 fi
-GCP_ID=$(curl -s -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id 2>/dev/null)
+GCP_ID=$(curl -sf -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/id 2>/dev/null)
+case "$GCP_ID" in
+  *[!0-9]*) GCP_ID="" ;;
+esac
 if [ -n "$GCP_ID" ]; then
-  ZONE_PATH=$(curl -s -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null)
+  ZONE_PATH=$(curl -sf -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/zone 2>/dev/null)
   echo "provider=gcp"
   echo "instance_id=$GCP_ID"
   echo "zone=${ZONE_PATH##*/}"
-  echo "public_ip=$(curl -s -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null)"
+  echo "public_ip=$(curl -sf -m 1 -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/external-ip 2>/dev/null)"
   exit 0
 fi
-AZ_NAME=$(curl -s -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" 2>/dev/null)
+AZ_NAME=$(curl -sf -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/name?api-version=2021-02-01&format=text" 2>/dev/null)
 if [ -n "$AZ_NAME" ]; then
   echo "provider=azure"
-  echo "subscription_id=$(curl -s -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/subscriptionId?api-version=2021-02-01&format=text" 2>/dev/null)"
-  echo "resource_group=$(curl -s -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" 2>/dev/null)"
+  echo "subscription_id=$(curl -sf -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/subscriptionId?api-version=2021-02-01&format=text" 2>/dev/null)"
+  echo "resource_group=$(curl -sf -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/resourceGroupName?api-version=2021-02-01&format=text" 2>/dev/null)"
   echo "name=$AZ_NAME"
-  echo "location=$(curl -s -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text" 2>/dev/null)"
-  echo "public_ip=$(curl -s -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" 2>/dev/null)"
+  echo "location=$(curl -sf -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/compute/location?api-version=2021-02-01&format=text" 2>/dev/null)"
+  echo "public_ip=$(curl -sf -m 1 -H "Metadata: true" "http://169.254.169.254/metadata/instance/network/interface/0/ipv4/ipAddress/0/publicIpAddress?api-version=2021-02-01&format=text" 2>/dev/null)"
 fi
 `
 
