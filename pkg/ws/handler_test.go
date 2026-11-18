@@ -469,8 +469,8 @@ func TestHandler_ConfigSync_EncryptedCredentials_Refusals(t *testing.T) {
 }
 
 // A sync that moves a datasource to another host without carrying its
-// credentials cannot reuse the stored ones; the datasource keeps serving the
-// host the credentials were pushed for.
+// credentials cannot reuse the stored ones: the datasource stops serving,
+// and its stored credentials stay bound to the host they were pushed for.
 func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	h := newTestHandler(t)
 	first := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
@@ -499,8 +499,8 @@ func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	if got := h.credStore.Host("ds-1"); got != "prom.internal" {
 		t.Fatalf("stored host changed to %q", got)
 	}
-	if _, ok := h.registry.Get("ds-1"); !ok {
-		t.Fatal("the previous registration must survive a refused sync")
+	if _, ok := h.registry.Get("ds-1"); ok {
+		t.Fatal("a refused sync must not leave the previous registration serving")
 	}
 
 	// Other host WITH credentials: accepted and re-bound.
@@ -512,6 +512,43 @@ func TestHandler_ConfigSync_StoredCredentialsBoundToHost(t *testing.T) {
 	}
 	if got := h.credStore.Host("ds-1"); got != "new.internal" {
 		t.Fatalf("host not re-bound: %q", got)
+	}
+}
+
+// A datasource whose reconfigure fails stops serving: the proxy an earlier
+// sync registered would otherwise keep answering with the configuration and
+// credentials this sync replaced. The ack still reports the failure, and the
+// stored credentials stay for the next good sync.
+func TestHandler_ConfigSync_FailedReconfigureRemovesOldProxy(t *testing.T) {
+	h := newTestHandler(t)
+	good := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-a","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"http://localhost:1"},
+		 "credentials":{"bearer_token":"tk"},"credential_source":"cloud_push"}]}`
+	if ack := syncAndParse(t, h, good); ack.Status != "ok" {
+		t.Fatalf("first sync %+v", ack)
+	}
+	old, ok := h.registry.Get("ds-a")
+	if !ok {
+		t.Fatal("ds-a should be registered after the first sync")
+	}
+
+	// Same host, but a base_url the http proxy refuses at Configure.
+	bad := `{"action":"datasource_config_sync","account_id":"acc","datasources":[
+		{"id":"ds-a","type":"prometheus","proxy_type":"http-proxy","name":"a","config":{"base_url":"ftp://localhost:1"},
+		 "credential_source":"cloud_push"}]}`
+	ack := syncAndParse(t, h, bad)
+	if ack.Status != "partial" || len(ack.Datasources) != 1 ||
+		ack.Datasources[0].ID != "ds-a" || ack.Datasources[0].ErrorCode != errCodeConfigureFailed {
+		t.Fatalf("failed sync ack %+v", ack)
+	}
+	if _, ok := h.registry.Get("ds-a"); ok {
+		t.Fatal("a failed reconfigure must remove the previously registered proxy")
+	}
+	if _, err := old.HandleRequest(context.Background(), &proxy.ActionRequest{Method: "GET", URL: "/"}); err == nil {
+		t.Fatal("the removed proxy must be closed")
+	}
+	if _, ok := h.credStore.Get("ds-a"); !ok {
+		t.Fatal("stored credentials should survive a failed reconfigure")
 	}
 }
 

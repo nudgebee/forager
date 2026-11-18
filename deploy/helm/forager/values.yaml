@@ -25,6 +25,10 @@ forager:
   accessKey: ''
   accessSecret: ''
   dataDir: /data
+  # Base64 of the 32-byte X25519 key pushed credentials are sealed to; every
+  # replica reads the same one. Empty: generated on install and kept across
+  # upgrades. Changing it makes Nudgebee re-push every credential.
+  encPrivateKey: ''
   signingPublicKey: ''
 
 resources:

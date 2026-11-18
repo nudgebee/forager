@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"golang.org/x/crypto/curve25519"
 	"golang.org/x/crypto/nacl/box"
@@ -19,8 +20,9 @@ import (
 // credentials to the public key as a NaCl sealed box, so relay-server and the
 // message broker carry only a blob that nothing but this process can open.
 //
-// The private key is created on first start, kept beside credentials.enc and
-// never sent anywhere. The public key goes up in the greeting; Nudgebee
+// The private key comes from configuration (shared by every replica of one
+// forager identity) or, for a single instance, is created on first start and
+// kept beside credentials.enc. It is never sent anywhere. The public key goes up in the greeting; Nudgebee
 // encrypts to it and names it by EncKeyID so a push meant for another key
 // (a reinstall, a second forager) is refused with a clear reason instead of
 // a decryption failure.
@@ -52,39 +54,107 @@ type sealedCredentials struct {
 
 const sealedCredentialsVersion = 1
 
+// EncKeySource says where LoadEncKeypair found the private key.
+type EncKeySource string
+
+const (
+	EncKeyFromConfig  EncKeySource = "enc_private_key"
+	EncKeyFromFile    EncKeySource = "enc_private_key_file"
+	EncKeyFromDataDir EncKeySource = "data_dir"
+	EncKeyGenerated   EncKeySource = "generated"
+)
+
+// LoadEncKeypair picks the private key in this order: the configured key
+// (base64 of 32 bytes), the configured key file (base64, or the 32 raw
+// bytes), dataDir/enc_key, and only then a newly generated key written to
+// dataDir/enc_key. Replicas of one forager identity must all open the same
+// pushes, so they share a configured key; generating is the single-instance
+// fallback. A configured key that is malformed is an error, never a reason
+// to fall through to another source.
+func LoadEncKeypair(configuredKey, keyFile, dataDir string) (*EncKeypair, EncKeySource, error) {
+	switch {
+	case configuredKey != "":
+		priv, err := decodeEncPrivateKey([]byte(configuredKey))
+		if err != nil {
+			return nil, "", fmt.Errorf("enc_private_key: %w", err)
+		}
+		k, err := keypairFromPrivate(priv)
+		return k, EncKeyFromConfig, err
+	case keyFile != "":
+		raw, err := os.ReadFile(keyFile)
+		if err != nil {
+			return nil, "", fmt.Errorf("enc_private_key_file: %w", err)
+		}
+		var priv *[32]byte
+		if len(raw) == 32 {
+			priv = new([32]byte)
+			copy(priv[:], raw)
+		} else if priv, err = decodeEncPrivateKey(raw); err != nil {
+			return nil, "", fmt.Errorf("enc_private_key_file %s: %w", keyFile, err)
+		}
+		k, err := keypairFromPrivate(priv)
+		return k, EncKeyFromFile, err
+	}
+	k, generated, err := loadOrCreateEncKeypair(dataDir)
+	if generated {
+		return k, EncKeyGenerated, err
+	}
+	return k, EncKeyFromDataDir, err
+}
+
+// decodeEncPrivateKey reads base64 of a 32-byte X25519 private key.
+func decodeEncPrivateKey(b64 []byte) (*[32]byte, error) {
+	raw, err := base64.StdEncoding.DecodeString(strings.TrimSpace(string(b64)))
+	if err != nil {
+		return nil, errors.New("expected base64 of a 32-byte key")
+	}
+	if len(raw) != 32 {
+		return nil, fmt.Errorf("expected a 32-byte key, got %d bytes", len(raw))
+	}
+	var priv [32]byte
+	copy(priv[:], raw)
+	return &priv, nil
+}
+
 // LoadOrCreateEncKeypair reads dataDir/enc_key, or generates and writes it.
 func LoadOrCreateEncKeypair(dataDir string) (*EncKeypair, error) {
+	k, _, err := loadOrCreateEncKeypair(dataDir)
+	return k, err
+}
+
+func loadOrCreateEncKeypair(dataDir string) (k *EncKeypair, generated bool, err error) {
 	path := filepath.Join(dataDir, encKeyFile)
 	raw, err := os.ReadFile(path)
 	switch {
 	case err == nil:
 		if len(raw) != 32 {
-			return nil, fmt.Errorf("%s: expected a 32-byte key, got %d bytes", path, len(raw))
+			return nil, false, fmt.Errorf("%s: expected a 32-byte key, got %d bytes", path, len(raw))
 		}
 		var priv [32]byte
 		copy(priv[:], raw)
-		return keypairFromPrivate(&priv)
+		k, err := keypairFromPrivate(&priv)
+		return k, false, err
 	case os.IsNotExist(err):
 		pub, priv, err := box.GenerateKey(rand.Reader)
 		if err != nil {
-			return nil, fmt.Errorf("generating encryption key: %w", err)
+			return nil, false, fmt.Errorf("generating encryption key: %w", err)
 		}
 		if err := os.MkdirAll(dataDir, 0700); err != nil {
-			return nil, fmt.Errorf("creating data dir: %w", err)
+			return nil, false, fmt.Errorf("creating data dir: %w", err)
 		}
 		// Write-then-rename: a crash mid-write must not leave a short key file
 		// that stops every later start.
 		tmp := path + ".tmp"
 		if err := os.WriteFile(tmp, priv[:], 0600); err != nil {
-			return nil, fmt.Errorf("writing %s: %w", tmp, err)
+			return nil, false, fmt.Errorf("writing %s: %w", tmp, err)
 		}
 		if err := os.Rename(tmp, path); err != nil {
 			_ = os.Remove(tmp)
-			return nil, fmt.Errorf("installing %s: %w", path, err)
+			return nil, false, fmt.Errorf("installing %s: %w", path, err)
 		}
-		return &EncKeypair{pub: pub, priv: priv}, nil
+		return &EncKeypair{pub: pub, priv: priv}, true, nil
 	default:
-		return nil, fmt.Errorf("reading %s: %w", path, err)
+		return nil, false, fmt.Errorf("reading %s: %w", path, err)
 	}
 }
 

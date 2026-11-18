@@ -551,9 +551,20 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 	// Track which datasources are in the new config
 	newIDs := make(map[string]bool)
 	results := make([]datasourceResult, 0, len(push.Datasources))
+	// A datasource that fails stops serving: a proxy registered by an earlier
+	// sync would otherwise keep answering with the configuration and
+	// credentials this sync replaced. Its stored credentials stay — the
+	// datasource is still in the account, they remain bound to their host,
+	// and the next good sync can use them without a re-push.
 	fail := func(ds pushedDatasource, code string, err error) {
 		h.logger.Error("datasource not applied", "datasource_id", ds.ID, "type", ds.Type, "error_code", code, "err", err)
 		results = append(results, datasourceResult{ID: ds.ID, Status: "error", ErrorCode: code, Error: err.Error()})
+		if _, ok := h.registry.Get(ds.ID); ok && !strings.HasPrefix(ds.ID, "local:") {
+			h.logger.Warn("removing previously configured datasource after failed reconfigure", "datasource_id", ds.ID)
+			if err := h.registry.Remove(ds.ID); err != nil {
+				h.logger.Error("failed to close removed datasource", "datasource_id", ds.ID, "err", err)
+			}
+		}
 	}
 
 	for _, ds := range push.Datasources {

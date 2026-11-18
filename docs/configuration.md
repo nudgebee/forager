@@ -54,6 +54,8 @@ NB_RELAY_URL=wss://relay.nudgebee.com/register
 NB_ACCESS_KEY=key
 NB_ACCESS_SECRET=secret
 NB_DATA_DIR=/var/lib/nudgebee
+NB_ENC_PRIVATE_KEY=<base64 of 32 bytes>
+NB_ENC_PRIVATE_KEY_FILE=/etc/nudgebee/enc_key
 ```
 
 ## Message Signing
@@ -93,13 +95,39 @@ Cloud-pushed credentials are encrypted at rest using AES-GCM with a key derived 
 
 ### End-to-end encryption of pushed credentials
 
-On first start the forager creates an X25519 keypair in `{data_dir}/enc_key` (mode
-0600) and sends the public key in its greeting (`enc_public_key`, named by
-`enc_key_id`). Nudgebee seals credentials to that key before they leave its
-servers, so relay-server and the message broker carry only an opaque blob
-(`credentials_enc`); only this forager can open it. A push sealed to another key
-— a reinstall, or a second forager — is refused per datasource with
-`key_mismatch`, and the forager keeps whatever it was serving before.
+The forager holds an X25519 keypair and sends the public key in its greeting
+(`enc_public_key`, named by `enc_key_id`). Nudgebee seals credentials to that key
+before they leave its servers, so relay-server and the message broker carry only
+an opaque blob (`credentials_enc`); only a forager holding the private key can
+open it. A push sealed to another key — a reinstall, or a second forager — is
+refused per datasource with `key_mismatch`.
+
+The private key is taken from the first of:
+
+| Source | Form |
+|--------|------|
+| `enc_private_key` (`NB_ENC_PRIVATE_KEY`) | base64 of 32 bytes |
+| `enc_private_key_file` (`NB_ENC_PRIVATE_KEY_FILE`) | a file holding the base64, or the 32 raw bytes |
+| `{data_dir}/enc_key` | 32 raw bytes, written by an earlier start |
+| generated | written to `{data_dir}/enc_key` (mode 0600); the forager logs a warning |
+
+Replicas of one forager identity (several pods with the same access key) must
+share one key, set through `enc_private_key` or `enc_private_key_file`;
+otherwise each replica would generate its own and could not open what Nudgebee
+sealed for another. A configured key that is not base64 of 32 bytes, or a key
+file that cannot be read, stops the forager at start — it never falls back to
+generating one. Only the key id is logged. Generate a key with
+`head -c 32 /dev/urandom | base64`.
+
+The Helm chart does this for you: it puts `forager.encPrivateKey` into the
+release Secret and passes it to every pod as `NB_ENC_PRIVATE_KEY`. Left empty,
+the chart generates a key on install and reads it back from the Secret on every
+upgrade, so it does not change.
+
+Rotating the key (changing `enc_private_key`, or a new data dir without one)
+gives the forager a new `enc_key_id`. Nudgebee re-pushes every credential sealed
+to the new key after the forager reconnects; until it does, pushes sealed to the
+old key are refused with `key_mismatch`.
 
 The datasource id and host are sealed together with the credentials and checked
 when the blob is opened, so a blob captured from one push cannot be replayed to
@@ -107,9 +135,19 @@ point the same credentials at another datasource or host
 (`sealed_for_other_datasource`). Credentials are stored only after the proxy has
 accepted them, never for a datasource that failed to configure.
 
-Back up `enc_key` with `credentials.enc`; a lost key means Nudgebee must re-push
-every credential (it does so automatically after the forager reconnects with its
-new key).
+Back up `enc_key` (or the configured key) with `credentials.enc`; a lost key
+means Nudgebee must re-push every credential (it does so automatically after the
+forager reconnects with its new key).
+
+### A datasource that fails to apply stops serving
+
+When a config sync cannot apply a datasource — its credentials do not resolve
+or open, its proxy type is unknown, the proxy refuses the configuration, or the
+credentials cannot be stored — the ack reports the error for that datasource
+and any proxy an earlier sync registered for it is removed and closed. It does
+not keep serving with the configuration and credentials the sync replaced. Its
+stored credentials are kept (still bound to their host), so the next sync that
+applies cleanly can use them without a re-push.
 
 ### Host binding
 
