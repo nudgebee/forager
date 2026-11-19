@@ -1,6 +1,6 @@
-# golang 1.26.5: fixes the Go stdlib pair CVE-2026-39822 (HIGH, os.Root symlink
-# traversal) / CVE-2026-42505 (crypto/tls ECH) that 1.26.4 builds carry.
-FROM golang:1.26.5-bookworm@sha256:1ecb7edf62a0408027bd5729dfd6b1b8766e578e8df93995b225dfd0944eb651 AS build-stage
+# golang 1.26.10: fixes GO-2026-6809 (crypto/x509 trusts compromised intermediates),
+# which govulncheck finds reachable from the websocket client in 1.26.9.
+FROM golang:1.26.11-bookworm@sha256:dc40a13b61304647ed7e5d581d246b86413dfc29d63c6d018310feb93cd98fc0 AS build-stage
 # Always compile with the base image's Go, never an auto-downloaded toolchain.
 ENV GOTOOLCHAIN=local
 
@@ -51,7 +51,7 @@ FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bb
 # DEBIAN_FRONTEND=noninteractive keeps upgraded packages from opening debconf
 # prompts and hanging the non-TTY CI build; scoped via `export` so it does not
 # persist into the image.
-ARG OS_PKG_EPOCH=2026-W29
+ARG OS_PKG_EPOCH=2026-W44
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
     export DEBIAN_FRONTEND=noninteractive && \
     apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \

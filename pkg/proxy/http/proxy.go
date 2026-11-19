@@ -4,14 +4,19 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
+	"math"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
+	"sync"
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
@@ -19,13 +24,25 @@ import (
 
 // Proxy is a generic HTTP reverse proxy for any HTTP-based datasource.
 type Proxy struct {
-	baseURL       string
-	authType      string // none, basic, bearer, custom_header
-	creds         map[string]string
-	tlsSkipVerify bool
-	client        *http.Client
-	logger        *slog.Logger
+	configMu        sync.Mutex
+	mu              sync.RWMutex
+	closed          bool
+	baseURL         string
+	baseParsed      *url.URL
+	authType        string // none, basic, bearer, custom_header
+	creds           map[string]string
+	tlsSkipVerify   bool
+	followRedirects bool
+	dsType          string // datasource type label, e.g. "prometheus"
+	maxRespBytes    int64
+	probe           *probeSpec // authenticated credential check, from config.probe
+	client          *http.Client
+	logger          *slog.Logger
 }
+
+// defaultMaxResponseBytes caps buffered upstream responses (256 MiB). Responses
+// are held in memory and base64-encoded into one websocket message.
+const defaultMaxResponseBytes int64 = 256 << 20
 
 // New creates a new HTTP proxy.
 func New(logger *slog.Logger) *Proxy {
@@ -33,6 +50,9 @@ func New(logger *slog.Logger) *Proxy {
 		logger: logger,
 		client: &http.Client{
 			Timeout: 120 * time.Second,
+			CheckRedirect: func(req *http.Request, via []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
 		},
 	}
 }
@@ -40,31 +60,177 @@ func New(logger *slog.Logger) *Proxy {
 func (p *Proxy) Type() string { return "http-proxy" }
 
 func (p *Proxy) Configure(config map[string]any, creds map[string]string) error {
+	p.configMu.Lock()
+	defer p.configMu.Unlock()
+
+	var baseURL string
 	if v, ok := config["base_url"].(string); ok {
-		p.baseURL = v
+		baseURL = v
 	}
-	if p.baseURL == "" {
+	if baseURL == "" {
 		return fmt.Errorf("base_url is required for http-proxy")
 	}
 
+	baseParsed, err := url.Parse(baseURL)
+	if err != nil {
+		return fmt.Errorf("invalid base_url %q: %w", baseURL, err)
+	}
+	if baseParsed.Scheme != "http" && baseParsed.Scheme != "https" {
+		return fmt.Errorf("base_url scheme must be http or https, got %q", baseParsed.Scheme)
+	}
+	if baseParsed.Hostname() == "" {
+		return fmt.Errorf("base_url must specify a host")
+	}
+	if err := refuseMetadataHost(baseParsed.Hostname()); err != nil {
+		return fmt.Errorf("invalid base_url: %w", err)
+	}
+
+	var authType string
 	if v, ok := config["auth_type"].(string); ok {
-		p.authType = v
+		authType = v
+	}
+	if authType == "custom_headers" {
+		// A malformed value would otherwise send every request with no
+		// credentials and fail confusingly upstream.
+		if err := validateCustomHeaders(creds["custom_headers"]); err != nil {
+			return err
+		}
 	}
 
 	skipVerify := false
 	if v, ok := config["tls_skip_verify"].(bool); ok {
 		skipVerify = v
 	}
-	p.tlsSkipVerify = skipVerify
 
-	p.client = &http.Client{
-		Timeout: 120 * time.Second,
-		Transport: &http.Transport{
-			TLSClientConfig: &tls.Config{InsecureSkipVerify: skipVerify}, // nolint:gosec
-		},
+	followRedirects := false
+	if v, ok := config["follow_redirects"].(bool); ok {
+		followRedirects = v
 	}
 
-	p.creds = creds
+	dsType, _ := config["datasource_type"].(string)
+
+	probe, err := parseProbe(config["probe"])
+	if err != nil {
+		return err
+	}
+
+	maxRespBytes := defaultMaxResponseBytes
+	switch v := config["max_response_bytes"].(type) {
+	case int:
+		if v > 0 {
+			maxRespBytes = int64(v)
+		}
+	case int64:
+		if v > 0 {
+			maxRespBytes = v
+		}
+	case float64:
+		// Converting a float64 beyond the int64 range is implementation-defined
+		// (negative on amd64), which would reject every response. Clamp instead.
+		switch {
+		case v >= math.MaxInt64:
+			maxRespBytes = math.MaxInt64
+		case v >= 1:
+			maxRespBytes = int64(v)
+		}
+	}
+
+	var checkRedirect func(req *http.Request, via []*http.Request) error
+	if !followRedirects {
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+	} else {
+		checkRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) >= 10 {
+				return fmt.Errorf("stopped after 10 redirects")
+			}
+			reqPort := effectivePort(req.URL)
+			basePort := effectivePort(baseParsed)
+			reqHost := strings.TrimSuffix(req.URL.Hostname(), ".")
+			baseHost := strings.TrimSuffix(baseParsed.Hostname(), ".")
+			if !strings.EqualFold(req.URL.Scheme, baseParsed.Scheme) || !strings.EqualFold(reqHost, baseHost) || reqPort != basePort {
+				return fmt.Errorf("cross-origin redirect to %q not permitted", req.URL.Redacted())
+			}
+			return nil
+		}
+	}
+
+	var transport *http.Transport
+	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
+		transport = defaultTransport.Clone()
+	} else {
+		transport = &http.Transport{
+			Proxy:                 http.ProxyFromEnvironment,
+			ForceAttemptHTTP2:     true,
+			MaxIdleConns:          100,
+			IdleConnTimeout:       90 * time.Second,
+			TLSHandshakeTimeout:   10 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+		}
+	}
+	if transport.TLSClientConfig == nil {
+		transport.TLSClientConfig = &tls.Config{}
+	} else {
+		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
+	}
+	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
+	// Every connection is checked on its resolved address: never a cloud
+	// instance-metadata endpoint, whatever base_url says.
+	transport.DialContext = (&net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Control:   refuseMetadataDial,
+	}).DialContext
+	// HTTPS must dial through DialContext too: a DialTLSContext (or legacy
+	// DialTLS) cloned from the default transport would bypass the guard.
+	transport.DialTLSContext = nil
+	transport.DialTLS = nil //nolint:staticcheck // cleared on purpose, see above
+	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
+	if err := applyTLSMaterial(transport.TLSClientConfig, creds); err != nil {
+		return err
+	}
+
+	newClient := &http.Client{
+		Timeout:       120 * time.Second,
+		Transport:     transport,
+		CheckRedirect: checkRedirect,
+	}
+
+	var credsCopy map[string]string
+	if creds != nil {
+		credsCopy = make(map[string]string, len(creds))
+		for k, v := range creds {
+			credsCopy[k] = v
+		}
+	}
+
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		if newClient.Transport != nil {
+			newClient.CloseIdleConnections()
+		}
+		return fmt.Errorf("proxy is closed")
+	}
+
+	oldClient := p.client
+	p.baseURL = baseURL
+	p.baseParsed = baseParsed
+	p.authType = authType
+	p.tlsSkipVerify = skipVerify
+	p.followRedirects = followRedirects
+	p.dsType = dsType
+	p.maxRespBytes = maxRespBytes
+	p.probe = probe
+	p.creds = credsCopy
+	p.client = newClient
+	p.mu.Unlock()
+
+	if oldClient != nil && oldClient.Transport != nil {
+		oldClient.CloseIdleConnections()
+	}
+
 	return nil
 }
 
@@ -73,10 +239,9 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 // request URL comes from the control plane (untrusted from CodeQL's point of
 // view); without this guard a value such as "@evil.com/..." or "//evil.com"
 // could redirect the request to an arbitrary server (SSRF, CWE-918).
-func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
-	base, err := url.Parse(p.baseURL)
-	if err != nil {
-		return "", fmt.Errorf("invalid base_url %q: %w", p.baseURL, err)
+func (p *Proxy) resolveTargetURL(base *url.URL, reqURL string) (string, error) {
+	if base == nil {
+		return "", fmt.Errorf("base_url is not configured")
 	}
 
 	// The request URL must be a path/query relative to base_url; it must not
@@ -94,15 +259,24 @@ func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
 	// request URL. Collapse a duplicated slash at the join boundary so a
 	// trailing-slash base_url plus a leading-slash request path does not produce
 	// "//"; otherwise the path is appended verbatim to preserve existing routing.
-	basePath, refPath := base.Path, ref.Path
+	// Joined on the escaped forms, so an encoded "/" (%2F) inside a segment —
+	// a label key like app.kubernetes.io/name in a tag path — stays one
+	// segment instead of being decoded into two.
+	basePath, refPath := base.EscapedPath(), ref.EscapedPath()
 	if strings.HasSuffix(basePath, "/") && strings.HasPrefix(refPath, "/") {
 		refPath = refPath[1:]
+	}
+	rawPath := basePath + refPath
+	path, err := url.PathUnescape(rawPath)
+	if err != nil {
+		return "", fmt.Errorf("invalid request path %q: %w", rawPath, err)
 	}
 	out := &url.URL{
 		Scheme:   base.Scheme,
 		User:     base.User,
 		Host:     base.Host,
-		Path:     basePath + refPath,
+		Path:     path,
+		RawPath:  rawPath,
 		RawQuery: ref.RawQuery,
 		Fragment: ref.Fragment,
 	}
@@ -110,7 +284,31 @@ func (p *Proxy) resolveTargetURL(reqURL string) (string, error) {
 }
 
 func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
-	targetURL, err := p.resolveTargetURL(req.URL)
+	if req == nil {
+		return nil, fmt.Errorf("request cannot be nil")
+	}
+
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return nil, fmt.Errorf("proxy is closed")
+	}
+	baseParsed := p.baseParsed
+	authType := p.authType
+	creds := p.creds
+	client := p.client
+	maxRespBytes := p.maxRespBytes
+	p.mu.RUnlock()
+
+	if client == nil || baseParsed == nil {
+		return nil, fmt.Errorf("http proxy not configured")
+	}
+
+	if req.Action == ActionVMServiceMap {
+		return p.handleVMServiceMap(ctx, req)
+	}
+
+	targetURL, err := p.resolveTargetURL(baseParsed, req.URL)
 	if err != nil {
 		return nil, err
 	}
@@ -143,17 +341,29 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 	}
 
 	// Inject auth
-	p.injectAuth(httpReq)
+	p.injectAuthWith(httpReq, authType, creds)
 
-	resp, err := p.client.Do(httpReq)
+	resp, err := client.Do(httpReq)
 	if err != nil {
+		if isNetworkError(err) {
+			return nil, fmt.Errorf("executing request: %w: %w", proxy.ErrUpstreamUnreachable, err)
+		}
 		return nil, fmt.Errorf("executing request: %w", err)
 	}
 	defer func() { _ = resp.Body.Close() }()
 
-	respBody, err := io.ReadAll(resp.Body)
+	// Read one byte past the cap to tell "exactly at the limit" from "over it".
+	// Guard the +1 so a cap of MaxInt64 cannot wrap negative and read nothing.
+	readLimit := maxRespBytes
+	if readLimit < math.MaxInt64 {
+		readLimit++
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, readLimit))
 	if err != nil {
 		return nil, fmt.Errorf("reading response: %w", err)
+	}
+	if int64(len(respBody)) > maxRespBytes {
+		return nil, fmt.Errorf("response exceeds max_response_bytes (%d)", maxRespBytes)
 	}
 
 	// Build response in the same format as the K8s agent HTTPResponse
@@ -171,13 +381,39 @@ func (p *Proxy) HandleRequest(ctx context.Context, req *proxy.ActionRequest) (*p
 }
 
 func (p *Proxy) HealthCheck(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.baseURL, nil)
+	p.mu.RLock()
+	if p.closed {
+		p.mu.RUnlock()
+		return fmt.Errorf("proxy is closed")
+	}
+	baseURL := p.baseURL
+	baseParsed := p.baseParsed
+	authType := p.authType
+	creds := p.creds
+	client := p.client
+	dsType := p.dsType
+	probe := p.probe
+	p.mu.RUnlock()
+
+	if client == nil || baseURL == "" {
+		return fmt.Errorf("http proxy not configured")
+	}
+
+	if probe != nil {
+		return p.runProbe(ctx, client, probe, authType, creds)
+	}
+
+	if dsType == "prometheus" {
+		return p.prometheusHealthCheck(ctx, client, baseParsed, authType, creds)
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", baseURL, nil)
 	if err != nil {
 		return err
 	}
-	p.injectAuth(req)
+	p.injectAuthWith(req, authType, creds)
 
-	resp, err := p.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return fmt.Errorf("health check failed: %w", err)
 	}
@@ -189,27 +425,189 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 	return nil
 }
 
+// prometheusHealthCheck requires a 2xx from /-/ready, falling back to the
+// buildinfo API for Prometheus-compatible stores (Mimir, VictoriaMetrics,
+// Thanos) that do not serve /-/ready under the base path. A bare 404 or 401
+// from a wrong host or reverse proxy must not count as a reachable store.
+func (p *Proxy) prometheusHealthCheck(ctx context.Context, client *http.Client, base *url.URL, authType string, creds map[string]string) error {
+	var lastErr error
+	for _, path := range []string{"/-/ready", "/api/v1/status/buildinfo"} {
+		target, err := p.resolveTargetURL(base, path)
+		if err != nil {
+			return err
+		}
+		req, err := http.NewRequestWithContext(ctx, "GET", target, nil)
+		if err != nil {
+			return err
+		}
+		p.injectAuthWith(req, authType, creds)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			// Unreachable on the first path means unreachable on the second.
+			return fmt.Errorf("health check failed: %w", err)
+		}
+		_ = resp.Body.Close()
+
+		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+			return nil
+		}
+		lastErr = fmt.Errorf("health check %s returned status %d", path, resp.StatusCode)
+	}
+	return lastErr
+}
+
+// applyTLSMaterial loads optional custom CA and client certificate (mTLS)
+// material from credentials: ca_cert, client_cert and client_key, all PEM.
+func applyTLSMaterial(cfg *tls.Config, creds map[string]string) error {
+	if ca := creds["ca_cert"]; ca != "" {
+		pool, err := x509.SystemCertPool()
+		if err != nil || pool == nil {
+			pool = x509.NewCertPool()
+		}
+		if !pool.AppendCertsFromPEM([]byte(ca)) {
+			return fmt.Errorf("ca_cert contains no valid PEM certificates")
+		}
+		cfg.RootCAs = pool
+	}
+
+	cert, key := creds["client_cert"], creds["client_key"]
+	if (cert == "") != (key == "") {
+		return fmt.Errorf("client_cert and client_key must be provided together")
+	}
+	if cert != "" {
+		pair, err := tls.X509KeyPair([]byte(cert), []byte(key))
+		if err != nil {
+			return fmt.Errorf("invalid client_cert/client_key: %w", err)
+		}
+		cfg.Certificates = []tls.Certificate{pair}
+	}
+	return nil
+}
+
+// isNetworkError reports whether err means the request never reached the upstream:
+// DNS, dial, or TLS handshake failures. These are safe to retry on another forager.
+//
+// Timeouts and connection resets that happen after the request was written are
+// deliberately not included. The upstream may have accepted the work, so retrying
+// would run a heavy query twice or repeat a non-idempotent POST.
+func isNetworkError(err error) bool {
+	if errors.Is(err, context.Canceled) {
+		return false
+	}
+	// http.Client.Do wraps every failure in *url.Error, which itself satisfies
+	// net.Error. Look at what it wraps, or a redirect loop or unsupported scheme
+	// would be reported as the target being unreachable.
+	var urlErr *url.Error
+	if errors.As(err, &urlErr) {
+		err = urlErr.Err
+	}
+	var dnsErr *net.DNSError
+	if errors.As(err, &dnsErr) {
+		return true
+	}
+	var opErr *net.OpError
+	if errors.As(err, &opErr) && opErr.Op == "dial" {
+		return true
+	}
+	var recordErr tls.RecordHeaderError
+	if errors.As(err, &recordErr) {
+		return true
+	}
+	var certErr *tls.CertificateVerificationError
+	return errors.As(err, &certErr)
+}
+
 func (p *Proxy) Close() error {
-	p.client.CloseIdleConnections()
+	p.mu.Lock()
+	if p.closed {
+		p.mu.Unlock()
+		return nil
+	}
+	p.closed = true
+	client := p.client
+	p.client = nil
+	p.mu.Unlock()
+
+	if client != nil && client.Transport != nil {
+		client.CloseIdleConnections()
+	}
 	return nil
 }
 
 // CollectMetadata returns connection info for the HTTP datasource.
 func (p *Proxy) CollectMetadata(_ context.Context) (map[string]any, error) {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
 	return map[string]any{
 		"base_url": p.baseURL,
 	}, nil
 }
 
 func (p *Proxy) injectAuth(req *http.Request) {
-	switch p.authType {
+	p.mu.RLock()
+	authType := p.authType
+	creds := p.creds
+	p.mu.RUnlock()
+	p.injectAuthWith(req, authType, creds)
+}
+
+func (p *Proxy) injectAuthWith(req *http.Request, authType string, creds map[string]string) {
+	switch authType {
 	case "basic":
-		req.SetBasicAuth(p.creds["username"], p.creds["password"])
+		req.SetBasicAuth(creds["username"], creds["password"])
 	case "bearer":
-		req.Header.Set("Authorization", "Bearer "+p.creds["bearer_token"])
+		req.Header.Set("Authorization", "Bearer "+creds["bearer_token"])
 	case "custom_header":
-		if name := p.creds["custom_header_name"]; name != "" {
-			req.Header.Set(name, p.creds["custom_header_value"])
+		if name := creds["custom_header_name"]; name != "" {
+			req.Header.Set(name, creds["custom_header_value"])
+		}
+	case "custom_headers":
+		// Several fixed headers (Datadog's DD-API-KEY and DD-APPLICATION-KEY),
+		// carried as a JSON object in one credential.
+		var headers map[string]string
+		if err := json.Unmarshal([]byte(creds["custom_headers"]), &headers); err == nil {
+			for name, value := range headers {
+				if name != "" {
+					req.Header.Set(name, value)
+				}
+			}
 		}
 	}
+}
+
+func effectivePort(u *url.URL) string {
+	if u == nil {
+		return ""
+	}
+	port := u.Port()
+	if port != "" {
+		return port
+	}
+	switch strings.ToLower(u.Scheme) {
+	case "https":
+		return "443"
+	case "http":
+		return "80"
+	default:
+		return ""
+	}
+}
+
+// validateCustomHeaders checks a custom_headers credential: a non-empty JSON
+// object of header name to value, with no empty names.
+func validateCustomHeaders(raw string) error {
+	var headers map[string]string
+	if err := json.Unmarshal([]byte(raw), &headers); err != nil {
+		return fmt.Errorf("custom_headers must be a JSON object of header names to values: %w", err)
+	}
+	if len(headers) == 0 {
+		return fmt.Errorf("custom_headers is empty")
+	}
+	for name := range headers {
+		if strings.TrimSpace(name) == "" {
+			return fmt.Errorf("custom_headers has an empty header name")
+		}
+	}
+	return nil
 }
