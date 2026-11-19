@@ -477,7 +477,30 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 		args = params
 	}
 
-	rows, err := pool.QueryContext(ctx, query, args...)
+	// read_only asks the DATABASE to refuse writes, rather than trusting the
+	// caller's own statement filter. Checked before the pool is touched, so a
+	// type that cannot honour it fails closed instead of running read-write.
+	readOnly, _ := req.Params["read_only"].(bool)
+	if readOnly && !supportsReadOnlyTx(p.dbType) {
+		return nil, fmt.Errorf("read_only is not supported for %s datasources", p.dbType)
+	}
+
+	var rows *sql.Rows
+	var err error
+	if readOnly {
+		// A transaction, not SET SESSION: the setting ends with it, so a pooled
+		// connection never carries it into the next caller's query. Rolled back
+		// rather than committed — there is nothing to keep. Deferred before
+		// rows.Close below, so it runs after it.
+		tx, txErr := pool.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+		if txErr != nil {
+			return nil, fmt.Errorf("starting read-only transaction: %w", txErr)
+		}
+		defer func() { _ = tx.Rollback() }()
+		rows, err = tx.QueryContext(ctx, query, args...)
+	} else {
+		rows, err = pool.QueryContext(ctx, query, args...)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("query execution failed: %w", err)
 	}
@@ -530,12 +553,26 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 		"row_count":   rowCount,
 		"duration_ms": time.Since(start).Milliseconds(),
 	}
+	// Echoed so a caller can tell an agent that enforced read_only from an older
+	// one that ignored the parameter.
+	if readOnly {
+		result["read_only"] = true
+	}
 
 	data, _ := json.Marshal(result)
 	return &proxy.ActionResponse{
 		StatusCode: 200,
 		Data:       string(data),
 	}, nil
+}
+
+// supportsReadOnlyTx reports whether the driver for dbType turns
+// sql.TxOptions{ReadOnly: true} into a read-only transaction on the server:
+// pgx sends BEGIN READ ONLY, go-sql-driver/mysql START TRANSACTION READ ONLY.
+// The others either reject the option or have no transactions to make
+// read-only, so they are refused rather than run read-write.
+func supportsReadOnlyTx(dbType string) bool {
+	return dbType == "postgresql" || dbType == "mysql"
 }
 
 func (p *Proxy) handleExecute(ctx context.Context, pool *sql.DB, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {

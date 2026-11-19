@@ -25,14 +25,31 @@ const (
 
 // Verifier validates Ed25519 signatures on relay messages.
 // If no public key is configured, verification is skipped with a warning log.
+//
+// Several keys may be configured so a relay key can be rotated without an
+// outage: add the new public key here, switch the relay to the new private
+// key, then remove the old one. A message that names its key_id is checked
+// against that key; one that does not is checked against every key.
 type Verifier struct {
-	publicKey ed25519.PublicKey
-	enabled   bool
-	logger    *slog.Logger
+	keys    []verifierKey
+	enabled bool
+	logger  *slog.Logger
 
 	// Replay prevention: track recently seen nonces.
 	seenNonces map[string]time.Time
 	nonceMu    sync.Mutex
+}
+
+type verifierKey struct {
+	id  string
+	pub ed25519.PublicKey
+}
+
+// PublicKeyEntry is one configured verification key. KeyID may be empty; the
+// key is then tried for any message.
+type PublicKeyEntry struct {
+	KeyID string
+	Key   string
 }
 
 // SignatureEnvelope contains the signature metadata embedded in signed messages.
@@ -47,34 +64,51 @@ type SignatureEnvelope struct {
 	KeyID         string `json:"key_id,omitempty"`
 }
 
-// NewVerifier creates a signature verifier.
+// NewVerifier creates a signature verifier with one key.
 // Accepts either PEM-encoded PKIX or base64-encoded raw public key (32 bytes).
 // If publicKeyStr is empty, the verifier operates in warn-only mode (no enforcement).
 func NewVerifier(publicKeyStr string, logger *slog.Logger) (*Verifier, error) {
+	if publicKeyStr == "" {
+		return NewVerifierWithKeys(nil, logger)
+	}
+	return NewVerifierWithKeys([]PublicKeyEntry{{Key: publicKeyStr}}, logger)
+}
+
+// NewVerifierWithKeys creates a verifier that accepts any of the given keys.
+// With no keys it operates in warn-only mode (no enforcement).
+func NewVerifierWithKeys(entries []PublicKeyEntry, logger *slog.Logger) (*Verifier, error) {
 	v := &Verifier{
 		logger:     logger,
 		seenNonces: make(map[string]time.Time),
 	}
 
-	if publicKeyStr == "" {
+	for _, e := range entries {
+		if strings.TrimSpace(e.Key) == "" {
+			continue
+		}
+		pubKey, err := ParsePublicKey(e.Key)
+		if err != nil {
+			if e.KeyID != "" {
+				return nil, fmt.Errorf("invalid signing public key %q: %w", e.KeyID, err)
+			}
+			return nil, fmt.Errorf("invalid signing_public_key: %w", err)
+		}
+		v.keys = append(v.keys, verifierKey{id: e.KeyID, pub: pubKey})
+	}
+
+	if len(v.keys) == 0 {
 		v.enabled = false
 		logger.Warn("message signing verification disabled: no signing_public_key configured")
 		return v, nil
 	}
 
-	pubKey, err := parsePublicKey(publicKeyStr)
-	if err != nil {
-		return nil, fmt.Errorf("invalid signing_public_key: %w", err)
-	}
-
-	v.publicKey = pubKey
 	v.enabled = true
-	logger.Info("message signing verification enabled")
+	logger.Info("message signing verification enabled", "keys", len(v.keys))
 	return v, nil
 }
 
-// parsePublicKey tries OpenSSH authorized_keys format, PEM (PKIX), then raw base64.
-func parsePublicKey(s string) (ed25519.PublicKey, error) {
+// ParsePublicKey tries OpenSSH authorized_keys format, PEM (PKIX), then raw base64.
+func ParsePublicKey(s string) (ed25519.PublicKey, error) {
 	s = strings.TrimSpace(s)
 
 	// Try OpenSSH format (ssh-ed25519 AAAA... comment)
@@ -120,8 +154,9 @@ func parsePublicKey(s string) (ed25519.PublicKey, error) {
 }
 
 // Enabled returns true if signature verification is active.
+// Enabled is nil-safe: a nil verifier verifies nothing.
 func (v *Verifier) Enabled() bool {
-	return v.enabled
+	return v != nil && v.enabled
 }
 
 // Verify checks the Ed25519 signature on a message.
@@ -175,19 +210,15 @@ func (v *Verifier) Verify(msg []byte) error {
 		return fmt.Errorf("signature verification failed: signed_at %s is outside allowed window (±%s)", env.SignedAt, maxTimestampSkew)
 	}
 
-	// Check replay
-	if v.isReplayedNonce(env.Nonce) {
-		return fmt.Errorf("signature verification failed: nonce %s already seen (replay attack)", env.Nonce)
-	}
-
 	// Decode signature
 	sigBytes, err := base64.StdEncoding.DecodeString(env.Signature)
 	if err != nil {
 		return fmt.Errorf("signature verification failed: invalid signature encoding: %w", err)
 	}
 
-	// Verify Ed25519 signature over the signed_payload string
-	if !ed25519.Verify(v.publicKey, []byte(env.SignedPayload), sigBytes) {
+	// Verify Ed25519 signature over the signed_payload string with the key the
+	// message names, or with every key when it names none we have.
+	if !v.signatureValid(env.KeyID, []byte(env.SignedPayload), sigBytes) {
 		return fmt.Errorf("signature verification failed: invalid signature")
 	}
 
@@ -196,9 +227,32 @@ func (v *Verifier) Verify(msg []byte) error {
 		return fmt.Errorf("signature verification failed: %w", err)
 	}
 
-	// Record nonce after successful verification
-	v.recordNonce(env.Nonce)
+	// Atomically check and record nonce after successful signature verification (anti-replay)
+	if v.checkAndRecordNonce(env.Nonce) {
+		return fmt.Errorf("signature verification failed: nonce %s already seen (replay attack)", env.Nonce)
+	}
+
 	return nil
+}
+
+// signatureValid reports whether sig over payload checks out against the
+// configured keys. A key_id we recognise narrows the check to that key; an
+// unknown or empty key_id falls back to every key, so a relay that does not
+// name its key, or names one we only know without an id, still verifies.
+func (v *Verifier) signatureValid(keyID string, payload, sig []byte) bool {
+	if keyID != "" {
+		for _, k := range v.keys {
+			if k.id == keyID {
+				return ed25519.Verify(k.pub, payload, sig)
+			}
+		}
+	}
+	for _, k := range v.keys {
+		if ed25519.Verify(k.pub, payload, sig) {
+			return true
+		}
+	}
+	return false
 }
 
 // verifyPayloadMatchesMessage checks that the fields in signed_payload actually
@@ -248,24 +302,18 @@ func canonicalJSON(raw json.RawMessage) ([]byte, error) {
 	return json.Marshal(v)
 }
 
-func (v *Verifier) isReplayedNonce(nonce string) bool {
+func (v *Verifier) checkAndRecordNonce(nonce string) bool {
 	v.nonceMu.Lock()
 	defer v.nonceMu.Unlock()
 
 	if _, seen := v.seenNonces[nonce]; seen {
 		return true
 	}
-	return false
-}
-
-func (v *Verifier) recordNonce(nonce string) {
-	v.nonceMu.Lock()
-	defer v.nonceMu.Unlock()
 
 	v.seenNonces[nonce] = time.Now()
 
-	// Evict old nonces if map is too large
-	if len(v.seenNonces) > maxNonces {
+	// Evict old nonces if map is too large (rate-limited to once every 100 additions)
+	if len(v.seenNonces) > maxNonces && len(v.seenNonces)%100 == 0 {
 		cutoff := time.Now().Add(-maxTimestampSkew * 2)
 		for n, t := range v.seenNonces {
 			if t.Before(cutoff) {
@@ -273,6 +321,7 @@ func (v *Verifier) recordNonce(nonce string) {
 			}
 		}
 	}
+	return false
 }
 
 func absDuration(d time.Duration) time.Duration {

@@ -14,6 +14,14 @@ type Config struct {
 	AccessSecret string `mapstructure:"access_secret"`
 	DataDir      string `mapstructure:"data_dir"`
 
+	// EncPrivateKey is base64 of the 32-byte X25519 private key pushed
+	// credentials are sealed to; EncPrivateKeyFile names a file holding the
+	// same (base64, or the 32 raw bytes). Every replica of one forager
+	// identity must share it. Neither set: {data_dir}/enc_key, created on
+	// first start.
+	EncPrivateKey     string `mapstructure:"enc_private_key"`
+	EncPrivateKeyFile string `mapstructure:"enc_private_key_file"`
+
 	// Local datasource overrides (credential_source: local)
 	Datasources []LocalDatasource `mapstructure:"datasources"`
 
@@ -21,13 +29,91 @@ type Config struct {
 	HealthCheckIntervalMin int `mapstructure:"health_check_interval_min"`
 
 	// Message signing: base64-encoded Ed25519 public key for verifying relay messages.
-	// If empty, signature verification is disabled (warn-only mode).
+	// If empty and signing_public_keys is empty, signature verification is
+	// disabled (warn-only mode).
 	SigningPublicKey string `mapstructure:"signing_public_key"`
+
+	// SigningPublicKeys lists further verification keys, each with the key_id
+	// the relay signs with, so a relay key can be rotated: add the new key
+	// here, switch the relay, then remove the old one.
+	SigningPublicKeys []SigningKey `mapstructure:"signing_public_keys"`
+
+	// SecretRefAllowlist lists the secret-manager reference prefixes an
+	// http-proxy datasource pushed from Nudgebee may resolve (for example
+	// "arn:aws:secretsmanager:eu-west-1:123456789012:secret:nudgebee/").
+	// Empty: only HTTP Proxy, Prometheus, Loki and SigNoz datasources (which
+	// used secret managers before this list) may resolve refs, any ref; other
+	// http-proxy datasources cannot use a secret manager. Other proxy types
+	// are not restricted.
+	SecretRefAllowlist []string `mapstructure:"secret_ref_allowlist"`
 
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
 	Azure AzureConfig `mapstructure:"azure"`
+}
+
+// SigningKey is one entry of signing_public_keys.
+type SigningKey struct {
+	KeyID string `mapstructure:"key_id"`
+	Key   string `mapstructure:"key"`
+}
+
+// SigningKeyEntries is every configured verification key: the single
+// signing_public_key (no key id) followed by signing_public_keys.
+func (c *Config) SigningKeyEntries() []SigningKey {
+	var out []SigningKey
+	if c.SigningPublicKey != "" {
+		out = append(out, SigningKey{Key: c.SigningPublicKey})
+	}
+	return append(out, c.SigningPublicKeys...)
+}
+
+// DiscoveryDatasource configures a discovery datasource from local YAML.
+// Field names mirror the discovery proxy's config keys so the two stay
+// readable side by side.
+type DiscoveryDatasource struct {
+	// PackPublicKey verifies content packs. Without it no pack can be
+	// trusted, so discovery_inventory refuses to run.
+	PackPublicKey string `mapstructure:"pack_public_key"`
+
+	// PackDir holds signed packs as linux-inventory-v<N>.yaml.
+	PackDir string `mapstructure:"pack_dir"`
+
+	// KnownHostsFile enables SSH host key verification when set.
+	KnownHostsFile string `mapstructure:"known_hosts_file"`
+
+	// SSHAccess also exposes the in-scope hosts for ad-hoc commands through
+	// a sibling ssh-proxy datasource, using the same credentials. Off by
+	// default: it widens what the credentials were granted for. Requires
+	// signing_public_key, known_hosts_file and a non-empty allowed_hosts.
+	SSHAccess bool `mapstructure:"ssh_access"`
+
+	Port           int `mapstructure:"port"`
+	Concurrency    int `mapstructure:"concurrency"`
+	HostTimeoutS   int `mapstructure:"host_timeout_seconds"`
+	CommandTimeS   int `mapstructure:"command_timeout_seconds"`
+	DialTimeoutS   int `mapstructure:"dial_timeout_seconds"`
+	MaxOutputBytes int `mapstructure:"max_output_bytes"`
+	MaxRatePPS     int `mapstructure:"max_rate_pps"`
+
+	// LDAP enables discovery_ldap. Empty host leaves it unconfigured.
+	LDAP *DiscoveryLDAP `mapstructure:"ldap"`
+}
+
+// DiscoveryLDAP is the directory connection for discovery_ldap. The bind
+// credentials live in the datasource's credentials block (ldap_bind_dn,
+// ldap_bind_password), not here, so they stay with the other secrets.
+type DiscoveryLDAP struct {
+	Host       string `mapstructure:"host"`
+	Port       int    `mapstructure:"port"`
+	TLS        bool   `mapstructure:"tls"`
+	StartTLS   bool   `mapstructure:"start_tls"`
+	SkipVer    bool   `mapstructure:"insecure_skip_verify"`
+	BaseDN     string `mapstructure:"base_dn"`
+	TimeoutS   int    `mapstructure:"timeout_seconds"`
+	PageSize   uint32 `mapstructure:"page_size"`
+	MaxResults int    `mapstructure:"max_results"`
 }
 
 // LocalDatasource represents a datasource configured locally in the agent YAML.
@@ -48,9 +134,20 @@ type LocalDatasource struct {
 	CredentialRef    string            `mapstructure:"credential_ref"`
 	Credentials      map[string]string `mapstructure:"credentials"`
 
+	// HTTP / Prometheus fields. CA and client certificates go in credentials
+	// (ca_cert, client_cert, client_key, each also accepted as *_file).
+	TLSSkipVerify    bool  `mapstructure:"tls_skip_verify"`
+	FollowRedirects  bool  `mapstructure:"follow_redirects"`
+	MaxResponseBytes int64 `mapstructure:"max_response_bytes"`
+
 	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
 	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
 	AllowedHosts []string `mapstructure:"allowed_hosts"`
+
+	// Discovery fields. Scope (allowed_cidrs) reuses allowed_hosts above.
+	// In production these arrive as server-pushed datasource config; these
+	// exist so a discovery datasource can also be stood up from local YAML.
+	Discovery *DiscoveryDatasource `mapstructure:"discovery"`
 
 	// MCP fields
 	Transport  string            `mapstructure:"transport"`   // http, sse, stdio
@@ -97,6 +194,8 @@ func Load(configPath string) (*Config, error) {
 	// env vars for keys absent from the config file.
 	_ = v.BindEnv("access_key")
 	_ = v.BindEnv("access_secret")
+	_ = v.BindEnv("enc_private_key")
+	_ = v.BindEnv("enc_private_key_file")
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
 	_ = v.BindEnv("health_check_interval_min")

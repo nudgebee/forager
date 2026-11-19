@@ -1,14 +1,18 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
+	"os"
+	"strings"
 	"time"
 
 	"nudgebee/forager/pkg/config"
 	"nudgebee/forager/pkg/proxy"
 	proxydb "nudgebee/forager/pkg/proxy/db"
+	proxydiscovery "nudgebee/forager/pkg/proxy/discovery"
 	proxyhttp "nudgebee/forager/pkg/proxy/http"
 	proxykafka "nudgebee/forager/pkg/proxy/kafka"
 	proxymcp "nudgebee/forager/pkg/proxy/mcp"
@@ -44,19 +48,44 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 		secrets.NewAzureKV(cfg.Azure.VaultURL, cfg.Azure.TenantID, cfg.Azure.ClientID, logger),
 	)
 
-	verifier, err := signing.NewVerifier(cfg.SigningPublicKey, logger)
+	var keyEntries []signing.PublicKeyEntry
+	for _, k := range cfg.SigningKeyEntries() {
+		keyEntries = append(keyEntries, signing.PublicKeyEntry{KeyID: k.KeyID, Key: k.Key})
+	}
+	verifier, err := signing.NewVerifierWithKeys(keyEntries, logger)
 	if err != nil {
 		return nil, fmt.Errorf("signing verifier: %w", err)
+	}
+
+	encKeys, encKeySource, err := secrets.LoadEncKeypair(cfg.EncPrivateKey, cfg.EncPrivateKeyFile, cfg.DataDir)
+	if err != nil {
+		return nil, fmt.Errorf("encryption key: %w", err)
+	}
+	logger.Info("credential encryption key ready", "enc_key_id", encKeys.KeyID(), "source", encKeySource)
+	if encKeySource == secrets.EncKeyGenerated {
+		logger.Warn("generated a new credential encryption key; replicas of one forager must share a key — set enc_private_key or enc_private_key_file",
+			"enc_key_id", encKeys.KeyID())
 	}
 
 	registry := proxy.NewRegistry()
 
 	for _, ds := range cfg.Datasources {
-		configureDatasource(logger, registry, secretsMgr, ds)
+		configureDatasource(logger, registry, secretsMgr, verifier.Enabled(), ds)
 	}
 
 	handler := ws.NewHandler(registry, credStore, secretsMgr, verifier, logger)
+	handler.SetEncKeypair(encKeys)
+	handler.SetSecretRefAllowlist(cfg.SecretRefAllowlist)
 	client := ws.NewClient(cfg.RelayURL, cfg.AccessKey, cfg.AccessSecret, handler, logger, cfg.HealthCheckIntervalMin)
+	client.SetAgentFacts(ws.AgentFacts{
+		SigningEnforced: verifier.Enabled(),
+		EncPublicKey:    encKeys.PublicKey(),
+		EncKeyID:        encKeys.KeyID(),
+
+		SecretRefAllowlistSet: len(cfg.SecretRefAllowlist) > 0,
+	})
+
+	handler.SetOnConfigSynced(client.TriggerHealthReport)
 
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
 		entries := registry.List()
@@ -94,7 +123,7 @@ func (a *app) run(ctx context.Context) error {
 	return a.client.Run(ctx)
 }
 
-func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, ds config.LocalDatasource) {
+func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsMgr *secrets.Manager, signingEnabled bool, ds config.LocalDatasource) {
 	logger.Info("configuring datasource", "name", ds.Name, "type", ds.Type, "credential_source", ds.CredentialSource)
 
 	cfg := map[string]any{}
@@ -139,6 +168,16 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 				cfg["auth_type"] = v
 			}
 		}
+		cfg["datasource_type"] = ds.Type
+		if ds.TLSSkipVerify {
+			cfg["tls_skip_verify"] = true
+		}
+		if ds.FollowRedirects {
+			cfg["follow_redirects"] = true
+		}
+		if ds.MaxResponseBytes > 0 {
+			cfg["max_response_bytes"] = ds.MaxResponseBytes
+		}
 		p = proxyhttp.New(logger.With("datasource", ds.Name))
 	case "ssh":
 		proxyType = "ssh-proxy"
@@ -146,6 +185,13 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 			cfg["allowed_hosts"] = ds.AllowedHosts
 		}
 		p = proxyssh.New(logger.With("datasource", ds.Name))
+	case "discovery":
+		proxyType = "discovery-proxy"
+		if len(ds.AllowedHosts) > 0 {
+			cfg["allowed_cidrs"] = ds.AllowedHosts
+		}
+		applyDiscoveryConfig(cfg, ds.Discovery)
+		p = proxydiscovery.New(logger.With("datasource", ds.Name))
 	case "mongodb":
 		proxyType = "mongo-proxy"
 		p = proxymongo.New(logger.With("datasource", ds.Name))
@@ -210,6 +256,12 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		logger.Info("credentials resolved from secret provider", "name", ds.Name, "source", credSource)
 	}
 
+	creds, err := resolveKeyFiles(creds)
+	if err != nil {
+		logger.Error("failed to read credential file", "name", ds.Name, "err", err)
+		return
+	}
+
 	if err := p.Configure(cfg, creds); err != nil {
 		logger.Error("failed to configure datasource", "name", ds.Name, "err", err)
 		return
@@ -223,4 +275,137 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		CredentialSource: credSource,
 	}
 	registry.Register(entry.ID, entry, p)
+
+	if proxyType == "discovery-proxy" && proxydiscovery.SSHAccessEnabled(cfg) {
+		sibling, sp, err := proxydiscovery.SSHAccessSibling(entry, cfg, creds, signingEnabled, logger)
+		if err != nil {
+			logger.Error("ssh_access not enabled", "name", ds.Name, "err", err)
+			return
+		}
+		registry.Register(sibling.ID, sibling, sp)
+		logger.Info("ssh access enabled for discovery scope", "name", ds.Name, "id", sibling.ID)
+	}
+}
+
+// applyDiscoveryConfig copies the discovery block from local YAML into the
+// datasource config the proxy consumes. Only non-zero values are set, so the
+// proxy's own defaults still apply to anything left out.
+//
+// In production this config is pushed from the server; this path exists so a
+// discovery datasource can also be stood up from a values file.
+func applyDiscoveryConfig(cfg map[string]any, d *config.DiscoveryDatasource) {
+	if d == nil {
+		return
+	}
+
+	setIfNotEmpty(cfg, "pack_public_key", d.PackPublicKey)
+	setIfNotEmpty(cfg, "pack_dir", d.PackDir)
+	setIfNotEmpty(cfg, "known_hosts_file", d.KnownHostsFile)
+	if d.SSHAccess {
+		cfg["ssh_access"] = true
+	}
+
+	setIfPositive(cfg, "port", d.Port)
+	setIfPositive(cfg, "concurrency", d.Concurrency)
+	setIfPositive(cfg, "host_timeout_seconds", d.HostTimeoutS)
+	setIfPositive(cfg, "command_timeout_seconds", d.CommandTimeS)
+	setIfPositive(cfg, "dial_timeout_seconds", d.DialTimeoutS)
+	setIfPositive(cfg, "max_output_bytes", d.MaxOutputBytes)
+	setIfPositive(cfg, "max_rate_pps", d.MaxRatePPS)
+
+	if d.LDAP == nil || d.LDAP.Host == "" {
+		return
+	}
+	ldap := map[string]any{"host": d.LDAP.Host}
+	setIfPositive(ldap, "port", d.LDAP.Port)
+	setIfPositive(ldap, "timeout_seconds", d.LDAP.TimeoutS)
+	setIfPositive(ldap, "max_results", d.LDAP.MaxResults)
+	setIfNotEmpty(ldap, "base_dn", d.LDAP.BaseDN)
+	if d.LDAP.PageSize > 0 {
+		ldap["page_size"] = d.LDAP.PageSize
+	}
+	if d.LDAP.TLS {
+		ldap["tls"] = true
+	}
+	if d.LDAP.StartTLS {
+		ldap["start_tls"] = true
+	}
+	if d.LDAP.SkipVer {
+		ldap["insecure_skip_verify"] = true
+	}
+	cfg["ldap"] = ldap
+}
+
+func setIfNotEmpty(m map[string]any, key, value string) {
+	if value != "" {
+		m[key] = value
+	}
+}
+
+func setIfPositive(m map[string]any, key string, value int) {
+	if value > 0 {
+		m[key] = value
+	}
+}
+
+// resolveKeyFiles expands `*_file` credential entries by reading the named
+// file into the corresponding credential.
+//
+// Proxies take key material, not paths, so without this a private key has to
+// be inlined into the config — which puts it in values files and anywhere
+// they are copied. A path lets Kubernetes mount a Secret and the agent read
+// it, leaving the key out of configuration entirely.
+//
+// The map is copied rather than mutated: it comes from parsed config that
+// may be shared, and quietly rewriting a caller's map is a poor trade for
+// saving an allocation.
+func resolveKeyFiles(creds map[string]string) (map[string]string, error) {
+	const suffix = "_file"
+
+	var toResolve []string
+	for k := range creds {
+		if strings.HasSuffix(k, suffix) && creds[k] != "" {
+			toResolve = append(toResolve, k)
+		}
+	}
+	if len(toResolve) == 0 {
+		return creds, nil
+	}
+
+	out := make(map[string]string, len(creds))
+	for k, v := range creds {
+		out[k] = v
+	}
+
+	for _, fileKey := range toResolve {
+		target := strings.TrimSuffix(fileKey, suffix)
+
+		// An explicit inline value wins: silently overwriting it with file
+		// contents would make the effective credential depend on map
+		// iteration order.
+		if out[target] != "" {
+			return nil, fmt.Errorf("both %s and %s are set; provide one", target, fileKey)
+		}
+
+		data, err := os.ReadFile(out[fileKey])
+		if err != nil {
+			return nil, fmt.Errorf("reading %s: %w", fileKey, err)
+		}
+		if len(bytes.TrimSpace(data)) == 0 {
+			return nil, fmt.Errorf("%s is empty: %s", fileKey, out[fileKey])
+		}
+
+		// Strip trailing newlines only.
+		//
+		// `echo secret > file` and most editors append one, and passing it
+		// through would fail authentication for a reason that looks nothing
+		// like a stray byte. Trimming all whitespace would be worse: a
+		// password may legitimately begin or end with a space, and silently
+		// altering it swaps one baffling auth failure for another. Newlines
+		// are the case that actually bites, and the only one where the
+		// intent is unambiguous.
+		out[target] = string(bytes.TrimRight(data, "\r\n"))
+		delete(out, fileKey)
+	}
+	return out, nil
 }
