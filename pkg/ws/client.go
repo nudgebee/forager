@@ -82,6 +82,7 @@ type Client struct {
 	handler      MessageHandler
 	healthFn     HealthReportFunc
 	healthPeriod time.Duration
+	pingPeriod   time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
 	facts        AgentFacts
@@ -117,6 +118,7 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		accessSecret: accessSecret,
 		handler:      handler,
 		healthPeriod: period,
+		pingPeriod:   pingPeriod,
 		sendCh:       make(chan []byte, 64),
 		healthNow:    make(chan struct{}, 1),
 		logger:       logger,
@@ -287,8 +289,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		_ = conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// WriteControl, not WriteMessage: writeLoop may still be writing.
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(writeWait))
 		_ = conn.Close()
 	}()
 
@@ -373,7 +377,7 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -381,8 +385,9 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(writeWait)) // nolint:errcheck
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// WriteControl is safe to call concurrently with writeLoop's
+			// WriteMessage; a second WriteMessage caller panics in gorilla.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
 				c.logger.Error("ping error", "err", err)
 				return
 			}
