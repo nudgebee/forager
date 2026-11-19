@@ -1,0 +1,24 @@
+{
+  "_comment": "What stored and sealed credentials are bound to, per pushed datasource. Mirrored byte for byte in nudgebee-enterprise api-server/services/integrations/core/testdata/datasource_binding_vectors.json; both sides test against it, so the seal Nudgebee makes and the check the forager runs cannot drift.",
+  "vectors": [
+    {"proxy_type": "http-proxy", "config": {"base_url": "https://Tempo.Acme.internal:3200/prefix"}, "want": "https://tempo.acme.internal:3200"},
+    {"proxy_type": "http-proxy", "config": {"base_url": "https://es.internal"}, "want": "https://es.internal:443"},
+    {"proxy_type": "http-proxy", "config": {"base_url": "http://es.internal"}, "want": "http://es.internal:80"},
+    {"proxy_type": "http-proxy", "config": {"base_url": "HTTP://ES.Internal.:9200/"}, "want": "http://es.internal:9200"},
+    {"proxy_type": "http-proxy", "config": {"base_url": "http://[fd00::1]:8080"}, "want": "http://[fd00::1]:8080"},
+    {"proxy_type": "http-proxy", "config": {"url": "http://evil.example"}, "want": ""},
+    {"proxy_type": "http-proxy", "config": {"base_url": "::not a url"}, "want": ""},
+    {"proxy_type": "http-proxy", "config": {}, "want": ""},
+    {"proxy_type": "mcp-proxy", "config": {"url": "http://mcp.local:8080/sse"}, "want": "http://mcp.local:8080"},
+    {"proxy_type": "mcp-proxy", "config": {"base_url": "http://good.internal", "url": "http://evil.example"}, "want": "http://evil.example:80"},
+    {"proxy_type": "db-proxy", "config": {"host": "DB.internal", "port": 5432}, "want": "db.internal"},
+    {"proxy_type": "redis-proxy", "config": {"host": "cache.internal"}, "want": "cache.internal"},
+    {"proxy_type": "mongo-proxy", "config": {"host": "mongo.internal"}, "want": "mongo.internal"},
+    {"proxy_type": "ssh-proxy", "config": {"host": "Bastion"}, "want": "bastion"},
+    {"proxy_type": "ssh-proxy", "config": {}, "allowed_hosts": ["10.0.0.2", "10.0.0.1", "10.0.0.2"], "want": "scope:10.0.0.1,10.0.0.2"},
+    {"proxy_type": "ssh-proxy", "config": {"allowed_hosts": ["Web-1"]}, "allowed_hosts": ["web-2"], "want": "scope:web-1,web-2"},
+    {"proxy_type": "discovery-proxy", "config": {"allowed_cidrs": ["10.1.0.0/16", "10.0.0.0/16"]}, "want": "scope:10.0.0.0/16,10.1.0.0/16"},
+    {"proxy_type": "discovery-proxy", "config": {}, "allowed_hosts": ["192.168.0.0/24"], "want": "scope:192.168.0.0/24"},
+    {"proxy_type": "kafka-proxy", "config": {"brokers": "B2:9092, b1:9092"}, "want": "b1:9092,b2:9092"}
+  ]
+}
