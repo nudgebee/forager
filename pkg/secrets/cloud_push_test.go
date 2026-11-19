@@ -1,6 +1,7 @@
 package secrets
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -129,6 +130,186 @@ func TestCloudPushStore_MultipleDatasources(t *testing.T) {
 	}
 	if _, ok := store.Get("ds-3"); !ok {
 		t.Fatal("ds-3 should exist")
+	}
+}
+
+func TestCloudPushStore_HostBindingPersists(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"bearer_token": "tk"}, "tempo.acme.internal"); err != nil {
+		t.Fatalf("SetBound: %v", err)
+	}
+	if err := store.Set("ds-2", map[string]string{"password": "p"}); err != nil {
+		t.Fatalf("Set: %v", err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := reloaded.Host("ds-1"); got != "tempo.acme.internal" {
+		t.Fatalf("ds-1 host %q", got)
+	}
+	if got := reloaded.Host("ds-2"); got != "" {
+		t.Fatalf("ds-2 host %q, want none", got)
+	}
+	if got := reloaded.Host("missing"); got != "" {
+		t.Fatalf("missing host %q, want none", got)
+	}
+	if creds, ok := reloaded.Get("ds-1"); !ok || creds["bearer_token"] != "tk" {
+		t.Fatalf("ds-1 creds %v %v", creds, ok)
+	}
+}
+
+// A credentials.enc written before host binding (a bare map) still loads,
+// with every entry unbound.
+func TestCloudPushStore_LoadsLegacyFormat(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy := []byte(`{"ds-old":{"username":"u","password":"p"}}`)
+	encrypted, err := encryptAESGCM(store.key, legacy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.enc"), encrypted, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload legacy: %v", err)
+	}
+	creds, ok := reloaded.Get("ds-old")
+	if !ok || creds["username"] != "u" {
+		t.Fatalf("legacy entry %v %v", creds, ok)
+	}
+	if reloaded.Host("ds-old") != "" {
+		t.Fatal("legacy entry must be unbound")
+	}
+
+	if err := reloaded.SetBound("ds-new", map[string]string{"a": "b"}, "h"); err != nil {
+		t.Fatal(err)
+	}
+	again, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if _, ok := again.Get("ds-old"); !ok {
+		t.Fatal("legacy entry lost")
+	}
+	if again.Host("ds-new") != "h" {
+		t.Fatal("new entry lost its host")
+	}
+}
+
+// Rolling the agent back must not stop it from starting: credentials.enc stays
+// the bare id → credentials map every forager version reads, and the host
+// bindings live in a separate file an older forager ignores.
+func TestCloudPushStore_CredentialsFileStaysReadableByOlderForager(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"bearer_token": "tk"}, "tempo.internal"); err != nil {
+		t.Fatal(err)
+	}
+
+	data, err := os.ReadFile(filepath.Join(dir, "credentials.enc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	plaintext, err := decryptAESGCM(store.key, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var asOlderForagerReadsIt map[string]map[string]string
+	if err := json.Unmarshal(plaintext, &asOlderForagerReadsIt); err != nil {
+		t.Fatalf("credentials.enc is no longer the legacy format: %v", err)
+	}
+	if asOlderForagerReadsIt["ds-1"]["bearer_token"] != "tk" {
+		t.Fatalf("legacy view %v", asOlderForagerReadsIt)
+	}
+	if _, err := os.Stat(filepath.Join(dir, "credential_hosts.enc")); err != nil {
+		t.Fatalf("host bindings file: %v", err)
+	}
+}
+
+// A binding whose credentials are gone (an older forager rewrote
+// credentials.enc without that datasource) is dropped on load.
+func TestCloudPushStore_DropsBindingsWithoutCredentials(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-gone", map[string]string{"a": "b"}, "old.internal"); err != nil {
+		t.Fatal(err)
+	}
+	// Simulate an older forager rewriting credentials.enc without ds-gone.
+	encrypted, err := encryptAESGCM(store.key, []byte(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "credentials.enc"), encrypted, 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	reloaded, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Host("ds-gone") != "" {
+		t.Fatal("a binding without credentials must be dropped")
+	}
+	// A later push for the same id starts unbound, not bound to the stale host.
+	if err := reloaded.Set("ds-gone", map[string]string{"a": "b"}); err != nil {
+		t.Fatal(err)
+	}
+	if reloaded.Host("ds-gone") != "" {
+		t.Fatal("stale binding resurfaced")
+	}
+}
+
+// Writes go through a temp file and a rename; none is left behind.
+func TestCloudPushStore_WritesAtomically(t *testing.T) {
+	dir := t.TempDir()
+	store, err := NewCloudPushStore(dir, "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetBound("ds-1", map[string]string{"a": "b"}, "h"); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"credentials.enc.tmp", "credential_hosts.enc.tmp"} {
+		if _, err := os.Stat(filepath.Join(dir, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s left behind", name)
+		}
+	}
+	for _, name := range []string{"credentials.enc", "credential_hosts.enc"} {
+		info, err := os.Stat(filepath.Join(dir, name))
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if info.Mode().Perm() != 0600 {
+			t.Fatalf("%s mode %v, want 0600", name, info.Mode().Perm())
+		}
+	}
+}
+
+func TestCloudPushStore_DeleteMissingIsNoop(t *testing.T) {
+	store, err := NewCloudPushStore(t.TempDir(), "secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Delete("never-set"); err != nil {
+		t.Fatalf("Delete of a missing id: %v", err)
 	}
 }
 

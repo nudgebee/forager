@@ -210,19 +210,20 @@ func (r *Registry) Register(id string, entry DatasourceEntry, p Proxy) {
 	r.clearRequestError(id)
 }
 
-// Remove removes and closes a proxy by datasource ID.
+// Remove removes and closes a proxy by datasource ID. The entry is removed
+// even when Close fails, so a removed datasource never keeps serving.
 func (r *Registry) Remove(id string) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	if p, exists := r.proxies[id]; exists {
-		if err := p.Close(); err != nil {
-			return fmt.Errorf("closing proxy %s: %w", id, err)
-		}
 		delete(r.proxies, id)
 		delete(r.configs, id)
 		delete(r.lastSuccess, id)
 		r.clearRequestError(id)
+		if err := p.Close(); err != nil {
+			return fmt.Errorf("closing proxy %s: %w", id, err)
+		}
 	}
 	return nil
 }
