@@ -97,6 +97,24 @@ func TestRegistry_Remove(t *testing.T) {
 	}
 }
 
+// closeErrProxy fails to close.
+type closeErrProxy struct{ fakeProxy }
+
+func (c *closeErrProxy) Close() error { return errors.New("close failed") }
+
+// A proxy that fails to close is still removed: a removed datasource must
+// never keep serving.
+func TestRegistry_RemoveDropsEntryEvenWhenCloseFails(t *testing.T) {
+	r := NewRegistry()
+	r.Register("ds-1", DatasourceEntry{ID: "ds-1"}, &closeErrProxy{})
+	if err := r.Remove("ds-1"); err == nil {
+		t.Fatal("want the close error reported")
+	}
+	if _, ok := r.Get("ds-1"); ok {
+		t.Fatal("ds-1 should not exist after remove, even when close failed")
+	}
+}
+
 func TestRegistry_RemoveNonExistent(t *testing.T) {
 	r := NewRegistry()
 	// Should not error

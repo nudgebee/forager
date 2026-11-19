@@ -14,6 +14,14 @@ type Config struct {
 	AccessSecret string `mapstructure:"access_secret"`
 	DataDir      string `mapstructure:"data_dir"`
 
+	// EncPrivateKey is base64 of the 32-byte X25519 private key pushed
+	// credentials are sealed to; EncPrivateKeyFile names a file holding the
+	// same (base64, or the 32 raw bytes). Every replica of one forager
+	// identity must share it. Neither set: {data_dir}/enc_key, created on
+	// first start.
+	EncPrivateKey     string `mapstructure:"enc_private_key"`
+	EncPrivateKeyFile string `mapstructure:"enc_private_key_file"`
+
 	// Local datasource overrides (credential_source: local)
 	Datasources []LocalDatasource `mapstructure:"datasources"`
 
@@ -21,13 +29,35 @@ type Config struct {
 	HealthCheckIntervalMin int `mapstructure:"health_check_interval_min"`
 
 	// Message signing: base64-encoded Ed25519 public key for verifying relay messages.
-	// If empty, signature verification is disabled (warn-only mode).
+	// If empty and signing_public_keys is empty, signature verification is
+	// disabled (warn-only mode).
 	SigningPublicKey string `mapstructure:"signing_public_key"`
+
+	// SigningPublicKeys lists further verification keys, each with the key_id
+	// the relay signs with, so a relay key can be rotated: add the new key
+	// here, switch the relay, then remove the old one.
+	SigningPublicKeys []SigningKey `mapstructure:"signing_public_keys"`
 
 	// Cloud secret provider configs
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
 	Azure AzureConfig `mapstructure:"azure"`
+}
+
+// SigningKey is one entry of signing_public_keys.
+type SigningKey struct {
+	KeyID string `mapstructure:"key_id"`
+	Key   string `mapstructure:"key"`
+}
+
+// SigningKeyEntries is every configured verification key: the single
+// signing_public_key (no key id) followed by signing_public_keys.
+func (c *Config) SigningKeyEntries() []SigningKey {
+	var out []SigningKey
+	if c.SigningPublicKey != "" {
+		out = append(out, SigningKey{Key: c.SigningPublicKey})
+	}
+	return append(out, c.SigningPublicKeys...)
 }
 
 // DiscoveryDatasource configures a discovery datasource from local YAML.
@@ -155,6 +185,8 @@ func Load(configPath string) (*Config, error) {
 	// env vars for keys absent from the config file.
 	_ = v.BindEnv("access_key")
 	_ = v.BindEnv("access_secret")
+	_ = v.BindEnv("enc_private_key")
+	_ = v.BindEnv("enc_private_key_file")
 	_ = v.BindEnv("relay_url")
 	_ = v.BindEnv("data_dir")
 	_ = v.BindEnv("health_check_interval_min")
