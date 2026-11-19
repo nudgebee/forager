@@ -89,7 +89,7 @@ func FuzzVerify(f *testing.F) {
 		// parsing; a fresh seenNonces map keeps replay state isolated
 		// between inputs.
 		vv := &Verifier{
-			publicKey:  pub,
+			keys:       []verifierKey{{pub: pub}},
 			enabled:    true,
 			logger:     testLogger(),
 			seenNonces: make(map[string]time.Time),

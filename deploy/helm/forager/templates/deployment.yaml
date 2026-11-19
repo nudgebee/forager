@@ -53,6 +53,11 @@ spec:
                 secretKeyRef:
                   name: {{ include "forager.fullname" . }}
                   key: access-secret
+            - name: NB_ENC_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ include "forager.fullname" . }}
+                  key: enc-private-key
             - name: NB_RELAY_URL
               value: {{ .Values.forager.relayURL | quote }}
             - name: NB_DATA_DIR
