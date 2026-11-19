@@ -51,6 +51,29 @@ type InventoryReportFunc func() []DatasourceInventoryItem
 // Returns datasourceID → metadata map.
 type MetadataReportFunc func(ctx context.Context) map[string]map[string]any
 
+// AgentFacts is what the relay needs to know about this forager before
+// trusting it with credentials: whether it rejects unsigned messages, and
+// the key credentials must be sealed to. Sent in the greeting and repeated
+// on every health report so the relay's copy does not go stale.
+type AgentFacts struct {
+	SigningEnforced bool
+	EncPublicKey    string
+	EncKeyID        string
+	// SecretRefAllowlistSet reports whether forager.yaml restricts which
+	// secret-manager refs http-proxy datasources may read. Nudgebee refuses a
+	// new or re-pointed secret_ref on an HTTP datasource while it is false.
+	SecretRefAllowlistSet bool
+}
+
+func (f AgentFacts) fields() map[string]any {
+	out := map[string]any{"signing_enforced": f.SigningEnforced, "secret_ref_allowlist_set": f.SecretRefAllowlistSet}
+	if f.EncPublicKey != "" {
+		out["enc_public_key"] = f.EncPublicKey
+		out["enc_key_id"] = f.EncKeyID
+	}
+	return out
+}
+
 // Client manages the WebSocket connection to the relay server.
 type Client struct {
 	relayURL     string
@@ -59,8 +82,10 @@ type Client struct {
 	handler      MessageHandler
 	healthFn     HealthReportFunc
 	healthPeriod time.Duration
+	pingPeriod   time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
+	facts        AgentFacts
 	healthNow    chan struct{} // triggers an immediate health report
 
 	conn   *websocket.Conn
@@ -93,6 +118,7 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		accessSecret: accessSecret,
 		handler:      handler,
 		healthPeriod: period,
+		pingPeriod:   pingPeriod,
 		sendCh:       make(chan []byte, 64),
 		healthNow:    make(chan struct{}, 1),
 		logger:       logger,
@@ -113,6 +139,11 @@ func (c *Client) SetInventoryReporter(fn InventoryReportFunc) {
 // SetMetadataReporter sets the function called on connect to collect and send datasource metadata.
 func (c *Client) SetMetadataReporter(fn MetadataReportFunc) {
 	c.metadataFn = fn
+}
+
+// SetAgentFacts sets what the greeting and health reports say about this forager.
+func (c *Client) SetAgentFacts(f AgentFacts) {
+	c.facts = f
 }
 
 // Run connects and maintains the WebSocket connection with auto-reconnect.
@@ -220,7 +251,14 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 			"redis-proxy":     true,
 			"kafka-proxy":     true,
 			"discovery-proxy": true,
+			// Config sync extensions: credentials sealed to enc_public_key,
+			// and an ack that lists every datasource's outcome.
+			"credentials_enc":    true,
+			"per_datasource_ack": true,
 		},
+	}
+	for k, v := range c.facts.fields() {
+		greeting[k] = v
 	}
 	greetingBytes, _ := json.Marshal(greeting)
 	if err := conn.WriteMessage(websocket.TextMessage, greetingBytes); err != nil {
@@ -251,8 +289,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		_ = conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// WriteControl, not WriteMessage: writeLoop may still be writing.
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(writeWait))
 		_ = conn.Close()
 	}()
 
@@ -337,7 +377,7 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -345,8 +385,9 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(writeWait)) // nolint:errcheck
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// WriteControl is safe to call concurrently with writeLoop's
+			// WriteMessage; a second WriteMessage caller panics in gorilla.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
 				c.logger.Error("ping error", "err", err)
 				return
 			}
@@ -455,6 +496,9 @@ func (c *Client) sendHealthReport(ctx context.Context) {
 		"datasources":   report,
 		"agent_version": version.Version,
 		"agent_commit":  version.Commit,
+	}
+	for k, v := range c.facts.fields() {
+		msg[k] = v
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
