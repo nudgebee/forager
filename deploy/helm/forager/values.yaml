@@ -25,6 +25,13 @@ forager:
   accessKey: ''
   accessSecret: ''
   dataDir: /data
+  # Base64 of the 32-byte X25519 key pushed credentials are sealed to; every
+  # replica reads the same one. Empty: generated on install and kept across
+  # upgrades (via lookup). Changing it makes Nudgebee re-push every credential.
+  # GitOps (Argo CD, Flux, helm template) MUST set this: those render without
+  # cluster access, so lookup is empty and a new key would be generated on every
+  # render.
+  encPrivateKey: ''
   signingPublicKey: ''
 
 resources:

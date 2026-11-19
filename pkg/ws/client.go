@@ -5,7 +5,10 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
+	"math"
+	"math/rand/v2"
 	"net/http"
 	"sync"
 	"time"
@@ -20,7 +23,11 @@ const (
 	pongWait   = 40 * time.Second
 	pingPeriod = 30 * time.Second
 
-	maxReconnectDelay   = 30 * time.Second
+	// A reconnect waits a random time up to initialDelay, doubling after each
+	// reconnect that does not hold a session, up to maxReconnectDelay. The
+	// randomness keeps the agents of a relay that restarts from all redialing
+	// it at once and then retrying in step.
+	maxReconnectDelay   = 10 * time.Second
 	initialDelay        = 3 * time.Second
 	defaultHealthPeriod = 10 * time.Minute
 	initialHealthDelay  = 10 * time.Second
@@ -44,6 +51,29 @@ type InventoryReportFunc func() []DatasourceInventoryItem
 // Returns datasourceID → metadata map.
 type MetadataReportFunc func(ctx context.Context) map[string]map[string]any
 
+// AgentFacts is what the relay needs to know about this forager before
+// trusting it with credentials: whether it rejects unsigned messages, and
+// the key credentials must be sealed to. Sent in the greeting and repeated
+// on every health report so the relay's copy does not go stale.
+type AgentFacts struct {
+	SigningEnforced bool
+	EncPublicKey    string
+	EncKeyID        string
+	// SecretRefAllowlistSet reports whether forager.yaml restricts which
+	// secret-manager refs http-proxy datasources may read. Nudgebee refuses a
+	// new or re-pointed secret_ref on an HTTP datasource while it is false.
+	SecretRefAllowlistSet bool
+}
+
+func (f AgentFacts) fields() map[string]any {
+	out := map[string]any{"signing_enforced": f.SigningEnforced, "secret_ref_allowlist_set": f.SecretRefAllowlistSet}
+	if f.EncPublicKey != "" {
+		out["enc_public_key"] = f.EncPublicKey
+		out["enc_key_id"] = f.EncKeyID
+	}
+	return out
+}
+
 // Client manages the WebSocket connection to the relay server.
 type Client struct {
 	relayURL     string
@@ -52,8 +82,11 @@ type Client struct {
 	handler      MessageHandler
 	healthFn     HealthReportFunc
 	healthPeriod time.Duration
+	pingPeriod   time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
+	facts        AgentFacts
+	healthNow    chan struct{} // triggers an immediate health report
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -61,6 +94,10 @@ type Client struct {
 
 	logger *slog.Logger
 	done   chan struct{}
+
+	// connectedAt is when the current session was established; zero while
+	// dialing. Written by connectAndServe and read by Run, on one goroutine.
+	connectedAt time.Time
 }
 
 // MessageHandler processes incoming messages from the relay server.
@@ -81,7 +118,9 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		accessSecret: accessSecret,
 		handler:      handler,
 		healthPeriod: period,
+		pingPeriod:   pingPeriod,
 		sendCh:       make(chan []byte, 64),
+		healthNow:    make(chan struct{}, 1),
 		logger:       logger,
 		done:         make(chan struct{}),
 	}
@@ -102,10 +141,15 @@ func (c *Client) SetMetadataReporter(fn MetadataReportFunc) {
 	c.metadataFn = fn
 }
 
+// SetAgentFacts sets what the greeting and health reports say about this forager.
+func (c *Client) SetAgentFacts(f AgentFacts) {
+	c.facts = f
+}
+
 // Run connects and maintains the WebSocket connection with auto-reconnect.
 // Blocks until context is cancelled.
 func (c *Client) Run(ctx context.Context) error {
-	delay := initialDelay
+	attempt := 0 // reconnects since the last session that held
 
 	for {
 		select {
@@ -114,24 +158,46 @@ func (c *Client) Run(ctx context.Context) error {
 		default:
 		}
 
+		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
 		if err != nil {
 			c.logger.Error("websocket session ended", "err", err)
 		}
+		// A session that held for a while starts the backoff over.
+		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
+			attempt = 0
+		}
+		wait := reconnectWait(initialDelay, maxReconnectDelay, attempt, rand.Int64N)
+		attempt++
+		c.logger.Info("reconnecting to relay", "delay", wait.Round(time.Millisecond))
 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(delay):
+		case <-time.After(wait):
 		}
-
-		// Exponential backoff
-		delay = delay * 2
-		if delay > maxReconnectDelay {
-			delay = maxReconnectDelay
-		}
-		c.logger.Info("reconnecting to relay", "delay", delay)
 	}
+}
+
+// reconnectWait is how long to wait before reconnect number attempt
+// (0-based): a uniformly random duration up to base doubled attempt times,
+// capped at limit ("full jitter"). randN returns a value in [0, n).
+func reconnectWait(base, limit time.Duration, attempt int, randN func(n int64) int64) time.Duration {
+	ceiling := min(base, limit)
+	for i := 0; i < attempt && ceiling < limit; i++ {
+		if ceiling > limit/2 { // doubling would pass limit, or overflow
+			ceiling = limit
+			break
+		}
+		ceiling *= 2
+	}
+	if ceiling <= 0 {
+		return 0
+	}
+	if ceiling == math.MaxInt64 {
+		return time.Duration(randN(math.MaxInt64))
+	}
+	return time.Duration(randN(int64(ceiling) + 1))
 }
 
 func (c *Client) connectAndServe(ctx context.Context) error {
@@ -142,11 +208,20 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 
 	c.logger.Info("connecting to relay", "url", c.relayURL)
 
-	conn, _, err := websocket.DefaultDialer.DialContext(ctx, c.relayURL, header)
+	conn, resp, err := websocket.DefaultDialer.DialContext(ctx, c.relayURL, header)
 	if err != nil {
+		if resp != nil {
+			var body []byte
+			if resp.Body != nil {
+				body, _ = io.ReadAll(io.LimitReader(resp.Body, 1024))
+				resp.Body.Close() // nolint:errcheck
+			}
+			return fmt.Errorf("dial failed: %w (status=%d body=%q)", err, resp.StatusCode, body)
+		}
 		return fmt.Errorf("dial failed: %w", err)
 	}
 
+	c.connectedAt = time.Now()
 	c.connMu.Lock()
 	c.conn = conn
 	c.connMu.Unlock()
@@ -168,14 +243,22 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		"agent_build_time": version.BuildTime,
 		"protocol_version": "1.0.0",
 		"capabilities": map[string]bool{
-			"http-proxy":  true,
-			"db-proxy":    true,
-			"mcp-proxy":   true,
-			"ssh-proxy":   true,
-			"mongo-proxy": true,
-			"redis-proxy": true,
-			"kafka-proxy": true,
+			"http-proxy":      true,
+			"db-proxy":        true,
+			"mcp-proxy":       true,
+			"ssh-proxy":       true,
+			"mongo-proxy":     true,
+			"redis-proxy":     true,
+			"kafka-proxy":     true,
+			"discovery-proxy": true,
+			// Config sync extensions: credentials sealed to enc_public_key,
+			// and an ack that lists every datasource's outcome.
+			"credentials_enc":    true,
+			"per_datasource_ack": true,
 		},
+	}
+	for k, v := range c.facts.fields() {
+		greeting[k] = v
 	}
 	greetingBytes, _ := json.Marshal(greeting)
 	if err := conn.WriteMessage(websocket.TextMessage, greetingBytes); err != nil {
@@ -206,8 +289,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		_ = conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// WriteControl, not WriteMessage: writeLoop may still be writing.
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(writeWait))
 		_ = conn.Close()
 	}()
 
@@ -292,7 +377,7 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {
@@ -300,12 +385,23 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(writeWait)) // nolint:errcheck
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// WriteControl is safe to call concurrently with writeLoop's
+			// WriteMessage; a second WriteMessage caller panics in gorilla.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
 				c.logger.Error("ping error", "err", err)
 				return
 			}
 		}
+	}
+}
+
+// TriggerHealthReport asks the health loop to report now instead of waiting
+// for the next tick, e.g. after a datasource config push. Non-blocking;
+// coalesces concurrent triggers.
+func (c *Client) TriggerHealthReport() {
+	select {
+	case c.healthNow <- struct{}{}:
+	default:
 	}
 }
 
@@ -315,18 +411,30 @@ func (c *Client) healthReportLoop(ctx context.Context) {
 	case <-ctx.Done():
 		return
 	case <-time.After(initialHealthDelay):
+	case <-c.healthNow:
+		// A config sync arrived during the delay. Report now rather than wait it out.
 	}
 
 	ticker := time.NewTicker(c.healthPeriod)
 	defer ticker.Stop()
 
 	for {
+		// Any trigger already pending is covered by the report about to be taken;
+		// left in the channel it would fire a second full round of checks.
+		select {
+		case <-c.healthNow:
+		default:
+		}
 		c.sendHealthReport(ctx)
 
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+		case <-c.healthNow:
+			// The report is about to go out; restart the period so the ticker does
+			// not fire a second one right behind it.
+			ticker.Reset(c.healthPeriod)
 		}
 	}
 }
@@ -388,6 +496,9 @@ func (c *Client) sendHealthReport(ctx context.Context) {
 		"datasources":   report,
 		"agent_version": version.Version,
 		"agent_commit":  version.Commit,
+	}
+	for k, v := range c.facts.fields() {
+		msg[k] = v
 	}
 	data, err := json.Marshal(msg)
 	if err != nil {
