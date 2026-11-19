@@ -59,10 +59,14 @@ type AgentFacts struct {
 	SigningEnforced bool
 	EncPublicKey    string
 	EncKeyID        string
+	// SecretRefAllowlistSet reports whether forager.yaml restricts which
+	// secret-manager refs http-proxy datasources may read. Nudgebee refuses a
+	// new or re-pointed secret_ref on an HTTP datasource while it is false.
+	SecretRefAllowlistSet bool
 }
 
 func (f AgentFacts) fields() map[string]any {
-	out := map[string]any{"signing_enforced": f.SigningEnforced}
+	out := map[string]any{"signing_enforced": f.SigningEnforced, "secret_ref_allowlist_set": f.SecretRefAllowlistSet}
 	if f.EncPublicKey != "" {
 		out["enc_public_key"] = f.EncPublicKey
 		out["enc_key_id"] = f.EncKeyID
