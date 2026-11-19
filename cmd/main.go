@@ -15,6 +15,13 @@ var (
 )
 
 func main() {
+	// Subcommands are checked before flag parsing so that the agent's existing
+	// invocation (--config, --version) keeps working unchanged. Anything that
+	// is not a known subcommand falls through to agent mode.
+	if runStandalone(os.Args[1:]) {
+		return
+	}
+
 	flag.Parse()
 
 	if *showVersion {
