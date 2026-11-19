@@ -19,12 +19,12 @@ func FuzzParsePublicKey(f *testing.F) {
 	f.Add("")
 
 	f.Fuzz(func(t *testing.T, s string) {
-		key, err := parsePublicKey(s)
+		key, err := ParsePublicKey(s)
 		if err != nil {
 			return
 		}
 		if len(key) != ed25519.PublicKeySize {
-			t.Fatalf("parsePublicKey accepted a %d-byte key, want %d", len(key), ed25519.PublicKeySize)
+			t.Fatalf("ParsePublicKey accepted a %d-byte key, want %d", len(key), ed25519.PublicKeySize)
 		}
 	})
 }
@@ -89,7 +89,7 @@ func FuzzVerify(f *testing.F) {
 		// parsing; a fresh seenNonces map keeps replay state isolated
 		// between inputs.
 		vv := &Verifier{
-			publicKey:  pub,
+			keys:       []verifierKey{{pub: pub}},
 			enabled:    true,
 			logger:     testLogger(),
 			seenNonces: make(map[string]time.Time),
