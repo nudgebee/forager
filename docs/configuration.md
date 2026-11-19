@@ -185,6 +185,55 @@ other sync must carry them. Nudgebee always sends credentials on save.
 When a datasource leaves the account's configuration, its stored credentials are
 deleted from `credentials.enc` in the same sync.
 
+### Secret-manager references for HTTP datasources
+
+An http-proxy datasource pushed from Nudgebee may name a secret in AWS Secrets
+Manager, GCP Secret Manager or Azure Key Vault instead of carrying its
+credentials. Because whoever edits the integration chooses both the URL and the
+secret, set this list to restrict which secrets an HTTP datasource may read:
+once it is set, a reference that does not start with one of the prefixes is
+refused (`secret_ref_not_allowed`). Matching is a plain prefix match, so end
+each prefix with a separator (`/`, `-`): `secret:nudgebee` would also match
+`secret:nudgebee-prod-db-admin`.
+
+With no list, only the HTTP datasource types that read secret managers before
+this list existed — HTTP Proxy, Prometheus, Loki and SigNoz — keep resolving any
+reference, so an upgrade breaks no existing integration; every other HTTP
+datasource (the monitoring tools connected through the proxy agent) is refused
+until a list is set. The forager logs this once at startup and reports
+`secret_ref_allowlist_set` in its greeting; Nudgebee refuses a new or re-pointed
+`secret_ref` on an HTTP integration while it is false. Database, SSH and
+other proxy types are not restricted.
+
+```yaml
+secret_ref_allowlist:
+  - arn:aws:secretsmanager:eu-west-1:123456789012:secret:nudgebee/
+  - projects/my-project/secrets/nudgebee-
+```
+
+### Credential probe
+
+Nudgebee may send an http-proxy datasource with a `probe`: one authenticated
+request to a fixed API endpoint of that provider (for Grafana Tempo,
+`/api/v2/search/tags`). The forager runs it with the datasource's credentials in
+the pre-save connection test, so a wrong key is refused before it is saved
+(`bad_credentials` on 401 or 403), and in the health report. A datasource
+without a probe keeps the previous checks.
+
+### Cloud metadata endpoints
+
+The HTTP proxy refuses to connect to link-local addresses (`169.254.0.0/16`,
+`fe80::/10`), AWS's `fd00:ec2::254`, Azure's `168.63.129.16` and Alibaba
+Cloud's `100.100.100.200`, checked on the resolved address of every
+connection. The forager's own cloud credentials are served from those
+addresses, so no datasource URL can reach them.
+
+When `HTTP_PROXY`/`HTTPS_PROXY` is set, the outbound proxy resolves the target
+and the forager only sees the proxy's address. A `base_url` that names a
+metadata address or `metadata.google.internal` is still refused when the
+datasource is configured, but a name that only resolves to one is not: block
+those addresses on the outbound proxy too. The MCP proxy is not covered yet.
+
 ### Config sync acknowledgements
 
 Each `datasource_config_sync` is answered per datasource:
@@ -200,7 +249,7 @@ Each `datasource_config_sync` is answered per datasource:
 `status` is `ok` when every datasource applied, `partial` otherwise. Error codes:
 `no_encryption_key`, `key_mismatch`, `decrypt_failed`, `sealed_for_other_datasource`,
 `host_changed`, `store_failed`, `credential_resolve_failed`, `unknown_proxy_type`,
-`configure_failed`. An `ok` result may carry a `warning` when a secondary part was
+`configure_failed`, `secret_ref_not_allowed`. An `ok` result may carry a `warning` when a secondary part was
 not applied (a discovery scope whose ssh access could not be enabled).
 
 Host binding applies to the key each proxy type dials: `base_url` for the HTTP
