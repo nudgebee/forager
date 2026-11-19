@@ -95,6 +95,79 @@ func TestNewVerifier_PEMKey(t *testing.T) {
 	}
 }
 
+// A relay key rotates by adding the new public key beside the old one: a
+// message signed by either verifies, picked by key_id when the message names
+// one we know, by trying every key otherwise.
+func TestVerify_MultipleKeys_RotationWindow(t *testing.T) {
+	pubOld, privOld := generateTestKeypair()
+	pubNew, privNew := generateTestKeypair()
+	_, privStranger := generateTestKeypair()
+
+	v, err := NewVerifierWithKeys([]PublicKeyEntry{
+		{KeyID: "k-old", Key: base64.StdEncoding.EncodeToString(pubOld)},
+		{KeyID: "k-new", Key: base64.StdEncoding.EncodeToString(pubNew)},
+	}, testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifierWithKeys: %v", err)
+	}
+	if !v.Enabled() {
+		t.Fatal("expected verifier to be enabled")
+	}
+
+	sign := func(priv ed25519.PrivateKey, keyID string) []byte {
+		t.Helper()
+		s, err := NewSigner(base64.StdEncoding.EncodeToString(priv), keyID)
+		if err != nil {
+			t.Fatalf("NewSigner: %v", err)
+		}
+		signed, err := s.Sign([]byte(`{"action":"db_query","datasource_id":"ds-1","params":{}}`))
+		if err != nil {
+			t.Fatalf("Sign: %v", err)
+		}
+		return signed
+	}
+
+	cases := []struct {
+		name  string
+		msg   []byte
+		valid bool
+	}{
+		{"old key, named", sign(privOld, "k-old"), true},
+		{"new key, named", sign(privNew, "k-new"), true},
+		{"new key, unknown key_id falls back to every key", sign(privNew, "k-future"), true},
+		{"new key, no key_id", sign(privNew, ""), true},
+		{"old key signed but names the new key", sign(privOld, "k-new"), false},
+		{"stranger's key", sign(privStranger, "k-new"), false},
+		{"stranger's key, no key_id", sign(privStranger, ""), false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := v.Verify(tc.msg)
+			if tc.valid && err != nil {
+				t.Fatalf("expected valid, got %v", err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatal("expected verification to fail")
+			}
+		})
+	}
+}
+
+func TestNewVerifierWithKeys_EmptyEntriesDisable_BadKeyRejected(t *testing.T) {
+	v, err := NewVerifierWithKeys([]PublicKeyEntry{{KeyID: "blank", Key: "  "}}, testLogger())
+	if err != nil {
+		t.Fatalf("blank entries should be skipped: %v", err)
+	}
+	if v.Enabled() {
+		t.Fatal("no usable key must leave verification disabled")
+	}
+
+	_, err = NewVerifierWithKeys([]PublicKeyEntry{{KeyID: "bad", Key: "not-a-key!!"}}, testLogger())
+	if err == nil {
+		t.Fatal("expected an error for an unparsable key")
+	}
+}
+
 func TestVerify_Disabled(t *testing.T) {
 	v, _ := NewVerifier("", testLogger())
 	err := v.Verify([]byte(`{"action": "datasource_config_sync"}`))
@@ -403,5 +476,53 @@ func TestSignAndVerify_RoundTrip(t *testing.T) {
 
 	if err := verifier.Verify(signed); err != nil {
 		t.Fatalf("Verify: %v", err)
+	}
+}
+
+func TestVerify_ConcurrentReplay(t *testing.T) {
+	pub, priv := generateTestKeypair()
+	v, err := NewVerifier(base64.StdEncoding.EncodeToString(pub), testLogger())
+	if err != nil {
+		t.Fatalf("NewVerifier: %v", err)
+	}
+
+	signer := testSigner(t, priv)
+	msg := []byte(`{"action":"db_query","datasource_id":"ds-1","params":{"query":"SELECT 1"}}`)
+	signed, err := signer.Sign(msg)
+	if err != nil {
+		t.Fatalf("Sign: %v", err)
+	}
+
+	const goroutines = 20
+	errCh := make(chan error, goroutines)
+	for i := 0; i < goroutines; i++ {
+		go func() {
+			errCh <- v.Verify(signed)
+		}()
+	}
+
+	successCount := 0
+	replayCount := 0
+	for i := 0; i < goroutines; i++ {
+		err := <-errCh
+		if err == nil {
+			successCount++
+		} else {
+			replayCount++
+		}
+	}
+
+	if successCount != 1 {
+		t.Fatalf("expected exactly 1 verification success, got %d", successCount)
+	}
+	if replayCount != goroutines-1 {
+		t.Fatalf("expected %d replay rejections, got %d", goroutines-1, replayCount)
+	}
+}
+
+func TestNilVerifierIsDisabled(t *testing.T) {
+	var v *Verifier
+	if v.Enabled() {
+		t.Fatal("nil verifier reported enabled")
 	}
 }

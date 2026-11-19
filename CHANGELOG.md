@@ -8,22 +8,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `db_query` takes `read_only: true`, which runs the statement in a read-only transaction
+  (`BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL) so the database
+  itself refuses a write, and echoes `read_only: true` in the response. Other database types
+  refuse the parameter rather than run the statement read-write. Without it, `db_query` behaves
+  as before.
+- `vm_service_map` action on `http-proxy` Prometheus datasources: builds the service map of a
+  VM fleet — the active systemd units and containers on each host, and requests/errors/latency/
+  bytes per call between them — from node-agent series, with a fixed query set. A destination is
+  resolved to the host and service listening on it. Also available offline as
+  `nudgebee-forager servicemap --url ...`.
+- Prometheus datasources: health check now requires a 2xx from `/-/ready`
+  (fallback `/api/v1/status/buildinfo`) instead of treating any status below
+  500 as healthy.
+- `http-proxy` TLS material for customer-run stores: `ca_cert`, and
+  `client_cert`/`client_key` for mTLS (also as `*_file` paths), plus
+  `max_response_bytes`. `tls_skip_verify`, `follow_redirects` and
+  `max_response_bytes` can now be set from local YAML.
+- Error responses carry a machine-readable `error_code`
+  (`datasource_not_found`, `upstream_unreachable`, `ambiguous_datasource`) so
+  the server can retry on another forager when several share an account.
+- Health reports include `reachable`, `latency_ms` and `last_success`, and a
+  report is sent right after each `datasource_config_sync`.
 - OpenSSF Scorecard workflow (`scorecard.yml`) publishing results to the
   OpenSSF API, plus a Scorecard badge in the README.
 - CodeQL static analysis workflow (`codeql.yml`) for Go.
 - `govulncheck` job in CI to flag known vulnerabilities in dependencies.
 - Release artifacts now ship a `checksums.txt` with a keyless cosign
-  signature (`checksums.txt.sig` / `.pem`) so downloads can be verified.
+  signature (`checksums.txt.bundle`) so downloads can be verified.
 - Native Go fuzz tests for the signing package: public-key parsing,
   canonical-JSON normalization, and signature envelope verification.
 
 ### Changed
+- A request without `datasource_id` now fails with `ambiguous_datasource`
+  when more than one `http-proxy` datasource exists, instead of going to an
+  arbitrary one.
 - Pinned all GitHub Actions to full commit SHAs (Dependabot keeps the
   `# vX.Y.Z` comments and SHAs current).
 - Pinned Dockerfile base images (`golang`, `debian`) by digest and
   `govulncheck` to a tagged version (OpenSSF Scorecard Pinned-Dependencies).
 - Scoped workflow `GITHUB_TOKEN` permissions to least privilege: read-only
   at the top level, per-job escalation only where needed.
+
+### Fixed
+- MCP proxy (http/sse): concurrent callers no longer share one upstream
+  session. The proxy now runs the MCP `initialize` handshake, sends
+  `Mcp-Session-Id`, keeps one session per `session_id` request param,
+  closes idle sessions, and recovers when the server expires one.
+  Streamable HTTP servers that require sessions now work through forager.
 
 ## [0.1.0] - 2026-05-23
 

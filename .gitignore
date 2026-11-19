@@ -1,5 +1,10 @@
 # Binaries
 bin/
+build/
+# `go build -o forager ./cmd` is the obvious thing to type when following
+# the CLI docs, and it drops a 60MB binary in the repo root.
+/forager
+/nudgebee-forager
 *.exe
 *.exe~
 *.dll
