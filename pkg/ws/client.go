@@ -19,9 +19,8 @@ import (
 )
 
 const (
-	writeWait  = 10 * time.Second
-	pongWait   = 40 * time.Second
-	pingPeriod = 30 * time.Second
+	writeWait = 10 * time.Second
+	pongWait  = 40 * time.Second
 
 	// A reconnect waits a random time up to initialDelay, doubling after each
 	// reconnect that does not hold a session, up to maxReconnectDelay. The
@@ -99,6 +98,9 @@ type Client struct {
 type MessageHandler interface {
 	HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 }
+
+// pingPeriod is a var so tests can shorten it.
+var pingPeriod = 30 * time.Second
 
 // NewClient creates a new WebSocket client.
 // healthCheckIntervalMin sets the health report interval in minutes. If <= 0, defaults to 10 minutes.
@@ -283,8 +285,10 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
-		_ = conn.WriteMessage(websocket.CloseMessage,
-			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
+		// WriteControl, not WriteMessage: writeLoop may still be writing.
+		_ = conn.WriteControl(websocket.CloseMessage,
+			websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""),
+			time.Now().Add(writeWait))
 		_ = conn.Close()
 	}()
 
@@ -377,8 +381,9 @@ func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			conn.SetWriteDeadline(time.Now().Add(writeWait)) // nolint:errcheck
-			if err := conn.WriteMessage(websocket.PingMessage, nil); err != nil {
+			// WriteControl is safe to call concurrently with writeLoop's
+			// WriteMessage; a second WriteMessage caller panics in gorilla.
+			if err := conn.WriteControl(websocket.PingMessage, nil, time.Now().Add(writeWait)); err != nil {
 				c.logger.Error("ping error", "err", err)
 				return
 			}
