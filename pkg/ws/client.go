@@ -19,8 +19,9 @@ import (
 )
 
 const (
-	writeWait = 10 * time.Second
-	pongWait  = 40 * time.Second
+	writeWait  = 10 * time.Second
+	pongWait   = 40 * time.Second
+	pingPeriod = 30 * time.Second
 
 	// A reconnect waits a random time up to initialDelay, doubling after each
 	// reconnect that does not hold a session, up to maxReconnectDelay. The
@@ -77,6 +78,7 @@ type Client struct {
 	handler      MessageHandler
 	healthFn     HealthReportFunc
 	healthPeriod time.Duration
+	pingPeriod   time.Duration
 	inventoryFn  InventoryReportFunc
 	metadataFn   MetadataReportFunc
 	facts        AgentFacts
@@ -99,9 +101,6 @@ type MessageHandler interface {
 	HandleMessage(ctx context.Context, msg []byte) ([]byte, error)
 }
 
-// pingPeriod is a var so tests can shorten it.
-var pingPeriod = 30 * time.Second
-
 // NewClient creates a new WebSocket client.
 // healthCheckIntervalMin sets the health report interval in minutes. If <= 0, defaults to 10 minutes.
 func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler, logger *slog.Logger, healthCheckIntervalMin int) *Client {
@@ -115,6 +114,7 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		accessSecret: accessSecret,
 		handler:      handler,
 		healthPeriod: period,
+		pingPeriod:   pingPeriod,
 		sendCh:       make(chan []byte, 64),
 		healthNow:    make(chan struct{}, 1),
 		logger:       logger,
@@ -373,7 +373,7 @@ func (c *Client) writeLoop(ctx context.Context, conn *websocket.Conn) {
 }
 
 func (c *Client) pingLoop(ctx context.Context, conn *websocket.Conn) {
-	ticker := time.NewTicker(pingPeriod)
+	ticker := time.NewTicker(c.pingPeriod)
 	defer ticker.Stop()
 
 	for {

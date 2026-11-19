@@ -19,10 +19,6 @@ import (
 // writer; a second WriteMessage caller panics with "concurrent write to
 // websocket connection" (and trips -race).
 func TestPingAndWriteLoopsDoNotWriteConcurrently(t *testing.T) {
-	old := pingPeriod
-	pingPeriod = 50 * time.Microsecond
-	defer func() { pingPeriod = old }()
-
 	upgrader := websocket.Upgrader{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		conn, err := upgrader.Upgrade(w, r, nil)
@@ -45,6 +41,7 @@ func TestPingAndWriteLoopsDoNotWriteConcurrently(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	c := NewClient(srv.URL, "", "", nil, slog.New(slog.NewTextHandler(io.Discard, nil)), 0)
+	c.pingPeriod = 50 * time.Microsecond
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
