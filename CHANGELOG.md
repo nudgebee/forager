@@ -40,6 +40,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   canonical-JSON normalization, and signature envelope verification.
 
 ### Changed
+- Container image now builds on Red Hat UBI 9 (`ubi9/go-toolset` builder, `ubi9-minimal`
+  runtime) instead of `golang`/`debian`, to meet Red Hat chart certification. The runtime user
+  is now numeric uid/gid 10001 (was a system user with a distro-assigned id); `/data` ownership
+  moves with it.
 - A request without `datasource_id` now fails with `ambiguous_datasource`
   when more than one `http-proxy` datasource exists, instead of going to an
   arbitrary one.
