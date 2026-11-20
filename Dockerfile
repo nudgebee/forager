@@ -1,24 +1,29 @@
-# golang 1.26.10: fixes GO-2026-6809 (crypto/x509 trusts compromised intermediates),
-# which govulncheck finds reachable from the websocket client in 1.26.9.
-FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS build-stage
-# Always compile with the base image's Go, never an auto-downloaded toolchain.
+# The Go toolchain comes from the official image: Red Hat's go-toolset has no 1.27.4 yet,
+# and 1.27.4 carries security fixes in cgo and net/http. The build itself runs on UBI 9,
+# so the cgo binary links against the same glibc as the runtime image.
+FROM golang:1.27.4-bookworm@sha256:4fa7c968ba93f1635670522dbb01a2c78150443e1385746924566079f36570ea AS go-dist
+
+FROM registry.access.redhat.com/ubi9/go-toolset:1.27.3-1795042432@sha256:51eef2836e5223c41577757c30544fbfb3f0710f3436b70b82d2195e35fcb743 AS build-stage
+COPY --from=go-dist /usr/local/go /usr/local/go
+ENV PATH=/usr/local/go/bin:$PATH
+# Always compile with the copied Go, never an auto-downloaded toolchain.
 ENV GOTOOLCHAIN=local
+USER root
 
 WORKDIR /app
 
 # Install Oracle Instant Client (basiclite + SDK) for godror CGO build.
 # Uses Oracle's "latest" URL which always points to the current release.
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    libaio1 unzip wget && \
-    wget -q https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip && \
-    wget -q https://download.oracle.com/otn_software/linux/instantclient/instantclient-sdk-linuxx64.zip && \
+RUN dnf install -y --setopt=install_weak_deps=0 --nodocs libaio unzip && \
+    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/instantclient-basiclite-linuxx64.zip && \
+    curl -fsSLO https://download.oracle.com/otn_software/linux/instantclient/instantclient-sdk-linuxx64.zip && \
     unzip -q instantclient-basiclite-linuxx64.zip -d /opt/oracle && \
     unzip -oq instantclient-sdk-linuxx64.zip -d /opt/oracle && \
     rm -f instantclient-*.zip && \
     OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
     echo "$OCI_DIR" > /etc/ld.so.conf.d/oracle-instantclient.conf && \
     ldconfig && \
-    rm -rf /var/lib/apt/lists/*
+    dnf clean all
 
 COPY go.mod go.sum ./
 
@@ -40,33 +45,39 @@ RUN OCI_DIR=$(ls -d /opt/oracle/instantclient_* | head -1) && \
 RUN chmod +x /app/nudgebee-forager
 
 
-FROM debian:bookworm-slim@sha256:7b140f374b289a7c2befc338f42ebe6441b7ea838a042bbd5acbfca6ec875818 AS release-stage
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1794186349@sha256:f26ef64172ea61f5ac5ba4be8c5c738bf8760b22b3e5148ce7b40f7308ab32db AS release-stage
 
-# apt-get upgrade patches the base packages to the latest bookworm security
-# releases — the pinned digest snapshot drifts behind (Trivy flagged 13 fixable
-# C/H/M: libgnutls30 incl. 2 CRITICAL, libgcrypt20, liblzma5).
-# OS-package cache-bust: bumping OS_PKG_EPOCH (ISO week) changes this layer's
-# cache key so a registry/build cache can't serve a stale package layer; bump it
-# when a scan flags a stale package.
-# DEBIAN_FRONTEND=noninteractive keeps upgraded packages from opening debconf
-# prompts and hanging the non-TTY CI build; scoped via `export` so it does not
-# persist into the image.
-ARG OS_PKG_EPOCH=2026-W44
+ARG VERSION=dev
+ARG IMAGE_RELEASE=1
+LABEL name="nudgebee-forager" \
+      maintainer="nudgebee" \
+      vendor="nudgebee" \
+      version="${VERSION}" \
+      release="${IMAGE_RELEASE}" \
+      summary="Nudgebee Forager proxy agent" \
+      description="Nudgebee Forager proxy agent: connects to Nudgebee and proxies requests to private databases and services."
+
+# microdnf update patches the pinned base to the latest UBI9 errata.
+# OS_PKG_EPOCH: bump (ISO week) to bust the cached package layer when a scan
+# flags a stale package.
+ARG OS_PKG_EPOCH=2026-W47
 RUN echo "os-pkg-epoch: ${OS_PKG_EPOCH}" && \
-    export DEBIAN_FRONTEND=noninteractive && \
-    apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
-    ca-certificates libaio1 && \
-    apt-get clean && \
-    rm -rf /var/lib/apt/lists/*
+    microdnf update -y --nodocs --setopt=install_weak_deps=0 && \
+    microdnf install -y --nodocs --setopt=install_weak_deps=0 ca-certificates libaio && \
+    microdnf clean all && rm -rf /var/cache/dnf /var/cache/yum
 
 WORKDIR /app
 COPY --from=build-stage /app/nudgebee-forager /app/nudgebee-forager
 COPY --from=build-stage /opt/oracle/instantclient_* /opt/oracle/instantclient/
+COPY LICENSE NOTICE /licenses/
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient
 
-RUN groupadd --system nudgebee && useradd --system --no-create-home --gid nudgebee nudgebee
-RUN mkdir -p /data && chown nudgebee:nudgebee /data
-USER nudgebee
+# Keep uid/gid 999, what earlier images ran as: existing /data volumes hold an enc_key
+# readable only by its owner. /data is also group 0 writable for OpenShift's assigned uid.
+RUN echo "nudgebee:x:999:999::/app:/sbin/nologin" >> /etc/passwd && \
+    echo "nudgebee:x:999:" >> /etc/group && \
+    mkdir -p /data && chown 999:0 /data && chmod g=u /data
+USER 999
 
 ENV NB_DATA_DIR=/data
 
