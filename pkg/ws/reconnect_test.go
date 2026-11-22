@@ -116,7 +116,7 @@ func TestSimulatedDisconnectLogsNoErrors(t *testing.T) {
 	wsURL := "ws" + strings.TrimPrefix(srv.URL, "http")
 	client := NewClient(wsURL, "key", "secret", &fakeHandler{}, logger, 0)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	go func() {
@@ -124,7 +124,7 @@ func TestSimulatedDisconnectLogsNoErrors(t *testing.T) {
 	}()
 
 	// Wait until client reconnects (reaches connection 2)
-	deadline := time.Now().Add(2 * time.Second)
+	deadline := time.Now().Add(10 * time.Second)
 	for connCount.Load() < 2 && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}

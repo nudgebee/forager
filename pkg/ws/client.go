@@ -164,7 +164,7 @@ func (c *Client) Run(ctx context.Context) error {
 		err := c.connectAndServe(ctx)
 		if err != nil {
 			if isExpectedDisconnect(err) {
-				c.logger.Info("websocket session ended", "err", err)
+				c.logger.Warn("websocket session ended", "err", err)
 			} else {
 				c.logger.Error("websocket session ended", "err", err)
 			}
