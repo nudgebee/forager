@@ -54,6 +54,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the top level, per-job escalation only where needed.
 
 ### Fixed
+- `mcp-proxy` no longer sends a datasource's credentials to another server: it follows a
+  redirect only within the origin of the request that started it (or to that server's
+  `https://` upgrade), where before a redirect to any host kept custom headers such as
+  `X-API-Key`. A redirect that downgrades to `http://` or changes host or port now fails. It also gets the HTTP proxy's cloud
+  metadata guard: it never connects to a metadata address, and refuses a `url` or
+  `oauth_token_url` that names one.
 - MCP proxy (http/sse): concurrent callers no longer share one upstream
   session. The proxy now runs the MCP `initialize` handshake, sends
   `Mcp-Session-Id`, keeps one session per `session_id` request param,
