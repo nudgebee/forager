@@ -220,6 +220,11 @@ the pre-save connection test, so a wrong key is refused before it is saved
 (`bad_credentials` on 401 or 403), and in the health report. A datasource
 without a probe keeps the previous checks.
 
+A probe is a GET unless it sets `method: POST` and a fixed `body` (at most
+4 KiB, sent as `application/json` unless its `headers` set a content type).
+Dynatrace uses this: its check is a DQL `query:verify`, which validates the
+token without running a query.
+
 ### Cloud metadata endpoints
 
 The HTTP proxy refuses to connect to link-local addresses (`169.254.0.0/16`,

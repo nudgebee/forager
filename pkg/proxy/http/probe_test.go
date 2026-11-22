@@ -3,9 +3,11 @@ package http
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -87,6 +89,9 @@ func TestParseProbe_Refusals(t *testing.T) {
 		"backslash":          map[string]any{"path": `/api/..\admin`},
 		"encoded backslash":  map[string]any{"path": "/api/%5c..%5cadmin"},
 		"dot segment":        map[string]any{"path": "/./x"},
+		"unsupported method": map[string]any{"path": "/x", "method": "DELETE"},
+		"body on a GET":      map[string]any{"path": "/x", "body": "{}"},
+		"oversized body":     map[string]any{"path": "/x", "method": "POST", "body": strings.Repeat("x", maxProbeBody+1)},
 	} {
 		if _, err := parseProbe(raw); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -165,5 +170,46 @@ func TestResolveTargetURL_UnescapedRequestsUnchanged(t *testing.T) {
 		if got != want {
 			t.Errorf("%s:\n got  %s\n want %s", req, got, want)
 		}
+	}
+}
+
+// A POST probe sends its fixed body as JSON with the datasource's auth, and
+// is judged like a GET (Dynatrace's DQL query:verify).
+func TestProbe_PostWithBody(t *testing.T) {
+	type seen struct{ method, ctype, body string }
+	ch := make(chan seen, 2)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		ch <- seen{r.Method, r.Header.Get("Content-Type"), string(b)}
+		if r.Header.Get("Authorization") != "Bearer tk" {
+			w.WriteHeader(http.StatusUnauthorized)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	probe := map[string]any{"path": "/platform/storage/query/v1/query:verify", "method": "post", "body": `{"query":"fetch logs"}`}
+
+	if err := configureWithProbe(t, srv.URL, probe, map[string]string{"bearer_token": "tk"}).HealthCheck(context.Background()); err != nil {
+		t.Fatalf("probe should pass: %v", err)
+	}
+	if got := <-ch; got.method != http.MethodPost || got.ctype != "application/json" || got.body != `{"query":"fetch logs"}` {
+		t.Fatalf("probe request: %+v", got)
+	}
+
+	err := configureWithProbe(t, srv.URL, probe, map[string]string{"bearer_token": "wrong"}).HealthCheck(context.Background())
+	var pe *ProbeError
+	if !errors.As(err, &pe) || !pe.BadCredentials {
+		t.Fatalf("wrong token: got %v", err)
+	}
+	<-ch
+}
+
+// A probe without a method stays a bodiless GET.
+func TestProbe_DefaultsToGet(t *testing.T) {
+	srv, got := probeServer(t, http.StatusOK)
+	if err := configureWithProbe(t, srv.URL, map[string]any{"path": "/x"}, nil).HealthCheck(context.Background()); err != nil {
+		t.Fatalf("probe: %v", err)
+	}
+	if got.Method != http.MethodGet || got.Header.Get("Content-Type") != "" {
+		t.Fatalf("method=%s type=%q", got.Method, got.Header.Get("Content-Type"))
 	}
 }

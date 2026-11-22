@@ -21,10 +21,19 @@ type probeSpec struct {
 	// Headers are non-secret request headers the endpoint needs (a tenant
 	// header, say). Credentials are added from the datasource's own auth.
 	Headers map[string]string `json:"headers,omitempty"`
+	// Method is GET (the default) or POST, for providers whose credential
+	// check is a POST (Dynatrace's DQL query:verify). Body is the POST's fixed
+	// request body, sent as application/json unless Headers set a type.
+	Method string `json:"method,omitempty"`
+	Body   string `json:"body,omitempty"`
 	// OKStatuses default to any 2xx. BadCredentialStatuses default to 401, 403.
 	OKStatuses            []int `json:"ok_statuses,omitempty"`
 	BadCredentialStatuses []int `json:"bad_credential_statuses,omitempty"`
 }
+
+// maxProbeBody bounds a probe's request body: it is a fixed query from the
+// provider table, never data.
+const maxProbeBody = 4 << 10
 
 // parseProbe reads config.probe. Absent → nil; malformed → an error, so a
 // broken spec fails the configure instead of silently skipping the check.
@@ -50,6 +59,20 @@ func parseProbe(raw any) (*probeSpec, error) {
 		if s, err := url.PathUnescape(seg); err != nil || s == "." || s == ".." || strings.Contains(s, `\`) {
 			return nil, fmt.Errorf("probe.path may not contain dot segments, backslashes or bad escapes, got %q", p.Path)
 		}
+	}
+	p.Method = strings.ToUpper(p.Method)
+	switch p.Method {
+	case "", http.MethodGet:
+		p.Method = http.MethodGet
+		if p.Body != "" {
+			return nil, fmt.Errorf("probe.body needs method POST")
+		}
+	case http.MethodPost:
+	default:
+		return nil, fmt.Errorf("probe.method must be GET or POST, got %q", p.Method)
+	}
+	if len(p.Body) > maxProbeBody {
+		return nil, fmt.Errorf("probe.body is %d bytes, more than %d", len(p.Body), maxProbeBody)
 	}
 	for name := range p.Headers {
 		switch strings.ToLower(name) {
@@ -87,12 +110,19 @@ func (p *Proxy) runProbe(ctx context.Context, client *http.Client, spec *probeSp
 	if err != nil {
 		return err
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
+	var reqBody io.Reader
+	if spec.Body != "" {
+		reqBody = strings.NewReader(spec.Body)
+	}
+	req, err := http.NewRequestWithContext(ctx, spec.Method, target, reqBody)
 	if err != nil {
 		return err
 	}
 	for k, v := range spec.Headers {
 		req.Header.Set(k, v)
+	}
+	if spec.Body != "" && req.Header.Get("Content-Type") == "" {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	p.injectAuthWith(req, authType, creds)
 
