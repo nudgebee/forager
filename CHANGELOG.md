@@ -20,6 +20,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Docker: a `discovery` datasource can be built from environment variables, since the
+  install scripts do not run in a container. With `NB_DISCOVERY_CIDR` set (comma-separated
+  IPv4 CIDRs, each at most a /22; invalid entries are logged and skipped) and no discovery
+  datasource in the config, the agent adds one named `NB_DISCOVERY_NAME` (default
+  `lan-<access key prefix>`), logging in as `NB_SSH_USER` (default `ubuntu`) with
+  `<data_dir>/ssh/id_ed25519`, packs from `NB_PACK_DIR` (default `/etc/nudgebee/packs`),
+  `host_key_policy: accept-new` into `<data_dir>/known_hosts`, and `ssh_access` only when a
+  signing key is set. The key is generated on first start and its public half logged on
+  every start. The image ships the example pack as
+  `/etc/nudgebee/packs/linux-inventory-v2.yaml`. Not supported in the Helm chart.
 - Datasource metadata is reported again after a config push, not only when the agent
   connects, so the server sees a pushed discovery datasource's scope (and sweeps it)
   without waiting for a reconnect.

@@ -69,6 +69,9 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 
 	registry := proxy.NewRegistry()
 
+	// Before configuring: the datasource reads the key file it points to.
+	provisionEnvDiscovery(logger, cfg)
+
 	for _, ds := range cfg.Datasources {
 		configureDatasource(logger, registry, secretsMgr, verifier.Enabled(), ds)
 	}

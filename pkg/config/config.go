@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"os"
 	"strings"
 
 	"github.com/spf13/viper"
@@ -51,6 +52,15 @@ type Config struct {
 	AWS   AWSConfig   `mapstructure:"aws"`
 	GCP   GCPConfig   `mapstructure:"gcp"`
 	Azure AzureConfig `mapstructure:"azure"`
+
+	// envDiscovery is the discovery datasource built from NB_DISCOVERY_CIDR
+	// (see envdiscovery.go); nil when none was. envDiscoveryErrs holds the
+	// entries of NB_DISCOVERY_CIDR that were dropped.
+	envDiscovery     *LocalDatasource
+	envDiscoveryErrs []error
+	// envDiscoveryIgnored is set when NB_DISCOVERY_CIDR was set but the config
+	// already defines a discovery datasource, which wins.
+	envDiscoveryIgnored bool
 }
 
 // SigningKey is one entry of signing_public_keys.
@@ -248,6 +258,8 @@ func Load(configPath string) (*Config, error) {
 	if cfg.AccessSecret == "" {
 		return nil, fmt.Errorf("access_secret is required (set NB_ACCESS_SECRET or access_secret in config)")
 	}
+
+	cfg.applyEnvDiscovery(os.Getenv)
 
 	return &cfg, nil
 }
