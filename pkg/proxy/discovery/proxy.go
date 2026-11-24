@@ -97,6 +97,10 @@ type Proxy struct {
 	ldapConfigured bool
 
 	packs map[int]*Pack // version → loaded (and, with a key, verified) pack
+	// packGen counts cache resets. resolvePack stores a pack only if no reset
+	// happened while it was loading, so a pack parsed before a reconfigure added
+	// a key never lands in the cache that reconfigure started.
+	packGen uint64
 
 	unsignedWarn sync.Once
 }
@@ -123,6 +127,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	// reconfigure that adds a key must not keep serving a pack it never
 	// verified, so the cache starts over.
 	p.packs = make(map[int]*Pack)
+	p.packGen++
 
 	// Validated whether or not SSH credentials are present, so a typo in the
 	// policy fails configuration instead of surfacing when credentials are
@@ -640,6 +645,7 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	p.mu.RLock()
 	cached, hit := p.packs[version]
 	packDir := p.cfg.PackDir
+	gen := p.packGen
 	p.mu.RUnlock()
 	if hit {
 		return cached, nil
@@ -652,7 +658,7 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading content pack version %d: %w", version, err)
 	}
-	pack, err := p.loadPack(raw)
+	pack, gotGen, err := p.loadPack(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -661,8 +667,13 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen != gotGen || gotGen != p.packGen {
+		// Reconfigured while loading: the pack was checked against a key
+		// that is no longer current. Load again under the current config.
+		return nil, fmt.Errorf("content pack version %d: configuration changed while loading, retry", version)
+	}
 	p.packs[version] = pack
-	p.mu.Unlock()
 	return pack, nil
 }
 
@@ -674,14 +685,16 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 // packs, where a key would only be ceremony: whoever can write pack_dir can
 // also edit the config that names the key. It does not widen what a request
 // can do — a request still only selects a version already on disk.
-func (p *Proxy) loadPack(raw []byte) (*Pack, error) {
+func (p *Proxy) loadPack(raw []byte) (*Pack, uint64, error) {
 	p.mu.RLock()
 	pubKey := p.packPubKey
 	packDir := p.cfg.PackDir
+	gen := p.packGen
 	p.mu.RUnlock()
 
 	if pubKey != nil {
-		return ParseAndVerify(raw, pubKey)
+		pack, err := ParseAndVerify(raw, pubKey)
+		return pack, gen, err
 	}
 
 	p.unsignedWarn.Do(func() {
@@ -689,7 +702,8 @@ func (p *Proxy) loadPack(raw []byte) (*Pack, error) {
 			"pack_dir", packDir,
 			"hint", "set pack_public_key to require signed packs")
 	})
-	return ParseUnverified(raw)
+	pack, err := ParseUnverified(raw)
+	return pack, gen, err
 }
 
 // HealthCheck reports whether this datasource can serve at least one action.
@@ -827,6 +841,7 @@ func (p *Proxy) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.packs = make(map[int]*Pack)
+	p.packGen++
 	return nil
 }
 

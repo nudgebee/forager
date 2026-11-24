@@ -19,8 +19,7 @@ set -euo pipefail
 #   NB_SSH_USER             login user on the VMs (default: the sudo user,
 #                           else ubuntu)
 #   NB_DISCOVERY_NAME       datasource name (default: local-network)
-#   NB_PACK_URL             content pack to download (default: the example
-#                           pack in this repository)
+#   NB_PACK_URL             content pack to download (default: the release asset linux-inventory-v2.yaml)
 #   NB_SIGNING_PUBLIC_KEY   also turns on ad-hoc SSH access to discovered hosts
 #                           (ssh_access); without it only inventory runs
 #
@@ -46,7 +45,13 @@ RELAY_URL="${NB_RELAY_URL:-wss://relay.nudgebee.com/register}"
 
 DISCOVERY_ENABLED="${NB_DISCOVERY:-true}"
 DISCOVERY_NAME="${NB_DISCOVERY_NAME:-local-network}"
-PACK_URL="${NB_PACK_URL:-https://raw.githubusercontent.com/nudgebee/forager/main/docs/content-packs/linux-inventory-example.yaml}"
+# The pack ships as a release asset next to the binary, so it comes from the
+# same release (and mirror) as the agent rather than a moving branch.
+if [ "$VERSION" = "latest" ]; then
+    PACK_URL="${NB_PACK_URL:-${DOWNLOAD_BASE}/latest/download/linux-inventory-v2.yaml}"
+else
+    PACK_URL="${NB_PACK_URL:-${DOWNLOAD_BASE}/download/${VERSION}/linux-inventory-v2.yaml}"
+fi
 # A sweep contacts every address in scope. Anything wider than this is more
 # likely a misdetected or site-wide network than the local one.
 MAX_DISCOVERY_PREFIX=22
