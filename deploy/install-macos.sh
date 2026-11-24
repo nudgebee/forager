@@ -52,7 +52,7 @@ DISCOVERY_ENABLED="${NB_DISCOVERY:-true}"
 # access key (stable across reinstalls with the same key).
 default_discovery_name() {
     local host key
-    host=$( (scutil --get LocalHostName 2>/dev/null || hostname -s) | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//' | cut -c1-40)
+    host=$( (scutil --get LocalHostName 2>/dev/null || hostname -s) | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-40 | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')
     key=$(printf '%s' "${NB_ACCESS_KEY:-}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-6)
     printf '%s-%s' "${host:-lan}" "${key:-local}"
 }
