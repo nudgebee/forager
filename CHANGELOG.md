@@ -8,6 +8,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- `http-proxy` credential probes can be a POST with a fixed JSON `body` (`probe.method`,
+  `probe.body`), for providers whose credential check is a POST, such as Dynatrace's
+  DQL `query:verify`. A probe without a method is a GET, as before.
 - `db_query` takes `read_only: true`, which runs the statement in a read-only transaction
   (`BEGIN READ ONLY` on PostgreSQL, `START TRANSACTION READ ONLY` on MySQL) so the database
   itself refuses a write, and echoes `read_only: true` in the response. Other database types
