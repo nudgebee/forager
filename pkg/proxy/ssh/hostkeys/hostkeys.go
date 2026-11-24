@@ -26,6 +26,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -111,6 +112,13 @@ func Open(path, policy string, logger *slog.Logger) (*Store, error) {
 	}
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
+	}
+	// The path comes from the agent's local config (pushes cannot set it, see
+	// pkg/ws). Refusing parent-directory segments keeps a typo or a templated
+	// value from walking out of the directory the operator meant.
+	path = filepath.Clean(path)
+	if strings.Contains(path, "..") {
+		return nil, fmt.Errorf("known_hosts path %q must not contain \"..\"", path)
 	}
 
 	if policy == PolicyAcceptNew {
