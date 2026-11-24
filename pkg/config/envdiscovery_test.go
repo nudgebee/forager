@@ -164,6 +164,32 @@ datasources:
 	if len(cfg.Datasources) != 1 || cfg.Datasources[0].Name != "from-file" {
 		t.Errorf("datasources = %+v", cfg.Datasources)
 	}
+	if !cfg.EnvDiscoveryIgnored() {
+		t.Error("EnvDiscoveryIgnored = false; the ignored env setting should be reported")
+	}
+}
+
+// A malformed name or user falls back to the default and is reported,
+// rather than reaching the relay key or the SSH client as given.
+func TestEnvDiscovery_InvalidNameAndUserFallBack(t *testing.T) {
+	cfg := loadWithEnv(t, baseConfig, map[string]string{
+		EnvDiscoveryCIDR: "10.0.1.0/24",
+		EnvDiscoveryName: "bad name!",
+		EnvSSHUser:       "root; rm",
+	})
+	ds, errs := cfg.EnvDiscovery()
+	if ds == nil {
+		t.Fatal("no datasource synthesized")
+	}
+	if ds.Name != "lan-3f2a9c1e" {
+		t.Errorf("name = %q, want the default", ds.Name)
+	}
+	if ds.Credentials["username"] != "ubuntu" {
+		t.Errorf("username = %q, want the default", ds.Credentials["username"])
+	}
+	if len(errs) != 2 {
+		t.Errorf("errors = %v, want one for the name and one for the user", errs)
+	}
 }
 
 // ssh_access widens the key from pack commands to arbitrary commands, so it

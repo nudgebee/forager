@@ -26,9 +26,12 @@ import (
 // Nothing here is fatal. A failure is logged and the datasource is still
 // configured, which then reports its own error.
 func provisionEnvDiscovery(logger *slog.Logger, cfg *config.Config) {
-	ds, cidrErrs := cfg.EnvDiscovery()
-	for _, err := range cidrErrs {
-		logger.Error("ignoring discovery CIDR", "err", err)
+	if cfg.EnvDiscoveryIgnored() {
+		logger.Info("NB_DISCOVERY_CIDR is set but the config defines a discovery datasource; using the config")
+	}
+	ds, envErrs := cfg.EnvDiscovery()
+	for _, err := range envErrs {
+		logger.Error("discovery environment setting rejected", "err", err)
 	}
 	if ds == nil {
 		return
@@ -69,6 +72,13 @@ func provisionEnvDiscovery(logger *slog.Logger, cfg *config.Config) {
 // was created.
 func ensureSSHKey(path, comment string) (pubLine string, generated bool, err error) {
 	pemBytes, err := os.ReadFile(path)
+	if err == nil && len(pemBytes) == 0 {
+		// An empty file is a key that was never written; replace it.
+		if rmErr := os.Remove(path); rmErr != nil {
+			return "", false, fmt.Errorf("removing empty %s: %w", path, rmErr)
+		}
+		err = fs.ErrNotExist
+	}
 	switch {
 	case errors.Is(err, fs.ErrNotExist):
 		pemBytes, err = writeNewSSHKey(path, comment)
@@ -95,8 +105,10 @@ func ensureSSHKey(path, comment string) (pubLine string, generated bool, err err
 	return pubLine, generated, nil
 }
 
-// writeNewSSHKey creates an ed25519 key at path in OpenSSH format. O_EXCL
-// keeps it from replacing a key another process wrote in between.
+// writeNewSSHKey creates an ed25519 key at path in OpenSSH format. The key is
+// written to a temporary file and hard-linked into place, so path never holds
+// a partial key, and a key another process created in between is kept (the
+// link fails and that key is read instead).
 func writeNewSSHKey(path, comment string) ([]byte, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, fmt.Errorf("creating %s: %w", filepath.Dir(path), err)
@@ -111,18 +123,32 @@ func writeNewSSHKey(path, comment string) ([]byte, error) {
 	}
 	pemBytes := pem.EncodeToMemory(block)
 
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".id_ed25519-*")
 	if err != nil {
-		return nil, fmt.Errorf("creating %s: %w", path, err)
+		return nil, fmt.Errorf("creating key in %s: %w", filepath.Dir(path), err)
 	}
-	if _, err := f.Write(pemBytes); err != nil {
-		_ = f.Close()
-		_ = os.Remove(path)
+	tmpPath := tmp.Name()
+	defer func() { _ = os.Remove(tmpPath) }()
+	if err := tmp.Chmod(0o600); err != nil {
+		_ = tmp.Close()
 		return nil, fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := f.Close(); err != nil {
-		_ = os.Remove(path)
+	if _, err := tmp.Write(pemBytes); err != nil {
+		_ = tmp.Close()
 		return nil, fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return nil, fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := os.Link(tmpPath, path); err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			existing, readErr := os.ReadFile(path)
+			if readErr != nil {
+				return nil, fmt.Errorf("reading %s: %w", path, readErr)
+			}
+			return existing, nil
+		}
+		return nil, fmt.Errorf("installing %s: %w", path, err)
 	}
 	return pemBytes, nil
 }

@@ -168,3 +168,33 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 		t.Errorf("%s mode = %o, want %o", path, got, want)
 	}
 }
+
+// A key file left empty (a crash between create and write) is replaced
+// instead of failing every later start.
+func TestEnsureSSHKey_ReplacesEmptyFile(t *testing.T) {
+	dir := filepath.Join(t.TempDir(), "ssh")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "id_ed25519")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	pub, generated, err := ensureSSHKey(path, "nudgebee-forager@lan-test")
+	if err != nil {
+		t.Fatalf("ensureSSHKey: %v", err)
+	}
+	if !generated || !strings.HasPrefix(pub, "ssh-ed25519 ") {
+		t.Errorf("generated=%v pub=%q", generated, pub)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 || info.Mode().Perm() != 0o600 {
+		t.Errorf("key file after replace: info=%v err=%v", info, err)
+	}
+	entries, _ := os.ReadDir(dir)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".id_ed25519-") {
+			t.Errorf("temporary key file left behind: %s", e.Name())
+		}
+	}
+}

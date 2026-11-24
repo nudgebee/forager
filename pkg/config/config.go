@@ -58,6 +58,9 @@ type Config struct {
 	// entries of NB_DISCOVERY_CIDR that were dropped.
 	envDiscovery     *LocalDatasource
 	envDiscoveryErrs []error
+	// envDiscoveryIgnored is set when NB_DISCOVERY_CIDR was set but the config
+	// already defines a discovery datasource, which wins.
+	envDiscoveryIgnored bool
 }
 
 // SigningKey is one entry of signing_public_keys.

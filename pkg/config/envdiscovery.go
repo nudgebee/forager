@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"net"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -34,6 +35,19 @@ func (c *Config) EnvDiscovery() (*LocalDatasource, []error) {
 	return c.envDiscovery, c.envDiscoveryErrs
 }
 
+// EnvDiscoveryIgnored reports whether NB_DISCOVERY_CIDR was set but ignored
+// because the config already defines a discovery datasource.
+func (c *Config) EnvDiscoveryIgnored() bool {
+	return c.envDiscoveryIgnored
+}
+
+// discoveryNamePattern matches what the install scripts accept for
+// NB_DISCOVERY_NAME; sshUserPattern is a POSIX login name.
+var (
+	discoveryNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,62}$`)
+	sshUserPattern       = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_.-]{0,31}$`)
+)
+
 // applyEnvDiscovery adds a discovery datasource built from the environment
 // when NB_DISCOVERY_CIDR is set and the config defines no discovery
 // datasource of its own. A defined one always wins: the environment is a
@@ -49,6 +63,7 @@ func (c *Config) applyEnvDiscovery(getenv func(string) string) {
 	}
 	for _, ds := range c.Datasources {
 		if ds.Type == "discovery" {
+			c.envDiscoveryIgnored = true
 			return
 		}
 	}
@@ -71,10 +86,20 @@ func (c *Config) applyEnvDiscovery(getenv func(string) string) {
 	}
 
 	name := strings.TrimSpace(getenv(EnvDiscoveryName))
+	if name != "" && !discoveryNamePattern.MatchString(name) {
+		c.envDiscoveryErrs = append(c.envDiscoveryErrs,
+			fmt.Errorf("%s=%q may contain only letters, digits, '.', '_' and '-' (max 63); using the default name", EnvDiscoveryName, name))
+		name = ""
+	}
 	if name == "" {
 		name = defaultDiscoveryName(c.AccessKey)
 	}
 	user := strings.TrimSpace(getenv(EnvSSHUser))
+	if user != "" && !sshUserPattern.MatchString(user) {
+		c.envDiscoveryErrs = append(c.envDiscoveryErrs,
+			fmt.Errorf("%s=%q is not a valid login name; using %q", EnvSSHUser, user, defaultSSHUser))
+		user = ""
+	}
 	if user == "" {
 		user = defaultSSHUser
 	}
