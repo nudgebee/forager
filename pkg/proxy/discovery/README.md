@@ -21,9 +21,10 @@ everything and the forager holds no state between actions.
 ## Why the commands live outside the binary
 
 The forager carries no per-distro logic. Collection commands ship as a
-versioned, Ed25519-signed **content pack**; the binary verifies the signature,
-evaluates each collector's `when` guard against facts probed from the host,
-and runs the surviving commands verbatim. Adding a distro or fixing a command
+versioned **content pack**, Ed25519-signed when `pack_public_key` is set; the
+binary verifies the signature (when a key is configured), evaluates each
+collector's `when` guard against facts probed from the host, and runs the
+surviving commands verbatim. Adding a distro or fixing a command
 is a new pack version, not an agent release — which is the whole point, since
 fleet-wide agent upgrades are exactly what customers refuse to sign up for.
 
@@ -97,12 +98,13 @@ kept — that is a new host, not a stale one.
 | Param | Type | Notes |
 |---|---|---|
 | `targets` | `[]string` | Hosts to inventory. Must fall within `allowed_cidrs`. |
-| `content_pack_version` | `int` | Which pack to run. Loaded from `pack_dir`, verified, then cached. |
+| `content_pack_version` | `int` | Which pack to run. Loaded from `pack_dir`, verified if a pack key is set, then cached. |
 | `concurrency` | `int` | Optional per-request override, clamped to the module max. |
 
 A request **selects** a pack by version; it cannot carry one. Pack bodies
-reach `pack_dir` through the distribution pipeline, never through an action —
-so no part of an action payload is ever executed. A pack whose declared
+reach `pack_dir` through the distribution pipeline or the operator, never
+through an action — so no part of an action payload is ever executed. This
+holds whether or not a pack key is configured. A pack whose declared
 version differs from the one requested is refused, since mislabelled results
 would corrupt server-side correlation.
 
@@ -140,11 +142,15 @@ result on their own machine, or work on it from a clone of this repo.
 ```
 nudgebee-forager sweep --cidr 10.0.1.0/24 --ports 22
 
-nudgebee-forager pack keygen                      # prints a keypair
-nudgebee-forager pack sign ./pack.yaml --key <private>
 nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5 \
   --user nudgebee-ro --key ~/.ssh/id_ed25519 \
-  --pack ./pack.yaml --pack-key <public>
+  --pack ./pack.yaml \
+  --known-hosts ./known_hosts --host-key-policy accept-new
+
+# Or require a signed pack:
+nudgebee-forager pack keygen                      # prints a keypair
+nudgebee-forager pack sign ./pack.yaml --key <private>
+nudgebee-forager inventory ... --pack ./pack.yaml --pack-key <public>
 ```
 
 Results go to stdout as JSON; logs go to stderr, so output pipes into `jq`.
@@ -152,11 +158,10 @@ Results go to stdout as JSON; logs go to stderr, so output pipes into `jq`.
 These call the same proxy the agent calls, through the same exported API, so
 they exercise the real path rather than a parallel one.
 
-Two things are deliberately not relaxed. Pack signatures are still verified —
-`pack keygen` and `pack sign` exist so that staying strict is practical, rather
-than offering a flag to skip verification that would end up in a production
-config. And `--cidr` is required for inventory as well as sweep, so a mistyped
-target is refused rather than contacted.
+`--pack-key` behaves like `pack_public_key`: given, the pack must verify;
+omitted, the pack runs unsigned with a warning. `--cidr` is required for
+inventory as well as sweep, so a mistyped target is refused rather than
+contacted.
 
 ## Configuration
 
@@ -174,10 +179,16 @@ and no target list of its own.
 | `allowed_cidrs` | none | Segment scope for both sweep and inventory. Empty means unrestricted. |
 | `max_rate_pps` | 1000 | Ceiling on sweep probe rate, whatever a request asks for. |
 | `ldap` | — | Directory connection: `host`, `port`, `tls`/`start_tls`, `base_dn`, `page_size`. Absent host disables `discovery_ldap`. |
-| `pack_public_key` | — | Required; without it no pack can be trusted, so nothing runs. |
-| `pack_dir` | — | Directory holding signed packs, named `linux-inventory-v<N>.yaml`. Required to run inventory. |
-| `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified and unknown/changed keys are refused. |
+| `pack_public_key` | — | Optional. When set (here or as the `pack_public_key` credential), every pack must carry a valid signature from it. When empty, packs load unsigned: still parsed and validated (positive version, kind, collectors, declared version = requested = file name), and a warning is logged once. |
+| `pack_dir` | — | Directory holding packs, named `linux-inventory-v<N>.yaml`. Required to run inventory. |
+| `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified: a changed key is always refused, an unknown host is refused under `strict`. Re-read when it changes, so added keys need no restart. |
+| `host_key_policy` | `strict` | `accept-new` records the key of a host `known_hosts_file` has no entry for (trust on first use; the file is created 0600 if missing) and still refuses a changed key. Requires `known_hosts_file`. |
 | `ssh_access` | false | Also expose in-scope hosts for ad-hoc commands (see below). |
+
+With `known_hosts_file` set, the forager asks each host for the key types the
+file holds for it (`HostKeyAlgorithms`). Without that, x/crypto prefers ECDSA,
+and a file holding only the ed25519 key OpenSSH records would be refused as a
+mismatch.
 
 Credentials arrive through `pkg/secrets`, local or cloud-push, and never
 appear in logs or responses: `username` plus `private_key` or `password` for
@@ -186,21 +197,24 @@ failures echo the DN back, so those errors are redacted before they leave.
 
 ## SSH access (`ssh_access`)
 
-Inventory only runs signed pack commands. Setting `ssh_access: true` also
+Inventory only runs pack commands from `pack_dir`. Setting `ssh_access: true` also
 registers a sibling `ssh-proxy` datasource, `<id>:ssh` named `<name>-ssh`, in
 dynamic mode:
 - It uses the same credentials.
 - `allowed_hosts` is set to `allowed_cidrs`.
-- It verifies host keys against the same `known_hosts_file`.
+- It verifies host keys against the same `known_hosts_file`, under the same
+  `host_key_policy`.
 
 The server registers the sibling like any other ssh datasource, so
 `ssh_command` can target any in-scope host by passing `params.host`. The discovery datasource itself is unchanged.
 
-The flag widens what the credentials were granted for, from signed packs to
+The flag widens what the credentials were granted for, from pack commands to
 arbitrary commands. For that reason the sibling is refused, and an error is
 logged, unless all of the following hold:
 - `signing_public_key` is configured, so unsigned commands are rejected.
-- `known_hosts_file` is set. The trust-on-first-use tradeoff above is
+- `known_hosts_file` is set, so host keys are recorded and enforced. With
+  `host_key_policy: accept-new` the first contact is trusted and every later
+  one is checked against it; without a file nothing is ever checked, which is
   acceptable for inventory but not for a shell.
 - `allowed_cidrs` is non-empty. An unrestricted scope is never exposed.
 
@@ -220,7 +234,10 @@ a binary whose job is running signed content against production hosts.
   finds hosts nobody has catalogued, so their keys are unknown on first
   contact and change when a VM is re-imaged — strict verification by default
   would break the one thing this module exists to do. Customers who can
-  supply host keys should set `known_hosts_file` and get real verification.
+  supply host keys should set `known_hosts_file` and get real verification;
+  others can set `host_key_policy: accept-new` to trust first contact and
+  catch later changes. A re-imaged VM then needs its old line removed from
+  `known_hosts_file`.
   Recording keys on the server-side asset record and pinning on later runs is
   the fix that removes the tradeoff, and belongs with that work.
 - IPv6 sweeps are unsupported: enumerating a v6 prefix by address is not

@@ -13,6 +13,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
+
+	"nudgebee/forager/pkg/proxy/ssh/hostkeys"
 )
 
 // Target status values. These are the forager's view of what happened; the
@@ -51,6 +53,10 @@ type execConfig struct {
 	maxOutputBytes  int
 	dialTimeout     time.Duration
 	sshClientConfig *ssh.ClientConfig
+
+	// hostKeyAlgos picks the host key algorithms to request per address from
+	// known_hosts; nil leaves x/crypto's defaults. See hostkeys.
+	hostKeyAlgos func(addr string) []string
 }
 
 // runInventory collects from every target concurrently, bounded by
@@ -157,7 +163,7 @@ func dial(ctx context.Context, host string, cfg execConfig) (*ssh.Client, error)
 		_ = conn.SetDeadline(deadline)
 	}
 
-	c, chans, reqs, err := ssh.NewClientConn(conn, addr, cfg.sshClientConfig)
+	c, chans, reqs, err := ssh.NewClientConn(conn, addr, hostkeys.ClientConfig(cfg.sshClientConfig, cfg.hostKeyAlgos, addr))
 	if err != nil {
 		_ = conn.Close()
 		return nil, err

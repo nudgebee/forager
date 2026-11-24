@@ -349,3 +349,31 @@ func BenchmarkPackSelect(b *testing.B) {
 		_, _ = pack.Select(facts)
 	}
 }
+
+func TestParseUnverified(t *testing.T) {
+	p, err := ParseUnverified([]byte(validBody))
+	if err != nil {
+		t.Fatalf("valid unsigned pack rejected: %v", err)
+	}
+	if p.Version != 3 || len(p.Collectors) != 3 {
+		t.Errorf("parsed %+v", p)
+	}
+
+	// A signature, valid or not, is ignored rather than rejected: the same
+	// pack file can be used with and without a key.
+	_, priv := testKeys(t)
+	if _, err := ParseUnverified([]byte(signPack(t, validBody, priv))); err != nil {
+		t.Errorf("signed pack rejected in unsigned mode: %v", err)
+	}
+
+	for name, body := range map[string]string{
+		"empty":     "",
+		"version 0": strings.Replace(validBody, "version: 3", "version: 0", 1),
+		"bad kind":  strings.Replace(validBody, "kind: inventory", "kind: probe", 1),
+		"not yaml":  "version: [",
+	} {
+		if _, err := ParseUnverified([]byte(body)); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}

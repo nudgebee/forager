@@ -27,6 +27,7 @@ datasources:
       pack_public_key: AAAA
       pack_dir: /etc/nudgebee/packs
       known_hosts_file: /etc/nudgebee/known_hosts
+      host_key_policy: accept-new
       max_rate_pps: 50
       concurrency: 10
       ldap:
@@ -72,6 +73,9 @@ datasources:
 	}
 	if d.KnownHostsFile != "/etc/nudgebee/known_hosts" {
 		t.Errorf("known_hosts_file = %q", d.KnownHostsFile)
+	}
+	if d.HostKeyPolicy != "accept-new" {
+		t.Errorf("host_key_policy = %q", d.HostKeyPolicy)
 	}
 	if d.MaxRatePPS != 50 || d.Concurrency != 10 {
 		t.Errorf("max_rate_pps = %d, concurrency = %d", d.MaxRatePPS, d.Concurrency)

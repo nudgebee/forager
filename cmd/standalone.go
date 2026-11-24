@@ -71,7 +71,8 @@ Run discovery directly, without a relay or an account:
                              [--user nudgebee-ro --key ~/.ssh/id_ed25519]
   nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5,10.0.1.6 \
                              --user nudgebee-ro --key ~/.ssh/id_ed25519 \
-                             --pack ./linux-inventory-v2.yaml --pack-key <base64>
+                             --pack ./linux-inventory-v2.yaml [--pack-key <base64>] \
+                             [--known-hosts ./known_hosts --host-key-policy accept-new]
 
 Build the call graph of a VM fleet from the node-agent series in a
 Prometheus-compatible store:
@@ -206,11 +207,12 @@ func cmdInventory(args []string) error {
 	user := fs.String("user", "nudgebee-ro", "SSH username")
 	keyFile := fs.String("key", "", "path to SSH private key (required unless --password-env)")
 	passwordEnv := fs.String("password-env", "", "environment variable holding the SSH password")
-	packFile := fs.String("pack", "", "path to a signed content pack (required)")
-	packKey := fs.String("pack-key", "", "base64 Ed25519 public key the pack is signed with (required)")
+	packFile := fs.String("pack", "", "path to a content pack (required)")
+	packKey := fs.String("pack-key", "", "base64 Ed25519 public key the pack must be signed with; without it the pack runs unsigned")
 	port := fs.Int("port", 22, "SSH port")
 	concurrency := fs.Int("concurrency", 25, "hosts to inventory in parallel")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for host key verification")
+	hostKeyPolicy := fs.String("host-key-policy", "", "strict (default) or accept-new: record unknown hosts' keys in --known-hosts, refuse changed ones")
 	verbose := fs.Bool("v", false, "log progress to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -223,8 +225,6 @@ func cmdInventory(args []string) error {
 		return fmt.Errorf("--targets is required")
 	case *packFile == "":
 		return fmt.Errorf("--pack is required")
-	case *packKey == "":
-		return fmt.Errorf("--pack-key is required: a pack that cannot be verified is not run")
 	case *keyFile == "" && *passwordEnv == "":
 		return fmt.Errorf("one of --key or --password-env is required")
 	}
@@ -255,14 +255,19 @@ func cmdInventory(args []string) error {
 	}
 
 	cfg := map[string]any{
-		"allowed_cidrs":   []any{*cidr},
-		"pack_public_key": *packKey,
-		"pack_dir":        packDir,
-		"port":            float64(*port),
-		"concurrency":     float64(*concurrency),
+		"allowed_cidrs": []any{*cidr},
+		"pack_dir":      packDir,
+		"port":          float64(*port),
+		"concurrency":   float64(*concurrency),
+	}
+	if *packKey != "" {
+		cfg["pack_public_key"] = *packKey
 	}
 	if *knownHosts != "" {
 		cfg["known_hosts_file"] = *knownHosts
+	}
+	if *hostKeyPolicy != "" {
+		cfg["host_key_policy"] = *hostKeyPolicy
 	}
 
 	return runAction(cfg, creds, "discovery_inventory", map[string]any{
@@ -273,7 +278,7 @@ func cmdInventory(args []string) error {
 
 // stagePack copies a pack into a temporary directory under the name the proxy
 // expects, and reports the version it declares. Nothing here verifies the
-// signature; the proxy still does that.
+// signature; the proxy does that when --pack-key is given.
 func stagePack(path string) (dir string, version int, err error) {
 	raw, err := os.ReadFile(path)
 	if err != nil {

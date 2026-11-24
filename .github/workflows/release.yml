@@ -282,6 +282,8 @@ jobs:
           cp deploy/install.sh dist/install.sh
           cp deploy/install-macos.sh dist/install-macos.sh
           cp deploy/install.ps1 dist/install.ps1
+          # Default inventory pack, fetched by the installers from the same release.
+          cp docs/content-packs/linux-inventory-example.yaml dist/linux-inventory-v2.yaml
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 

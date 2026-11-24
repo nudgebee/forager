@@ -10,8 +10,9 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// Pack is a signed, versioned set of collection commands. The forager binary
-// carries no per-distro logic: it verifies the signature, evaluates each
+// Pack is a versioned set of collection commands, signed unless the datasource
+// runs without a pack key. The forager binary carries no per-distro logic: it
+// verifies the signature (when a key is configured), evaluates each
 // collector's `when` guard against facts probed from the host, and runs the
 // commands verbatim. Adding a distro or fixing a command ships as a new pack
 // version, never a new binary.
@@ -78,6 +79,29 @@ func ParseAndVerify(raw []byte, pubKey ed25519.PublicKey) (*Pack, error) {
 		return nil, fmt.Errorf("pack signature verification failed")
 	}
 
+	if err := p.validate(); err != nil {
+		return nil, err
+	}
+	return &p, nil
+}
+
+// ParseUnverified parses and validates a pack without checking its signature.
+// It is for a datasource with no pack key configured; the caller decides that
+// unsigned packs are acceptable. Everything except the signature is checked
+// exactly as ParseAndVerify does: size, YAML, a positive version, the kind,
+// and every collector. A signature line, if present, is ignored.
+func ParseUnverified(raw []byte) (*Pack, error) {
+	if len(raw) == 0 {
+		return nil, fmt.Errorf("empty pack")
+	}
+	if len(raw) > maxPackBytes {
+		return nil, fmt.Errorf("pack too large: %d bytes (max %d)", len(raw), maxPackBytes)
+	}
+
+	var p Pack
+	if err := yaml.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("parsing pack: %w", err)
+	}
 	if err := p.validate(); err != nil {
 		return nil, err
 	}

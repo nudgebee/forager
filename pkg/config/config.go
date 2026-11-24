@@ -73,15 +73,20 @@ func (c *Config) SigningKeyEntries() []SigningKey {
 // Field names mirror the discovery proxy's config keys so the two stay
 // readable side by side.
 type DiscoveryDatasource struct {
-	// PackPublicKey verifies content packs. Without it no pack can be
-	// trusted, so discovery_inventory refuses to run.
+	// PackPublicKey verifies content packs. Optional: when set, every pack
+	// must be signed by it; when empty, packs in pack_dir run unsigned.
 	PackPublicKey string `mapstructure:"pack_public_key"`
 
-	// PackDir holds signed packs as linux-inventory-v<N>.yaml.
+	// PackDir holds packs as linux-inventory-v<N>.yaml.
 	PackDir string `mapstructure:"pack_dir"`
 
 	// KnownHostsFile enables SSH host key verification when set.
 	KnownHostsFile string `mapstructure:"known_hosts_file"`
+
+	// HostKeyPolicy is "strict" (default) or "accept-new": record the key of
+	// a host known_hosts_file has no entry for, and still refuse a changed
+	// key. Requires known_hosts_file. Also applies to the ssh_access sibling.
+	HostKeyPolicy string `mapstructure:"host_key_policy"`
 
 	// SSHAccess also exposes the in-scope hosts for ad-hoc commands through
 	// a sibling ssh-proxy datasource, using the same credentials. Off by
@@ -143,6 +148,12 @@ type LocalDatasource struct {
 	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
 	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
 	AllowedHosts []string `mapstructure:"allowed_hosts"`
+
+	// SSH host key verification: KnownHosts is an OpenSSH known_hosts path;
+	// HostKeyPolicy is "strict" (default) or "accept-new" (record unknown
+	// hosts' keys, refuse changed ones; requires known_hosts).
+	KnownHosts    string `mapstructure:"known_hosts"`
+	HostKeyPolicy string `mapstructure:"host_key_policy"`
 
 	// Discovery fields. Scope (allowed_cidrs) reuses allowed_hosts above.
 	// In production these arrive as server-pushed datasource config; these

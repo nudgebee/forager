@@ -87,6 +87,7 @@ type Client struct {
 	metadataFn   MetadataReportFunc
 	facts        AgentFacts
 	healthNow    chan struct{} // triggers an immediate health report
+	metadataNow  chan struct{} // triggers a fresh metadata report
 
 	conn   *websocket.Conn
 	connMu sync.Mutex
@@ -121,6 +122,7 @@ func NewClient(relayURL, accessKey, accessSecret string, handler MessageHandler,
 		pingPeriod:   pingPeriod,
 		sendCh:       make(chan []byte, 64),
 		healthNow:    make(chan struct{}, 1),
+		metadataNow:  make(chan struct{}, 1),
 		logger:       logger,
 		done:         make(chan struct{}),
 	}
@@ -319,12 +321,13 @@ func (c *Client) connectAndServe(ctx context.Context) error {
 		}()
 	}
 
-	// Metadata collection goroutine (runs once, async)
+	// Metadata goroutine: reports once per session, and again whenever a
+	// config push changes the datasources (see TriggerMetadata).
 	if c.metadataFn != nil {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			c.sendMetadata(ctx)
+			c.metadataLoop(ctx)
 		}()
 	}
 
@@ -460,6 +463,35 @@ func (c *Client) sendInventory() {
 	}
 	c.Send(data)
 	c.logger.Info("sent datasource inventory for auto-registration", "datasource_count", len(items))
+}
+
+// TriggerMetadata asks for the datasource metadata to be reported again, e.g.
+// after a config push created or changed a datasource. The server reads a
+// discovery datasource's scope and pack versions from it, and sweeps on it;
+// without a resend those stay as they were until the next reconnect.
+// Non-blocking; coalesces concurrent triggers.
+func (c *Client) TriggerMetadata() {
+	select {
+	case c.metadataNow <- struct{}{}:
+	default:
+	}
+}
+
+func (c *Client) metadataLoop(ctx context.Context) {
+	for {
+		// A trigger pending from before this report is covered by it.
+		select {
+		case <-c.metadataNow:
+		default:
+		}
+		c.sendMetadata(ctx)
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-c.metadataNow:
+		}
+	}
 }
 
 func (c *Client) sendMetadata(ctx context.Context) {

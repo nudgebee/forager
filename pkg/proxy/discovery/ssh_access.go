@@ -23,11 +23,12 @@ func SSHAccessEnabled(cfg map[string]any) bool {
 // SSHAccessConfig derives the ssh-proxy config for the SSH access sibling of
 // a discovery datasource.
 //
-// Discovery credentials are granted for signed content packs. ssh_access lets
+// Discovery credentials are granted for content pack commands. ssh_access lets
 // the same credentials run arbitrary commands, so it is held to a stricter bar
 // than inventory: the scope must be explicit (an empty allowed_cidrs means
 // "anywhere" to discovery, which is not acceptable for a shell), host keys
-// must be verified, and requests must be signed.
+// must be verified, and requests must be signed. host_key_policy carries over,
+// so accept-new learns keys into the same known_hosts_file for both.
 func SSHAccessConfig(cfg map[string]any, signingEnabled bool) (map[string]any, error) {
 	if !signingEnabled {
 		return nil, errors.New("ssh_access requires signing_public_key so commands are verified")
@@ -53,6 +54,9 @@ func SSHAccessConfig(cfg map[string]any, signingEnabled bool) (map[string]any, e
 	}
 	if n, ok := cfg["max_output_bytes"]; ok {
 		out["max_output_bytes"] = n
+	}
+	if policy, ok := cfg["host_key_policy"].(string); ok && policy != "" {
+		out["host_key_policy"] = policy
 	}
 	return out, nil
 }

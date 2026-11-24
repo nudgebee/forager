@@ -29,12 +29,13 @@ forager:
         - 10.0.1.0/24
 
       discovery:
-        # Verifies content packs. Without it discovery_inventory refuses to
-        # run — an unverified pack is indistinguishable from a hostile one.
+        # Verifies content packs. Optional, and enforced when set: every pack
+        # must then be signed by this key. Left empty, packs in pack_dir run
+        # unsigned — set it whenever the packs come from anywhere but you.
         pack_public_key: ''
 
-        # Directory holding signed packs as linux-inventory-v<N>.yaml. Mount
-        # it read-only via extraVolumes below.
+        # Directory holding packs as linux-inventory-v<N>.yaml. Mount it
+        # read-only via extraVolumes below.
         pack_dir: /etc/nudgebee/packs
 
         # Optional: verify SSH host keys against a known_hosts file. Off by
@@ -43,6 +44,11 @@ forager:
         # host keys — the residual risk otherwise is a spoofed host feeding
         # us false inventory.
         # known_hosts_file: /etc/nudgebee/known_hosts
+
+        # strict (default) or accept-new: record the key of a host
+        # known_hosts_file has no entry for, still refuse a changed key. The
+        # file must then be writable by the agent.
+        # host_key_policy: accept-new
 
         # Ceiling on sweep probe rate, whatever a request asks for. The
         # default of 1000 is a safety limit, not a target; the per-request

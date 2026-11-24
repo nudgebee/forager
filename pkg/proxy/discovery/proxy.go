@@ -18,9 +18,9 @@ import (
 	"time"
 
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 
 	"nudgebee/forager/pkg/proxy"
+	"nudgebee/forager/pkg/proxy/ssh/hostkeys"
 	"nudgebee/forager/pkg/signing"
 )
 
@@ -47,11 +47,13 @@ type Config struct {
 	MaxOutputBytes int      `json:"max_output_bytes"`
 	AllowedCIDRs   []string `json:"allowed_cidrs"`
 
-	// PackPublicKey verifies content packs. Defaults to the agent's message
-	// signing key when empty, so packs and actions share one trust root.
+	// PackPublicKey verifies content packs. Optional: when set (here or as
+	// the pack_public_key credential) every pack must carry a valid signature
+	// from it. When empty, packs in PackDir are loaded unsigned — still
+	// parsed and validated, and still only from PackDir, never from a request.
 	PackPublicKey string `json:"pack_public_key"`
 
-	// PackDir caches verified packs on disk, keyed by version.
+	// PackDir holds packs on disk as linux-inventory-v<N>.yaml.
 	PackDir string `json:"pack_dir"`
 
 	// MaxRatePPS caps sweep probe rate regardless of what a request asks for.
@@ -62,22 +64,31 @@ type Config struct {
 	LDAP ldapConfig `json:"ldap"`
 
 	// KnownHostsFile enables SSH host key verification against an OpenSSH
-	// known_hosts file. When set, a host whose key is absent or changed is
-	// refused. Discovery finds hosts whose keys we have not seen before, so
-	// this cannot be the default yet — but customers who can supply host keys
-	// (config management, golden images) should get real verification.
+	// known_hosts file. When set, a host whose key changed is refused, and so
+	// is a host with no entry unless HostKeyPolicy is accept-new. The file is
+	// re-read when it changes. Discovery finds hosts whose keys we have not
+	// seen before, so this cannot be the default yet — but customers who can
+	// supply host keys (config management, golden images) should get real
+	// verification.
 	KnownHostsFile string `json:"known_hosts_file"`
+
+	// HostKeyPolicy is "strict" (default) or "accept-new": record the key of
+	// a host KnownHostsFile has no entry for (trust on first use), and still
+	// refuse a host whose key changed. Requires KnownHostsFile.
+	HostKeyPolicy string `json:"host_key_policy"`
 }
 
 // Proxy executes discovery actions against hosts in its network segment.
-// It installs nothing on those hosts: every command comes from a signed pack
-// and runs over SSH as an unprivileged read-only user.
+// It installs nothing on those hosts: every command comes from a pack in
+// pack_dir (signature-verified when a pack key is configured) and runs over
+// SSH as an unprivileged read-only user.
 type Proxy struct {
 	mu     sync.RWMutex
 	cfg    Config
 	logger *slog.Logger
 
 	sshConfig    *ssh.ClientConfig
+	hostKeyAlgos func(addr string) []string // nil without a known_hosts_file
 	packPubKey   ed25519.PublicKey
 	allowedNets  []*net.IPNet
 	allowedHosts []string
@@ -85,7 +96,13 @@ type Proxy struct {
 	ldapCfg        ldapConfig
 	ldapConfigured bool
 
-	packs map[int]*Pack // version → verified pack
+	packs map[int]*Pack // version → loaded (and, with a key, verified) pack
+	// packGen counts cache resets. resolvePack stores a pack only if no reset
+	// happened while it was loading, so a pack parsed before a reconfigure added
+	// a key never lands in the cache that reconfigure started.
+	packGen uint64
+
+	unsignedWarn sync.Once
 }
 
 func New(logger *slog.Logger) *Proxy {
@@ -106,22 +123,40 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	applyConfigDefaults(&cfg)
 	p.cfg = cfg
 
+	// Cached packs were loaded under the previous pack key, or with none. A
+	// reconfigure that adds a key must not keep serving a pack it never
+	// verified, so the cache starts over.
+	p.packs = make(map[int]*Pack)
+	p.packGen++
+
+	// Validated whether or not SSH credentials are present, so a typo in the
+	// policy fails configuration instead of surfacing when credentials are
+	// added later.
+	if _, err := hostkeys.ParsePolicy(cfg.HostKeyPolicy); err != nil {
+		return fmt.Errorf("discovery: %w", err)
+	}
+	if cfg.HostKeyPolicy == hostkeys.PolicyAcceptNew && cfg.KnownHostsFile == "" {
+		return fmt.Errorf("discovery: host_key_policy %q requires known_hosts_file", cfg.HostKeyPolicy)
+	}
+
 	// SSH credentials are optional: sweeping and directory queries need none.
 	// Requiring them up front would force an operator standing up a
 	// sweep-only datasource to invent credentials that are never used, which
 	// is a bad habit to build into a values file. A datasource without them
 	// simply cannot serve discovery_inventory, and says so when asked.
 	p.sshConfig = nil
+	p.hostKeyAlgos = nil
 	if username := creds["username"]; username != "" {
 		authMethods, err := buildAuthMethods(creds)
 		if err != nil {
 			return fmt.Errorf("discovery: %w", err)
 		}
 
-		hostKeyCallback, err := p.hostKeyCallback(cfg)
+		hostKeyCallback, hostKeyAlgos, err := p.hostKeyCallback(cfg)
 		if err != nil {
 			return fmt.Errorf("discovery: %w", err)
 		}
+		p.hostKeyAlgos = hostKeyAlgos
 
 		p.sshConfig = &ssh.ClientConfig{
 			User:            username,
@@ -143,6 +178,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.ldapCfg.BindPass = creds["ldap_bind_password"]
 	p.ldapConfigured = cfg.LDAP.Host != ""
 
+	p.packPubKey = nil
 	packKey := cfg.PackPublicKey
 	if packKey == "" {
 		packKey = creds["pack_public_key"]
@@ -165,29 +201,35 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 }
 
 // hostKeyCallback returns known_hosts verification when the customer has
-// supplied a file, and otherwise accepts unknown keys with a warning.
+// supplied a file, and otherwise accepts unknown keys with a warning. With a
+// file it also returns the per-address host key algorithm chooser (see
+// hostkeys.Store.HostKeyAlgorithms); without one that is nil.
+//
+// host_key_policy accept-new is the middle ground for a file that starts out
+// empty: a host's key is recorded on first contact and enforced after that.
 //
 // Discovery's job is finding hosts nobody has catalogued, so their keys are
 // unknown on first contact and change whenever a VM is re-imaged — strict
 // verification by default would make the product unable to do the one thing
 // it exists for. The residual risk is bounded: collection runs read-only
-// under an unprivileged credential and executes only signature-verified
-// commands, so a spoofed host can feed us false inventory but cannot gain
+// under an unprivileged credential and executes only pack commands from
+// pack_dir, so a spoofed host can feed us false inventory but cannot gain
 // anything from us. Recording keys on the server-side asset record and
 // pinning on subsequent runs is the real fix and belongs with that work.
-func (p *Proxy) hostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
+func (p *Proxy) hostKeyCallback(cfg Config) (ssh.HostKeyCallback, func(string) []string, error) {
 	if cfg.KnownHostsFile != "" {
-		cb, err := knownhosts.New(cfg.KnownHostsFile)
+		store, err := hostkeys.Open(cfg.KnownHostsFile, cfg.HostKeyPolicy, p.logger)
 		if err != nil {
-			return nil, fmt.Errorf("loading known_hosts_file %q: %w", cfg.KnownHostsFile, err)
+			return nil, nil, fmt.Errorf("known_hosts_file: %w", err)
 		}
-		p.logger.Info("ssh host key verification enabled", "known_hosts", cfg.KnownHostsFile)
-		return cb, nil
+		p.logger.Info("ssh host key verification enabled",
+			"known_hosts", store.Path(), "host_key_policy", store.Policy())
+		return store.HostKeyCallback(), store.HostKeyAlgorithms, nil
 	}
 
 	p.logger.Warn("ssh host key verification disabled: no known_hosts_file configured",
 		"hint", "set known_hosts_file to verify target host keys")
-	return ssh.InsecureIgnoreHostKey(), nil // #nosec G106 -- see hostKeyCallback doc comment
+	return ssh.InsecureIgnoreHostKey(), nil, nil // #nosec G106 -- see hostKeyCallback doc comment
 }
 
 func applyConfigDefaults(cfg *Config) {
@@ -334,6 +376,7 @@ func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*pro
 	maxRate := p.cfg.MaxRatePPS
 	configuredCIDRs := p.allowedNets
 	sshCfg := p.sshConfig
+	hostKeyAlgos := p.hostKeyAlgos
 	sshPort := p.cfg.Port
 	concurrency := p.cfg.Concurrency
 	p.mu.RUnlock()
@@ -376,6 +419,7 @@ func (p *Proxy) handleSweep(ctx context.Context, req *proxy.ActionRequest) (*pro
 			maxOutputBytes:  cloudIdentityMaxOutputBytes,
 			dialTimeout:     cloudIdentityDialTimeout,
 			sshClientConfig: sshCfg,
+			hostKeyAlgos:    hostKeyAlgos,
 		}
 		enrichCloudIdentity(ctx, result.Hosts, identityCfg)
 	}
@@ -526,6 +570,7 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	p.mu.RLock()
 	cfg := p.cfg
 	sshCfg := p.sshConfig
+	hostKeyAlgos := p.hostKeyAlgos
 	p.mu.RUnlock()
 
 	if sshCfg == nil {
@@ -548,6 +593,7 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 		maxOutputBytes:  cfg.MaxOutputBytes,
 		dialTimeout:     time.Duration(cfg.DialTimeoutS) * time.Second,
 		sshClientConfig: sshCfg,
+		hostKeyAlgos:    hostKeyAlgos,
 	}
 	if v, ok := intParam(req.Params, "concurrency"); ok && v > 0 && v <= maxConcurrency {
 		execCfg.concurrency = v
@@ -577,14 +623,16 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Result: data}, nil
 }
 
-// resolvePack returns a verified pack for the requested version.
+// resolvePack returns the pack for the requested version, verified when a
+// pack key is configured.
 //
 // A request selects a pack by version; it cannot carry the pack itself.
 // Accepting pack bodies inline would put executable content on the request
-// path, and while the signature check would still gate execution, keeping
-// commands sourced from locally cached, already-verified files removes that
-// exposure entirely. Packs reach pack_dir through the distribution pipeline,
-// not through actions.
+// path. Keeping commands sourced from files in pack_dir removes that exposure
+// entirely — and without a pack key it is the only thing standing between a
+// request and execution, which is why it holds in both modes. Packs reach
+// pack_dir through the distribution pipeline or the operator, not through
+// actions.
 func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	version, ok := intParam(params, "content_pack_version")
 	if !ok {
@@ -597,6 +645,7 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	p.mu.RLock()
 	cached, hit := p.packs[version]
 	packDir := p.cfg.PackDir
+	gen := p.packGen
 	p.mu.RUnlock()
 	if hit {
 		return cached, nil
@@ -609,7 +658,7 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading content pack version %d: %w", version, err)
 	}
-	pack, err := p.verifyPack(raw)
+	pack, gotGen, err := p.loadPack(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -618,20 +667,43 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	}
 
 	p.mu.Lock()
+	defer p.mu.Unlock()
+	if gen != gotGen || gotGen != p.packGen {
+		// Reconfigured while loading: the pack was checked against a key
+		// that is no longer current. Load again under the current config.
+		return nil, fmt.Errorf("content pack version %d: configuration changed while loading, retry", version)
+	}
 	p.packs[version] = pack
-	p.mu.Unlock()
 	return pack, nil
 }
 
-func (p *Proxy) verifyPack(raw []byte) (*Pack, error) {
+// loadPack parses a pack from pack_dir. With a pack key configured the
+// signature is enforced exactly as before; without one the pack is parsed and
+// validated but not verified, and a warning is logged once.
+//
+// Unsigned mode exists for a single-machine install with operator-written
+// packs, where a key would only be ceremony: whoever can write pack_dir can
+// also edit the config that names the key. It does not widen what a request
+// can do — a request still only selects a version already on disk.
+func (p *Proxy) loadPack(raw []byte) (*Pack, uint64, error) {
 	p.mu.RLock()
 	pubKey := p.packPubKey
+	packDir := p.cfg.PackDir
+	gen := p.packGen
 	p.mu.RUnlock()
 
-	if pubKey == nil {
-		return nil, fmt.Errorf("cannot verify content pack: no pack public key configured")
+	if pubKey != nil {
+		pack, err := ParseAndVerify(raw, pubKey)
+		return pack, gen, err
 	}
-	return ParseAndVerify(raw, pubKey)
+
+	p.unsignedWarn.Do(func() {
+		p.logger.Warn("discovery: loading content packs without signature verification",
+			"pack_dir", packDir,
+			"hint", "set pack_public_key to require signed packs")
+	})
+	pack, err := ParseUnverified(raw)
+	return pack, gen, err
 }
 
 // HealthCheck reports whether this datasource can serve at least one action.
@@ -639,7 +711,8 @@ func (p *Proxy) verifyPack(raw []byte) (*Pack, error) {
 // segment — so health here means "configured to do something useful".
 //
 // A datasource may legitimately serve only some actions: sweeping needs no
-// credentials, and inventory needs both SSH credentials and a pack key. The
+// credentials, and inventory needs SSH credentials and a pack_dir (a pack key
+// is optional; see loadPack). The
 // error names what is missing so a half-configured datasource is diagnosable
 // from the health report rather than only when an action fails.
 func (p *Proxy) HealthCheck(ctx context.Context) error {
@@ -649,9 +722,6 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 	var missing []string
 	if p.sshConfig == nil {
 		missing = append(missing, "ssh credentials")
-	}
-	if p.packPubKey == nil {
-		missing = append(missing, "pack_public_key")
 	}
 	if p.cfg.PackDir == "" {
 		missing = append(missing, "pack_dir")
@@ -677,7 +747,7 @@ func (p *Proxy) Actions() []string {
 	if p.ldapConfigured {
 		actions = append(actions, "discovery_ldap")
 	}
-	if p.sshConfig != nil && p.packPubKey != nil {
+	if p.sshConfig != nil {
 		actions = append(actions, "discovery_inventory")
 	}
 	return actions
@@ -688,7 +758,8 @@ func (p *Proxy) Actions() []string {
 // the content pack versions present in pack_dir so the server can pick a
 // version to pin in discovery_inventory requests (content_pack_version is a
 // required request param with no "latest" default). Presence means the file
-// exists — signature verification still happens at execution time.
+// exists — signature verification, when a pack key is configured, still
+// happens at execution time.
 func (p *Proxy) CollectMetadata(ctx context.Context) (map[string]any, error) {
 	meta := map[string]any{"actions": p.Actions()}
 	if versions := p.packVersions(); len(versions) > 0 {
@@ -770,6 +841,7 @@ func (p *Proxy) Close() error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.packs = make(map[int]*Pack)
+	p.packGen++
 	return nil
 }
 

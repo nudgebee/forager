@@ -15,9 +15,9 @@ import (
 
 	"github.com/pkg/sftp"
 	"golang.org/x/crypto/ssh"
-	"golang.org/x/crypto/ssh/knownhosts"
 
 	"nudgebee/forager/pkg/proxy"
+	"nudgebee/forager/pkg/proxy/ssh/hostkeys"
 )
 
 const (
@@ -49,6 +49,11 @@ type Config struct {
 	//   - HostKey:    a single authorized_keys-style host public key line.
 	KnownHosts string `json:"known_hosts"`
 	HostKey    string `json:"host_key"`
+
+	// HostKeyPolicy is "strict" (default) or "accept-new". accept-new
+	// records the key of a host known_hosts has no entry for, and still
+	// refuses one whose key changed. Requires KnownHosts.
+	HostKeyPolicy string `json:"host_key_policy"`
 }
 
 // poolEntry is a cached SSH connection in dynamic mode.
@@ -67,6 +72,11 @@ type Proxy struct {
 	sftp   *sftp.Client // static mode only
 	config Config
 	logger *slog.Logger
+
+	// hostKeyAlgos returns the host key algorithms to request from an
+	// address, from the configured known_hosts or host_key; nil when neither
+	// is configured. See hostkeys.Store.HostKeyAlgorithms.
+	hostKeyAlgos func(addr string) []string
 
 	// Dynamic mode fields
 	dynamic      bool
@@ -88,31 +98,48 @@ func New(logger *slog.Logger) *Proxy {
 
 func (p *Proxy) Type() string { return "ssh-proxy" }
 
-// hostKeyCallback builds the SSH host key verification callback from config.
+// hostKeyCallback builds the SSH host key verification callback from config,
+// and the function that picks which host key algorithms to request per
+// address.
 //
 // When known_hosts (a file path) or host_key (an authorized_keys-style line) is
 // configured, the server's host key is verified, defending against
-// man-in-the-middle attacks. When neither is set, verification is skipped to
-// preserve backwards-compatible behavior; this is insecure and is logged so
-// operators can opt into verification.
-func hostKeyCallback(cfg Config, logger *slog.Logger) (ssh.HostKeyCallback, error) {
+// man-in-the-middle attacks. known_hosts is re-read when it changes, and with
+// host_key_policy accept-new an unknown host's key is recorded on first
+// contact (a changed key is still refused). When neither is set, verification
+// is skipped to preserve backwards-compatible behavior; this is insecure and
+// is logged so operators can opt into verification.
+//
+// The algorithm function exists because x/crypto prefers ECDSA host keys: a
+// host recorded with only its ed25519 key would present ECDSA and be refused
+// as a mismatch unless the client asks for the type it has on record.
+func hostKeyCallback(cfg Config, logger *slog.Logger) (ssh.HostKeyCallback, func(string) []string, error) {
+	policy, err := hostkeys.ParsePolicy(cfg.HostKeyPolicy)
+	if err != nil {
+		return nil, nil, err
+	}
+	if policy == hostkeys.PolicyAcceptNew && cfg.KnownHosts == "" {
+		return nil, nil, fmt.Errorf("host_key_policy %q requires known_hosts", policy)
+	}
+
 	switch {
 	case cfg.KnownHosts != "":
-		cb, err := knownhosts.New(cfg.KnownHosts)
+		store, err := hostkeys.Open(cfg.KnownHosts, policy, logger)
 		if err != nil {
-			return nil, fmt.Errorf("loading known_hosts %q: %w", cfg.KnownHosts, err)
+			return nil, nil, err
 		}
-		return cb, nil
+		return store.HostKeyCallback(), store.HostKeyAlgorithms, nil
 	case cfg.HostKey != "":
 		key, _, _, _, err := ssh.ParseAuthorizedKey([]byte(cfg.HostKey))
 		if err != nil {
-			return nil, fmt.Errorf("parsing host_key: %w", err)
+			return nil, nil, fmt.Errorf("parsing host_key: %w", err)
 		}
-		return ssh.FixedHostKey(key), nil
+		algos := hostkeys.AlgorithmsForKeyType(key.Type())
+		return ssh.FixedHostKey(key), func(string) []string { return algos }, nil
 	default:
 		logger.Warn("ssh host key verification disabled: set known_hosts or host_key to enable",
 			"hint", "without verification the connection is not protected against MITM")
-		return ssh.InsecureIgnoreHostKey(), nil // #nosec G106 -- opt-out fallback, see doc comment
+		return ssh.InsecureIgnoreHostKey(), nil, nil // #nosec G106 -- opt-out fallback, see doc comment
 	}
 }
 
@@ -149,10 +176,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		return fmt.Errorf("ssh username is required")
 	}
 
-	hostKeyCB, err := hostKeyCallback(cfg, p.logger)
+	hostKeyCB, hostKeyAlgos, err := hostKeyCallback(cfg, p.logger)
 	if err != nil {
 		return fmt.Errorf("configuring ssh host key verification: %w", err)
 	}
+	p.hostKeyAlgos = hostKeyAlgos
 
 	sshCfg := &ssh.ClientConfig{
 		User:            username,
@@ -188,7 +216,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.sshConfig = nil
 
 	addr := net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port))
-	client, err := ssh.Dial("tcp", addr, sshCfg)
+	client, err := ssh.Dial("tcp", addr, hostkeys.ClientConfig(sshCfg, hostKeyAlgos, addr))
 	if err != nil {
 		return fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
@@ -335,13 +363,14 @@ func (p *Proxy) getPooledClient(addr string) (*ssh.Client, error) {
 	// Dial new connection
 	p.mu.RLock()
 	sshCfg := p.sshConfig
+	algosFor := p.hostKeyAlgos
 	p.mu.RUnlock()
 
 	if sshCfg == nil {
 		return nil, fmt.Errorf("ssh config not initialized")
 	}
 
-	client, err := ssh.Dial("tcp", addr, sshCfg)
+	client, err := ssh.Dial("tcp", addr, hostkeys.ClientConfig(sshCfg, algosFor, addr))
 	if err != nil {
 		return nil, fmt.Errorf("ssh dial %s: %w", addr, err)
 	}
