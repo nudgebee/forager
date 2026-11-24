@@ -85,7 +85,13 @@ func newApp(configPath string, logger *slog.Logger) (*app, error) {
 		SecretRefAllowlistSet: len(cfg.SecretRefAllowlist) > 0,
 	})
 
-	handler.SetOnConfigSynced(client.TriggerHealthReport)
+	// After a config push, report health and metadata again: the server learns
+	// new datasources' reachability, and a new or changed discovery datasource's
+	// scope, which it sweeps on.
+	handler.SetOnConfigSynced(func() {
+		client.TriggerHealthReport()
+		client.TriggerMetadata()
+	})
 
 	client.SetInventoryReporter(func() []ws.DatasourceInventoryItem {
 		entries := registry.List()

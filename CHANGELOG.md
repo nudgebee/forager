@@ -19,6 +19,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pack_public_key` as missing. `inventory --pack-key` is optional to match.
 
 ### Added
+
+- Datasource metadata is reported again after a config push, not only when the agent
+  connects, so the server sees a pushed discovery datasource's scope (and sweeps it)
+  without waiting for a reconnect.
 - `install.sh` and `install-macos.sh` set up VM discovery on a new install: the primary
   interface's subnet (narrowed to the host's /24 when wider than /22), an ed25519 key for
   the agent, the example content pack, and a `discovery` datasource with
