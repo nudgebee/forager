@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- The install scripts' default discovery datasource name is now unique per agent
+  (`<hostname>-<first 6 characters of the access key>`) instead of `local-network`.
+  Agents in one tenant that report the same discovery name share one record in
+  Nudgebee, so two default installs could receive each other's sweeps and commands.
+  Existing configs are not changed.
+
 ### Changed
 - SSH host key algorithms are pinned to the key types known_hosts (or `host_key`) holds for
   the host. A known_hosts with only a host's ed25519 key, as OpenSSH writes it, no longer

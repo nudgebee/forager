@@ -155,7 +155,7 @@ network rather than production fleets:
 | `NB_DISCOVERY` | `true` | `false` skips discovery setup |
 | `NB_DISCOVERY_CIDR` | detected | Subnet to discover; wider than `/22` is refused |
 | `NB_SSH_USER` | the sudo user, else `ubuntu` | Login user on the VMs |
-| `NB_DISCOVERY_NAME` | `local-network` | Datasource name |
+| `NB_DISCOVERY_NAME` | `<hostname>-<first 6 chars of the access key>` | Datasource name. Must be unique per agent within a tenant: agents that report the same discovery name share one record in Nudgebee |
 | `NB_PACK_URL` | the release asset `linux-inventory-v2.yaml` | Content pack to download (must declare `version: 2`) |
 | `NB_SIGNING_PUBLIC_KEY` | — | Also turns on `ssh_access` (ad-hoc commands on discovered hosts) |
 

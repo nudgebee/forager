@@ -18,7 +18,8 @@ set -euo pipefail
 #                           host's /24 when wider than /22)
 #   NB_SSH_USER             login user on the VMs (default: the sudo user,
 #                           else ubuntu)
-#   NB_DISCOVERY_NAME       datasource name (default: local-network)
+#   NB_DISCOVERY_NAME       datasource name (default: <hostname>-<first 6 characters
+#                           of NB_ACCESS_KEY>, unique per agent)
 #   NB_PACK_URL             content pack to download (default: the release asset linux-inventory-v2.yaml)
 #   NB_SIGNING_PUBLIC_KEY   also turns on ad-hoc SSH access to discovered hosts
 #                           (ssh_access); without it only inventory runs
@@ -45,7 +46,17 @@ VERSION="${NB_VERSION:-latest}"
 RELAY_URL="${NB_RELAY_URL:-wss://relay.nudgebee.com/register}"
 
 DISCOVERY_ENABLED="${NB_DISCOVERY:-true}"
-DISCOVERY_NAME="${NB_DISCOVERY_NAME:-local-network}"
+# Nudgebee identifies an agent-reported datasource by its type and name within
+# the tenant, so two agents using the same name would share one record. The
+# default is therefore unique per agent: the host name plus the start of the
+# access key (stable across reinstalls with the same key).
+default_discovery_name() {
+    local host key
+    host=$( (scutil --get LocalHostName 2>/dev/null || hostname -s) | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9-' '-' | cut -c1-40 | sed -e 's/--*/-/g' -e 's/^-//' -e 's/-$//')
+    key=$(printf '%s' "${NB_ACCESS_KEY:-}" | tr '[:upper:]' '[:lower:]' | tr -cd 'a-z0-9' | cut -c1-6)
+    printf '%s-%s' "${host:-lan}" "${key:-local}"
+}
+DISCOVERY_NAME="${NB_DISCOVERY_NAME:-$(default_discovery_name)}"
 # The pack ships as a release asset next to the binary, so it comes from the
 # same release (and mirror) as the agent rather than a moving branch.
 if [ "$VERSION" = "latest" ]; then
