@@ -65,6 +65,10 @@ COPY --from=build-stage /opt/oracle/instantclient_* /opt/oracle/instantclient/
 ENV LD_LIBRARY_PATH=/opt/oracle/instantclient
 
 RUN groupadd --system nudgebee && useradd --system --no-create-home --gid nudgebee nudgebee
+# Content pack for discovery datasources built from NB_DISCOVERY_CIDR. Root
+# owned and read-only to the agent: whoever can write it controls the commands
+# run on every host the agent can log in to.
+COPY --chmod=0644 docs/content-packs/linux-inventory-example.yaml /etc/nudgebee/packs/linux-inventory-v2.yaml
 RUN mkdir -p /data && chown nudgebee:nudgebee /data
 USER nudgebee
 
