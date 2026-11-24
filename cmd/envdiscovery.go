@@ -74,7 +74,7 @@ func ensureSSHKey(path, comment string) (pubLine string, generated bool, err err
 	pemBytes, err := os.ReadFile(path)
 	if err == nil && len(pemBytes) == 0 {
 		// An empty file is a key that was never written; replace it.
-		if rmErr := os.Remove(path); rmErr != nil {
+		if rmErr := os.Remove(path); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
 			return "", false, fmt.Errorf("removing empty %s: %w", path, rmErr)
 		}
 		err = fs.ErrNotExist
@@ -140,15 +140,47 @@ func writeNewSSHKey(path, comment string) ([]byte, error) {
 	if err := tmp.Close(); err != nil {
 		return nil, fmt.Errorf("writing %s: %w", path, err)
 	}
-	if err := os.Link(tmpPath, path); err != nil {
+	if err := linkFile(tmpPath, path); err != nil {
 		if errors.Is(err, fs.ErrExist) {
-			existing, readErr := os.ReadFile(path)
-			if readErr != nil {
-				return nil, fmt.Errorf("reading %s: %w", path, readErr)
-			}
-			return existing, nil
+			return readExistingKey(path)
 		}
-		return nil, fmt.Errorf("installing %s: %w", path, err)
+		// Some volumes (host bind mounts on Docker Desktop, FAT/exFAT) have
+		// no hard links. Create the file exclusively and write it directly.
+		return writeKeyExclusive(path, pemBytes)
+	}
+	return pemBytes, nil
+}
+
+// linkFile is os.Link; a variable so tests can simulate a filesystem
+// without hard links.
+var linkFile = os.Link
+
+func readExistingKey(path string) ([]byte, error) {
+	existing, err := os.ReadFile(path)
+	if err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return existing, nil
+}
+
+// writeKeyExclusive creates path with O_EXCL and writes the key; if another
+// process created it first, that key is used.
+func writeKeyExclusive(path string, pemBytes []byte) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		if errors.Is(err, fs.ErrExist) {
+			return readExistingKey(path)
+		}
+		return nil, fmt.Errorf("creating %s: %w", path, err)
+	}
+	if _, err := f.Write(pemBytes); err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("writing %s: %w", path, err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("writing %s: %w", path, err)
 	}
 	return pemBytes, nil
 }

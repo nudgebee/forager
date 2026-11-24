@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -196,5 +197,32 @@ func TestEnsureSSHKey_ReplacesEmptyFile(t *testing.T) {
 		if strings.HasPrefix(e.Name(), ".id_ed25519-") {
 			t.Errorf("temporary key file left behind: %s", e.Name())
 		}
+	}
+}
+
+// On a volume without hard links the key is still created, by writing it
+// directly with O_EXCL.
+func TestEnsureSSHKey_NoHardLinks(t *testing.T) {
+	orig := linkFile
+	linkFile = func(string, string) error {
+		return &os.LinkError{Op: "link", Err: errors.New("operation not supported")}
+	}
+	t.Cleanup(func() { linkFile = orig })
+
+	path := filepath.Join(t.TempDir(), "ssh", "id_ed25519")
+	pub, generated, err := ensureSSHKey(path, "nudgebee-forager@lan-test")
+	if err != nil {
+		t.Fatalf("ensureSSHKey: %v", err)
+	}
+	if !generated || !strings.HasPrefix(pub, "ssh-ed25519 ") {
+		t.Errorf("generated=%v pub=%q", generated, pub)
+	}
+	info, err := os.Stat(path)
+	if err != nil || info.Size() == 0 || info.Mode().Perm() != 0o600 {
+		t.Errorf("key file: info=%v err=%v", info, err)
+	}
+	again, generatedAgain, err := ensureSSHKey(path, "nudgebee-forager@lan-test")
+	if err != nil || generatedAgain || again != pub {
+		t.Errorf("second call: pub equal=%v generated=%v err=%v", again == pub, generatedAgain, err)
 	}
 }
