@@ -346,6 +346,20 @@ func (h *Handler) handleLegacyRequest(ctx context.Context, msg []byte, requestID
 // normalizeConfigValues walks a config map and coerces string values that
 // represent booleans or integers into their native Go types. This is needed
 // because the cloud backend sometimes sends bool/int fields as JSON strings.
+// localOnlyConfigKeys may only be set in the agent's own config file, never by
+// a server push. host_key_policy=accept-new makes the agent write to
+// known_hosts_file; allowing that from a push would let the server choose a
+// path the agent appends to.
+var localOnlyConfigKeys = []string{"host_key_policy"}
+
+// stripLocalOnlyConfig drops keys a server push must not set, so a pushed
+// datasource keeps the default (strict) host key policy.
+func stripLocalOnlyConfig(config map[string]any) {
+	for _, k := range localOnlyConfigKeys {
+		delete(config, k)
+	}
+}
+
 func normalizeConfigValues(config map[string]any) {
 	for k, v := range config {
 		s, ok := v.(string)
@@ -777,6 +791,8 @@ func (h *Handler) handleConfigSync(ctx context.Context, msg []byte, requestID st
 			ds.Config = map[string]any{}
 		}
 
+		stripLocalOnlyConfig(ds.Config)
+
 		// Coerce string config values (e.g. "true"/"5432") to native types
 		normalizeConfigValues(ds.Config)
 
@@ -905,6 +921,7 @@ func (h *Handler) handleTestDatasourceConfig(ctx context.Context, msg []byte, re
 	if ds.Config == nil {
 		ds.Config = map[string]any{}
 	}
+	stripLocalOnlyConfig(ds.Config)
 	normalizeConfigValues(ds.Config)
 
 	// Create temporary proxy

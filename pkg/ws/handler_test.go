@@ -1169,3 +1169,16 @@ func TestHandler_SecretRefRefusalWithoutList(t *testing.T) {
 		t.Fatalf("got %+v", ack)
 	}
 }
+
+// A server push cannot turn on accept-new: that policy writes to
+// known_hosts_file, whose path the push would otherwise choose.
+func TestStripLocalOnlyConfigDropsHostKeyPolicy(t *testing.T) {
+	cfg := map[string]any{"host_key_policy": "accept-new", "known_hosts_file": "/tmp/kh", "port": 22}
+	stripLocalOnlyConfig(cfg)
+	if _, ok := cfg["host_key_policy"]; ok {
+		t.Fatalf("host_key_policy survived a push: %v", cfg)
+	}
+	if cfg["known_hosts_file"] != "/tmp/kh" || cfg["port"] != 22 {
+		t.Fatalf("other keys must be kept: %v", cfg)
+	}
+}

@@ -220,11 +220,14 @@ func (s *Store) learn(hostname string, remote net.Addr, key ssh.PublicKey) error
 	}
 	line := knownhosts.Line([]string{addr}, key) + "\n"
 
-	f, err := os.OpenFile(s.path, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0o600) // #nosec G304 -- operator-configured path
+	// The path is from the agent's local config only: a server push cannot set
+	// accept-new (see pkg/ws stripLocalOnlyConfig), so it cannot make the agent
+	// write here.
+	f, err := os.OpenFile(s.path, os.O_RDWR|os.O_APPEND|os.O_CREATE, 0o600) // #nosec G304 -- operator-configured path
 	if err != nil {
 		return fmt.Errorf("recording host key for %s: %w", addr, err)
 	}
-	if fi, err := f.Stat(); err == nil && fi.Size() > 0 && !endsWithNewline(s.path, fi.Size()) {
+	if fi, err := f.Stat(); err == nil && fi.Size() > 0 && !endsWithNewline(f, fi.Size()) {
 		line = "\n" + line
 	}
 	_, werr := f.WriteString(line)
@@ -246,12 +249,7 @@ func (s *Store) learn(hostname string, remote net.Addr, key ssh.PublicKey) error
 	return nil
 }
 
-func endsWithNewline(path string, size int64) bool {
-	f, err := os.Open(path) // #nosec G304 -- operator-configured path
-	if err != nil {
-		return true
-	}
-	defer func() { _ = f.Close() }()
+func endsWithNewline(f *os.File, size int64) bool {
 	b := make([]byte, 1)
 	if _, err := f.ReadAt(b, size-1); err != nil {
 		return true

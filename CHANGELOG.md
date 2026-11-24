@@ -32,8 +32,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `known_hosts_file` / `known_hosts` has no entry for (creating the file 0600 if missing)
   and still refuses a changed key. known_hosts is re-read when it changes, so learned or
   added keys need no restart. Settable from local YAML (`discovery.host_key_policy`; for an
-  ssh datasource, `known_hosts` and `host_key_policy`), server-pushed config, and
-  `inventory --host-key-policy`.
+  ssh datasource, `known_hosts` and `host_key_policy`) and `inventory --host-key-policy`.
+  Server-pushed config cannot set it: `accept-new` writes to `known_hosts_file`, so it stays
+  an operator decision on the host.
 - `http-proxy` credential probes can be a POST with a fixed JSON `body` (`probe.method`,
   `probe.body`), for providers whose credential check is a POST, such as Dynatrace's
   DQL `query:verify`. A probe without a method is a GET, as before.
