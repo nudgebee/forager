@@ -189,6 +189,52 @@ The Docker image is the only build that bundles Oracle Instant Client
 for `oracle` datasources. Standalone binaries (Linux/macOS/Windows) ship
 without Oracle support.
 
+#### VM discovery in a container
+
+The install scripts' discovery setup does not run in a container; environment
+variables do the same job. Set `NB_DISCOVERY_CIDR` and, unless the config
+already defines a `discovery` datasource, the agent adds one at startup:
+
+```bash
+docker run -d --name forager --network host \
+  -e NB_ACCESS_KEY=... \
+  -e NB_ACCESS_SECRET=... \
+  -e NB_SIGNING_PUBLIC_KEY=... \
+  -e NB_DISCOVERY_CIDR=192.168.1.0/24 \
+  -e NB_SSH_USER=ubuntu \
+  -v forager-data:/data \
+  ghcr.io/nudgebee/forager:latest
+```
+
+| Variable | Default | |
+|---|---|---|
+| `NB_DISCOVERY_CIDR` | — (required) | Comma-separated IPv4 CIDRs to discover, each `/22` or narrower. Invalid entries are logged at ERROR and skipped; if none is valid, no datasource is added. There is no auto-detection in a container: the container's own network is not the LAN. |
+| `NB_SSH_USER` | `ubuntu` | Login user on the VMs |
+| `NB_DISCOVERY_NAME` | `lan-<first 8 letters/digits of the access key>` | Datasource name. The default differs per agent, so two agents in one account do not share an integration. |
+| `NB_PACK_DIR` | `/etc/nudgebee/packs` | Content pack directory. The image ships the example pack there as `linux-inventory-v2.yaml`. |
+| `NB_SIGNING_PUBLIC_KEY` | — | Also turns on `ssh_access` (ad-hoc commands on discovered hosts) |
+
+The datasource uses `host_key_policy: accept-new` with `/data/known_hosts`,
+and the key `/data/ssh/id_ed25519`, generated on first start. The same
+trust-on-first-use caveats as the install scripts apply (see above).
+
+- **Use a persistent `/data` volume.** The key and the learned host keys live
+  there. Without a volume, a new container generates a new key that no VM has
+  authorized.
+- **Authorize the key on each VM.** Every start logs the public key. Append
+  that line to `~<user>/.ssh/authorized_keys` on each VM, or copy the `.pub`
+  out (`docker cp forager:/data/ssh/id_ed25519.pub .`) and run
+  `ssh-copy-id -f -i id_ed25519.pub <user>@<vm-ip>`.
+- **Networking.** On a Linux host, use `--network host`: the agent then sees
+  the LAN directly and can report MAC addresses. On Docker Desktop (macOS,
+  Windows) the container sits behind NAT: LAN hosts are usually reachable by
+  IP, but MAC addresses are not visible, and host-only VM networks (those only
+  the host can reach) may not be reachable at all.
+- **Helm** does not support this: the chart's `/data` is an `emptyDir` (the
+  key would change on every pod restart) and its ConfigMap mounts over
+  `/etc/nudgebee`, hiding the bundled pack. Use
+  [values-discovery.yaml.example](deploy/helm/forager/values-discovery.yaml.example).
+
 ### AWS (CloudFormation)
 
 A ready-to-launch EC2 template lives at

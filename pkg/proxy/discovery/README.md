@@ -195,6 +195,34 @@ appear in logs or responses: `username` plus `private_key` or `password` for
 SSH, and `ldap_bind_dn` / `ldap_bind_password` for the directory. LDAP bind
 failures echo the DN back, so those errors are redacted before they leave.
 
+### From environment variables (containers)
+
+In a container the install scripts never run, so a discovery datasource can be
+built from the environment instead. With `NB_DISCOVERY_CIDR` set, and no
+`discovery` datasource in the config (a defined one always wins), the agent
+adds one at startup:
+
+| Variable | Becomes | Default |
+|---|---|---|
+| `NB_DISCOVERY_CIDR` | `allowed_hosts` | Required; no auto-detection in a container. Comma-separated IPv4 CIDRs, each `/22` or narrower; invalid entries are logged at ERROR and skipped, and if none is valid nothing is added. |
+| `NB_DISCOVERY_NAME` | `name` | `lan-<first 8 letters/digits of the access key, lowercased>`, so two agents in one tenant do not share an integration |
+| `NB_SSH_USER` | `credentials.username` | `ubuntu` |
+| `NB_PACK_DIR` | `discovery.pack_dir` | `/etc/nudgebee/packs` (the image ships the example pack there) |
+
+The rest is fixed: `credential_source: local`, `private_key_file:
+<data_dir>/ssh/id_ed25519`, `known_hosts_file: <data_dir>/known_hosts`,
+`host_key_policy: accept-new`, and `ssh_access` on only when a signing key
+(`signing_public_key` or `signing_public_keys`) is configured.
+
+At startup the agent generates the key if it is missing (logging a warning
+that `<data_dir>` must be a persistent volume) and logs the public key on
+every start, with the `ssh-copy-id` command and the `authorized_keys` line to
+add on each VM. Use `--network host` on Linux hosts for LAN reach and MAC
+addresses; on Docker Desktop the container is behind NAT, so MACs are not
+visible and host-only VM networks may be unreachable. The Helm chart does not
+support this path (its `/data` is an `emptyDir` and its ConfigMap mounts over
+`/etc/nudgebee`); use `values-discovery.yaml.example` there.
+
 ## SSH access (`ssh_access`)
 
 Inventory only runs pack commands from `pack_dir`. Setting `ssh_access: true` also
