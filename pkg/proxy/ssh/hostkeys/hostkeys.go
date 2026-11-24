@@ -113,9 +113,10 @@ func Open(path, policy string, logger *slog.Logger) (*Store, error) {
 	if abs, err := filepath.Abs(path); err == nil {
 		path = abs
 	}
-	// The path comes from the agent's local config (pushes cannot set it, see
-	// pkg/ws). Refusing parent-directory segments keeps a typo or a templated
-	// value from walking out of the directory the operator meant.
+	// The path comes from the agent's config or a signed server push; only the
+	// local config can turn on accept-new, the policy that writes here (see
+	// pkg/ws stripLocalOnlyConfig). Refusing parent-directory segments keeps a
+	// typo or a templated value from walking out of the intended directory.
 	path = filepath.Clean(path)
 	if strings.Contains(path, "..") {
 		return nil, fmt.Errorf("known_hosts path %q must not contain \"..\"", path)
