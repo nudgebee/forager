@@ -54,6 +54,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   at the top level, per-job escalation only where needed.
 
 ### Fixed
+- The agent's WebSocket connection to NudgeBee now masks its frames with a cryptographically
+  random key (`gorilla/websocket` bumped past v1.5.3, GO-2026-6278). No tagged release carries
+  the fix yet, so the module is pinned to the fixing commit.
 - MCP proxy (http/sse): concurrent callers no longer share one upstream
   session. The proxy now runs the MCP `initialize` handshake, sends
   `Mcp-Session-Id`, keeps one session per `session_id` request param,
