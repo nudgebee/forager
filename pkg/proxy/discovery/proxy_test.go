@@ -95,11 +95,13 @@ func TestActions_ReflectConfiguration(t *testing.T) {
 		}
 	}
 
-	noPack, _ := newTestProxy(t, map[string]any{
+	// A pack key is optional (packs then load unsigned), so SSH credentials
+	// alone are enough to advertise inventory.
+	noPackKey, _ := newTestProxy(t, map[string]any{
 		"allowed_cidrs": []any{"10.0.1.0/24"},
 	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
-	if containsAction(noPack.Actions(), "discovery_inventory") {
-		t.Errorf("actions = %v, want no inventory without a pack key", noPack.Actions())
+	if !containsAction(noPackKey.Actions(), "discovery_inventory") {
+		t.Errorf("actions = %v, want inventory with ssh credentials and no pack key", noPackKey.Actions())
 	}
 }
 
@@ -112,26 +114,77 @@ func containsAction(actions []string, want string) bool {
 	return false
 }
 
-// A pack we cannot verify must not run. Without a key configured there is no
-// trust root, so every pack is untrusted.
-func TestHandleInventory_RefusesWithoutPackKey(t *testing.T) {
-	_, priv := packPubKeyB64(t)
-	p, _ := newTestProxy(t, map[string]any{"pack_dir": writePackDir(t, validBody, priv, 3)}, map[string]string{
-		"username": "nudgebee-ro", "password": "x",
-	})
-
-	_, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
-		Action: "discovery_inventory",
-		Params: map[string]any{
-			"targets":              []any{"10.0.1.5"},
-			"content_pack_version": 3,
-		},
-	})
-	if err == nil {
-		t.Fatal("inventory ran without a pack verification key")
+// writeUnsignedPack writes a pack body as-is, with no signature line.
+func writeUnsignedPack(t *testing.T, body string, fileVersion int) string {
+	t.Helper()
+	dir := t.TempDir()
+	name := fmt.Sprintf("linux-inventory-v%d.yaml", fileVersion)
+	if err := os.WriteFile(filepath.Join(dir, name), []byte(body), 0o600); err != nil {
+		t.Fatalf("writing pack: %v", err)
 	}
-	if !strings.Contains(err.Error(), "pack public key") {
-		t.Errorf("error = %q, want it to name the missing key", err)
+	return dir
+}
+
+// Without a pack key, packs in pack_dir load unsigned — parsed and
+// validated, but not verified — and the operator is warned once.
+func TestHandleInventory_UnsignedPackLoadsWithoutKey(t *testing.T) {
+	p, logs := newTestProxy(t, map[string]any{
+		"pack_dir":      writeUnsignedPack(t, validBody, 3),
+		"allowed_cidrs": []any{"10.0.1.0/24"},
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	for i := 0; i < 2; i++ {
+		resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+			Action: "discovery_inventory",
+			Params: map[string]any{
+				"targets":              []any{"192.168.99.5"}, // out of scope: no dialing needed
+				"content_pack_version": 3,
+			},
+		})
+		if err != nil {
+			t.Fatalf("unsigned pack refused without a pack key: %v", err)
+		}
+		var out InventoryResponse
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			t.Fatal(err)
+		}
+		if out.ContentPackVersion != 3 {
+			t.Errorf("content_pack_version = %d, want 3", out.ContentPackVersion)
+		}
+	}
+	if n := strings.Count(logs.String(), "without signature verification"); n != 1 {
+		t.Errorf("unsigned-pack warning logged %d times, want once:\n%s", n, logs.String())
+	}
+}
+
+// Unsigned mode skips only the signature. A pack that would fail validation
+// when signed still fails without a key.
+func TestHandleInventory_UnsignedPackStillValidated(t *testing.T) {
+	cases := map[string]struct {
+		body        string
+		fileVersion int
+		request     int
+	}{
+		"version 0":         {strings.Replace(validBody, "version: 3", "version: 0", 1), 3, 3},
+		"no version":        {strings.Replace(validBody, "version: 3\n", "", 1), 3, 3},
+		"wrong kind":        {strings.Replace(validBody, "kind: inventory", "kind: remediation", 1), 3, 3},
+		"declared != file":  {validBody, 7, 7},
+		"unparseable guard": {strings.Replace(validBody, `os_family == "rhel"`, `os_family ~ rhel`, 1), 3, 3},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			p, _ := newTestProxy(t, map[string]any{
+				"pack_dir":      writeUnsignedPack(t, tc.body, tc.fileVersion),
+				"allowed_cidrs": []any{"10.0.1.0/24"},
+			}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+			if _, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+				Action: "discovery_inventory",
+				Params: map[string]any{"targets": []any{"192.168.99.5"}, "content_pack_version": tc.request},
+			}); err == nil {
+				t.Fatalf("invalid unsigned pack accepted: %s", name)
+			}
+		})
 	}
 }
 
@@ -278,7 +331,7 @@ func TestHandleInventory_DoesNotLeakCredentials(t *testing.T) {
 // host unless it came from a pack read off local disk whose signature
 // verified. This pins that invariant against future refactors — every way a
 // pack can fail to verify must refuse rather than degrade, and a request must
-// never be able to supply pack content itself.
+// never be able to supply pack content itself — with or without a pack key.
 func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
 	pubB64, priv := packPubKeyB64(t)
 	otherPubB64, _ := packPubKeyB64(t)
@@ -293,11 +346,6 @@ func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
 		cfg    map[string]any
 		params map[string]any
 	}{
-		{
-			"no pack key configured",
-			map[string]any{"pack_dir": writePackDir(t, validBody, priv, 3)},
-			map[string]any{"content_pack_version": 3},
-		},
 		{
 			"unsigned pack on disk",
 			map[string]any{"pack_public_key": pubB64, "pack_dir": unsignedDir},
@@ -324,6 +372,13 @@ func TestHandleInventory_NoUnverifiedCommandPath(t *testing.T) {
 			"inline pack body is not accepted",
 			map[string]any{"pack_public_key": pubB64},
 			map[string]any{"content_pack": signPack(t, validBody, priv)},
+		},
+		{
+			// Without a pack key the request path is the only line of
+			// defence, so it must hold there too.
+			"inline pack body is not accepted without a pack key",
+			map[string]any{},
+			map[string]any{"content_pack": validBody},
 		},
 	}
 
@@ -444,6 +499,13 @@ func TestHealthCheck(t *testing.T) {
 	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
 	if err := ready.HealthCheck(context.Background()); err != nil {
 		t.Errorf("configured proxy reported unhealthy: %v", err)
+	}
+
+	// A pack key is optional, so it is never reported as missing.
+	noScope := New(slog.New(slog.DiscardHandler))
+	err := noScope.HealthCheck(context.Background())
+	if err == nil || strings.Contains(err.Error(), "pack_public_key") {
+		t.Errorf("health error = %v, want one that does not list pack_public_key", err)
 	}
 }
 
@@ -683,5 +745,31 @@ func TestCollectMetadata_OmitsScopeWhenUnrestricted(t *testing.T) {
 	}
 	if _, present := meta["allowed_cidrs"]; present {
 		t.Errorf("unrestricted datasource reported a scope: %#v", meta["allowed_cidrs"])
+	}
+}
+
+// A pack cached while running unsigned must not survive a reconfigure that
+// adds a pack key: from then on every pack has to verify.
+func TestConfigure_AddingPackKeyDropsUnverifiedCache(t *testing.T) {
+	dir := writeUnsignedPack(t, validBody, 3)
+	cfg := map[string]any{"pack_dir": dir, "allowed_cidrs": []any{"10.0.1.0/24"}}
+	creds := map[string]string{"username": "nudgebee-ro", "password": "x"}
+	p, _ := newTestProxy(t, cfg, creds)
+
+	req := &proxy.ActionRequest{
+		Action: "discovery_inventory",
+		Params: map[string]any{"targets": []any{"192.168.99.5"}, "content_pack_version": 3},
+	}
+	if _, err := p.HandleRequest(context.Background(), req); err != nil {
+		t.Fatalf("unsigned pack refused without a key: %v", err)
+	}
+
+	pubB64, _ := packPubKeyB64(t)
+	cfg["pack_public_key"] = pubB64
+	if err := p.Configure(cfg, creds); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := p.HandleRequest(context.Background(), req); err == nil {
+		t.Fatal("unsigned pack still served from cache after a pack key was configured")
 	}
 }

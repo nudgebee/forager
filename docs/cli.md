@@ -96,7 +96,8 @@ never sent a packet at all.
 ## inventory — what is installed on those machines
 
 Logs in over SSH and runs read-only commands. Needs two things sweep does not:
-an SSH login on the target, and a signed content pack.
+an SSH login on the target, and a content pack. The pack is verified when
+`--pack-key` is given; without it the pack runs unsigned (a warning is logged).
 
 ```bash
 ./forager inventory \
@@ -111,8 +112,8 @@ an SSH login on the target, and a signed content pack.
 |---|---|---|
 | `--cidr` | *required* | Scope the targets must fall within |
 | `--targets` | *required* | Comma-separated hosts |
-| `--pack` | *required* | Signed content pack |
-| `--pack-key` | *required* | Base64 Ed25519 public key the pack is signed with |
+| `--pack` | *required* | Content pack |
+| `--pack-key` | | Base64 Ed25519 public key the pack must be signed with; omit to run it unsigned |
 | `--user` | `nudgebee-ro` | SSH username |
 | `--key` | | Path to SSH private key |
 | `--password-env` | | Env var holding the SSH password, instead of a key |
@@ -136,7 +137,9 @@ sudo chown nudgebee-ro:nudgebee-ro /home/nudgebee-ro/.ssh/authorized_keys
 
 No sudo rights are needed. Every command the pack runs is read-only.
 
-### 2. Sign a content pack
+### 2. Sign a content pack (optional)
+
+Skip this to run the pack unsigned: leave out `--pack-key`.
 
 ```bash
 PRIV=$(./forager pack keygen)        # public key is printed to stderr

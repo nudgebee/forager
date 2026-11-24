@@ -47,11 +47,13 @@ type Config struct {
 	MaxOutputBytes int      `json:"max_output_bytes"`
 	AllowedCIDRs   []string `json:"allowed_cidrs"`
 
-	// PackPublicKey verifies content packs. Defaults to the agent's message
-	// signing key when empty, so packs and actions share one trust root.
+	// PackPublicKey verifies content packs. Optional: when set (here or as
+	// the pack_public_key credential) every pack must carry a valid signature
+	// from it. When empty, packs in PackDir are loaded unsigned — still
+	// parsed and validated, and still only from PackDir, never from a request.
 	PackPublicKey string `json:"pack_public_key"`
 
-	// PackDir caches verified packs on disk, keyed by version.
+	// PackDir holds packs on disk as linux-inventory-v<N>.yaml.
 	PackDir string `json:"pack_dir"`
 
 	// MaxRatePPS caps sweep probe rate regardless of what a request asks for.
@@ -70,8 +72,9 @@ type Config struct {
 }
 
 // Proxy executes discovery actions against hosts in its network segment.
-// It installs nothing on those hosts: every command comes from a signed pack
-// and runs over SSH as an unprivileged read-only user.
+// It installs nothing on those hosts: every command comes from a pack in
+// pack_dir (signature-verified when a pack key is configured) and runs over
+// SSH as an unprivileged read-only user.
 type Proxy struct {
 	mu     sync.RWMutex
 	cfg    Config
@@ -85,7 +88,9 @@ type Proxy struct {
 	ldapCfg        ldapConfig
 	ldapConfigured bool
 
-	packs map[int]*Pack // version → verified pack
+	packs map[int]*Pack // version → loaded (and, with a key, verified) pack
+
+	unsignedWarn sync.Once
 }
 
 func New(logger *slog.Logger) *Proxy {
@@ -105,6 +110,11 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	}
 	applyConfigDefaults(&cfg)
 	p.cfg = cfg
+
+	// Cached packs were loaded under the previous pack key, or with none. A
+	// reconfigure that adds a key must not keep serving a pack it never
+	// verified, so the cache starts over.
+	p.packs = make(map[int]*Pack)
 
 	// SSH credentials are optional: sweeping and directory queries need none.
 	// Requiring them up front would force an operator standing up a
@@ -143,6 +153,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	p.ldapCfg.BindPass = creds["ldap_bind_password"]
 	p.ldapConfigured = cfg.LDAP.Host != ""
 
+	p.packPubKey = nil
 	packKey := cfg.PackPublicKey
 	if packKey == "" {
 		packKey = creds["pack_public_key"]
@@ -171,8 +182,8 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 // unknown on first contact and change whenever a VM is re-imaged — strict
 // verification by default would make the product unable to do the one thing
 // it exists for. The residual risk is bounded: collection runs read-only
-// under an unprivileged credential and executes only signature-verified
-// commands, so a spoofed host can feed us false inventory but cannot gain
+// under an unprivileged credential and executes only pack commands from
+// pack_dir, so a spoofed host can feed us false inventory but cannot gain
 // anything from us. Recording keys on the server-side asset record and
 // pinning on subsequent runs is the real fix and belongs with that work.
 func (p *Proxy) hostKeyCallback(cfg Config) (ssh.HostKeyCallback, error) {
@@ -577,14 +588,16 @@ func (p *Proxy) handleInventory(ctx context.Context, req *proxy.ActionRequest) (
 	return &proxy.ActionResponse{StatusCode: 200, Action: req.Action, Result: data}, nil
 }
 
-// resolvePack returns a verified pack for the requested version.
+// resolvePack returns the pack for the requested version, verified when a
+// pack key is configured.
 //
 // A request selects a pack by version; it cannot carry the pack itself.
 // Accepting pack bodies inline would put executable content on the request
-// path, and while the signature check would still gate execution, keeping
-// commands sourced from locally cached, already-verified files removes that
-// exposure entirely. Packs reach pack_dir through the distribution pipeline,
-// not through actions.
+// path. Keeping commands sourced from files in pack_dir removes that exposure
+// entirely — and without a pack key it is the only thing standing between a
+// request and execution, which is why it holds in both modes. Packs reach
+// pack_dir through the distribution pipeline or the operator, not through
+// actions.
 func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	version, ok := intParam(params, "content_pack_version")
 	if !ok {
@@ -609,7 +622,7 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	if err != nil {
 		return nil, fmt.Errorf("loading content pack version %d: %w", version, err)
 	}
-	pack, err := p.verifyPack(raw)
+	pack, err := p.loadPack(raw)
 	if err != nil {
 		return nil, err
 	}
@@ -623,15 +636,30 @@ func (p *Proxy) resolvePack(params map[string]any) (*Pack, error) {
 	return pack, nil
 }
 
-func (p *Proxy) verifyPack(raw []byte) (*Pack, error) {
+// loadPack parses a pack from pack_dir. With a pack key configured the
+// signature is enforced exactly as before; without one the pack is parsed and
+// validated but not verified, and a warning is logged once.
+//
+// Unsigned mode exists for a single-machine install with operator-written
+// packs, where a key would only be ceremony: whoever can write pack_dir can
+// also edit the config that names the key. It does not widen what a request
+// can do — a request still only selects a version already on disk.
+func (p *Proxy) loadPack(raw []byte) (*Pack, error) {
 	p.mu.RLock()
 	pubKey := p.packPubKey
+	packDir := p.cfg.PackDir
 	p.mu.RUnlock()
 
-	if pubKey == nil {
-		return nil, fmt.Errorf("cannot verify content pack: no pack public key configured")
+	if pubKey != nil {
+		return ParseAndVerify(raw, pubKey)
 	}
-	return ParseAndVerify(raw, pubKey)
+
+	p.unsignedWarn.Do(func() {
+		p.logger.Warn("discovery: loading content packs without signature verification",
+			"pack_dir", packDir,
+			"hint", "set pack_public_key to require signed packs")
+	})
+	return ParseUnverified(raw)
 }
 
 // HealthCheck reports whether this datasource can serve at least one action.
@@ -639,7 +667,8 @@ func (p *Proxy) verifyPack(raw []byte) (*Pack, error) {
 // segment — so health here means "configured to do something useful".
 //
 // A datasource may legitimately serve only some actions: sweeping needs no
-// credentials, and inventory needs both SSH credentials and a pack key. The
+// credentials, and inventory needs SSH credentials and a pack_dir (a pack key
+// is optional; see loadPack). The
 // error names what is missing so a half-configured datasource is diagnosable
 // from the health report rather than only when an action fails.
 func (p *Proxy) HealthCheck(ctx context.Context) error {
@@ -649,9 +678,6 @@ func (p *Proxy) HealthCheck(ctx context.Context) error {
 	var missing []string
 	if p.sshConfig == nil {
 		missing = append(missing, "ssh credentials")
-	}
-	if p.packPubKey == nil {
-		missing = append(missing, "pack_public_key")
 	}
 	if p.cfg.PackDir == "" {
 		missing = append(missing, "pack_dir")
@@ -677,7 +703,7 @@ func (p *Proxy) Actions() []string {
 	if p.ldapConfigured {
 		actions = append(actions, "discovery_ldap")
 	}
-	if p.sshConfig != nil && p.packPubKey != nil {
+	if p.sshConfig != nil {
 		actions = append(actions, "discovery_inventory")
 	}
 	return actions
@@ -688,7 +714,8 @@ func (p *Proxy) Actions() []string {
 // the content pack versions present in pack_dir so the server can pick a
 // version to pin in discovery_inventory requests (content_pack_version is a
 // required request param with no "latest" default). Presence means the file
-// exists — signature verification still happens at execution time.
+// exists — signature verification, when a pack key is configured, still
+// happens at execution time.
 func (p *Proxy) CollectMetadata(ctx context.Context) (map[string]any, error) {
 	meta := map[string]any{"actions": p.Actions()}
 	if versions := p.packVersions(); len(versions) > 0 {

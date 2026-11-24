@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Discovery: `pack_public_key` is optional. When it is set, packs must verify exactly as
+  before; when it is not, packs in `pack_dir` load unsigned (still parsed and validated:
+  positive version, kind, collectors, declared version matching the request and file name)
+  and a warning is logged once. A request still cannot carry a pack. `discovery_inventory`
+  is advertised whenever SSH credentials are configured, and health no longer lists
+  `pack_public_key` as missing. `inventory --pack-key` is optional to match.
+
 ### Added
 - `http-proxy` credential probes can be a POST with a fixed JSON `body` (`probe.method`,
   `probe.body`), for providers whose credential check is a POST, such as Dynatrace's

@@ -54,7 +54,8 @@ func TestSplitPositional(t *testing.T) {
 
 // The scope ceiling is not optional in standalone mode either: without it a
 // mistyped target would be contacted rather than refused.
-func TestCmdInventory_RequiresScopeAndPackKey(t *testing.T) {
+// --pack-key is optional: without it the pack runs unsigned.
+func TestCmdInventory_RequiresScope(t *testing.T) {
 	dir := t.TempDir()
 	pack := filepath.Join(dir, "p.yaml")
 	if err := os.WriteFile(pack, []byte("version: 1\nkind: inventory\n"), 0o600); err != nil {
@@ -66,11 +67,10 @@ func TestCmdInventory_RequiresScopeAndPackKey(t *testing.T) {
 	}
 
 	cases := map[string][]string{
-		"no cidr":     {"--targets", "10.0.0.1", "--pack", pack, "--pack-key", "K", "--key", key},
-		"no targets":  {"--cidr", "10.0.0.0/24", "--pack", pack, "--pack-key", "K", "--key", key},
-		"no pack":     {"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1", "--pack-key", "K", "--key", key},
-		"no pack key": {"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1", "--pack", pack, "--key", key},
-		"no creds":    {"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1", "--pack", pack, "--pack-key", "K"},
+		"no cidr":    {"--targets", "10.0.0.1", "--pack", pack, "--pack-key", "K", "--key", key},
+		"no targets": {"--cidr", "10.0.0.0/24", "--pack", pack, "--pack-key", "K", "--key", key},
+		"no pack":    {"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1", "--pack-key", "K", "--key", key},
+		"no creds":   {"--cidr", "10.0.0.0/24", "--targets", "10.0.0.1", "--pack", pack, "--pack-key", "K"},
 	}
 	for name, args := range cases {
 		t.Run(name, func(t *testing.T) {

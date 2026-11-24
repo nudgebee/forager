@@ -73,11 +73,11 @@ func (c *Config) SigningKeyEntries() []SigningKey {
 // Field names mirror the discovery proxy's config keys so the two stay
 // readable side by side.
 type DiscoveryDatasource struct {
-	// PackPublicKey verifies content packs. Without it no pack can be
-	// trusted, so discovery_inventory refuses to run.
+	// PackPublicKey verifies content packs. Optional: when set, every pack
+	// must be signed by it; when empty, packs in pack_dir run unsigned.
 	PackPublicKey string `mapstructure:"pack_public_key"`
 
-	// PackDir holds signed packs as linux-inventory-v<N>.yaml.
+	// PackDir holds packs as linux-inventory-v<N>.yaml.
 	PackDir string `mapstructure:"pack_dir"`
 
 	// KnownHostsFile enables SSH host key verification when set.
