@@ -184,6 +184,8 @@ func configureDatasource(logger *slog.Logger, registry *proxy.Registry, secretsM
 		if len(ds.AllowedHosts) > 0 {
 			cfg["allowed_hosts"] = ds.AllowedHosts
 		}
+		setIfNotEmpty(cfg, "known_hosts", ds.KnownHosts)
+		setIfNotEmpty(cfg, "host_key_policy", ds.HostKeyPolicy)
 		p = proxyssh.New(logger.With("datasource", ds.Name))
 	case "discovery":
 		proxyType = "discovery-proxy"
@@ -301,6 +303,7 @@ func applyDiscoveryConfig(cfg map[string]any, d *config.DiscoveryDatasource) {
 	setIfNotEmpty(cfg, "pack_public_key", d.PackPublicKey)
 	setIfNotEmpty(cfg, "pack_dir", d.PackDir)
 	setIfNotEmpty(cfg, "known_hosts_file", d.KnownHostsFile)
+	setIfNotEmpty(cfg, "host_key_policy", d.HostKeyPolicy)
 	if d.SSHAccess {
 		cfg["ssh_access"] = true
 	}

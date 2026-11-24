@@ -142,3 +142,28 @@ func TestSSHAccessConfigDropsEmptyScopeEntries(t *testing.T) {
 		t.Error("nil config enabled ssh_access")
 	}
 }
+
+// host_key_policy reaches the sibling, so accept-new on a discovery scope
+// covers ad-hoc commands too, learning into the same known_hosts_file.
+func TestSSHAccessConfigCarriesHostKeyPolicy(t *testing.T) {
+	kh := filepath.Join(t.TempDir(), "known_hosts") // absent: accept-new creates it
+	cfg := map[string]any{
+		"allowed_cidrs":    []any{"192.0.2.0/24"},
+		"known_hosts_file": kh,
+		"host_key_policy":  "accept-new",
+	}
+	out, err := SSHAccessConfig(cfg, true)
+	if err != nil {
+		t.Fatalf("SSHAccessConfig: %v", err)
+	}
+	if out["host_key_policy"] != "accept-new" {
+		t.Errorf("host_key_policy = %v, want accept-new", out["host_key_policy"])
+	}
+
+	_, p, err := SSHAccessSibling(proxy.DatasourceEntry{ID: "d", Name: "d"}, cfg,
+		map[string]string{"username": "u", "password": "x"}, true, slog.New(slog.DiscardHandler))
+	if err != nil {
+		t.Fatalf("sibling with accept-new and a not-yet-created known_hosts_file: %v", err)
+	}
+	_ = p.Close()
+}

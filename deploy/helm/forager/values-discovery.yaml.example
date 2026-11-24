@@ -45,6 +45,11 @@ forager:
         # us false inventory.
         # known_hosts_file: /etc/nudgebee/known_hosts
 
+        # strict (default) or accept-new: record the key of a host
+        # known_hosts_file has no entry for, still refuse a changed key. The
+        # file must then be writable by the agent.
+        # host_key_policy: accept-new
+
         # Ceiling on sweep probe rate, whatever a request asks for. The
         # default of 1000 is a safety limit, not a target; the per-request
         # default is 100. Lower it for fragile or monitored networks.

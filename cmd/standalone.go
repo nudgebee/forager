@@ -71,7 +71,8 @@ Run discovery directly, without a relay or an account:
                              [--user nudgebee-ro --key ~/.ssh/id_ed25519]
   nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5,10.0.1.6 \
                              --user nudgebee-ro --key ~/.ssh/id_ed25519 \
-                             --pack ./linux-inventory-v2.yaml [--pack-key <base64>]
+                             --pack ./linux-inventory-v2.yaml [--pack-key <base64>] \
+                             [--known-hosts ./known_hosts --host-key-policy accept-new]
 
 Build the call graph of a VM fleet from the node-agent series in a
 Prometheus-compatible store:
@@ -211,6 +212,7 @@ func cmdInventory(args []string) error {
 	port := fs.Int("port", 22, "SSH port")
 	concurrency := fs.Int("concurrency", 25, "hosts to inventory in parallel")
 	knownHosts := fs.String("known-hosts", "", "known_hosts file for host key verification")
+	hostKeyPolicy := fs.String("host-key-policy", "", "strict (default) or accept-new: record unknown hosts' keys in --known-hosts, refuse changed ones")
 	verbose := fs.Bool("v", false, "log progress to stderr")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -263,6 +265,9 @@ func cmdInventory(args []string) error {
 	}
 	if *knownHosts != "" {
 		cfg["known_hosts_file"] = *knownHosts
+	}
+	if *hostKeyPolicy != "" {
+		cfg["host_key_policy"] = *hostKeyPolicy
 	}
 
 	return runAction(cfg, creds, "discovery_inventory", map[string]any{

@@ -83,6 +83,11 @@ type DiscoveryDatasource struct {
 	// KnownHostsFile enables SSH host key verification when set.
 	KnownHostsFile string `mapstructure:"known_hosts_file"`
 
+	// HostKeyPolicy is "strict" (default) or "accept-new": record the key of
+	// a host known_hosts_file has no entry for, and still refuse a changed
+	// key. Requires known_hosts_file. Also applies to the ssh_access sibling.
+	HostKeyPolicy string `mapstructure:"host_key_policy"`
+
 	// SSHAccess also exposes the in-scope hosts for ad-hoc commands through
 	// a sibling ssh-proxy datasource, using the same credentials. Off by
 	// default: it widens what the credentials were granted for. Requires
@@ -143,6 +148,12 @@ type LocalDatasource struct {
 	// SSH dynamic mode: CIDR ranges or hostnames that this datasource is allowed to connect to.
 	// When host is empty and allowed_hosts is set, the SSH proxy operates in dynamic/pool mode.
 	AllowedHosts []string `mapstructure:"allowed_hosts"`
+
+	// SSH host key verification: KnownHosts is an OpenSSH known_hosts path;
+	// HostKeyPolicy is "strict" (default) or "accept-new" (record unknown
+	// hosts' keys, refuse changed ones; requires known_hosts).
+	KnownHosts    string `mapstructure:"known_hosts"`
+	HostKeyPolicy string `mapstructure:"host_key_policy"`
 
 	// Discovery fields. Scope (allowed_cidrs) reuses allowed_hosts above.
 	// In production these arrive as server-pushed datasource config; these

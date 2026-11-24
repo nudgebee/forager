@@ -748,6 +748,100 @@ func TestCollectMetadata_OmitsScopeWhenUnrestricted(t *testing.T) {
 	}
 }
 
+// The laptop-install path end to end: no pack key, an empty known_hosts with
+// accept-new, and a host never seen before. Inventory runs, and the host's
+// key is recorded so the next run (and the ssh_access sibling) verifies it.
+func TestHandleInventory_AcceptNewWithUnsignedPack(t *testing.T) {
+	srv := newFakeSSHServer(t, map[string]string{
+		factsProbe:            ubuntuOSRelease + "\n---\nx86_64",
+		"dpkg-query -W":       "bash\t5.1\tamd64\n",
+		"cat /etc/os-release": ubuntuOSRelease,
+	})
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+
+	p, _ := newTestProxy(t, map[string]any{
+		"pack_dir":         writeUnsignedPack(t, validBody, 3),
+		"allowed_cidrs":    []any{"127.0.0.1/32"},
+		"port":             srv.port(),
+		"known_hosts_file": kh,
+		"host_key_policy":  "accept-new",
+	}, map[string]string{"username": "nudgebee-ro", "password": "x"})
+
+	run := func() TargetResult {
+		t.Helper()
+		resp, err := p.HandleRequest(context.Background(), &proxy.ActionRequest{
+			Action: "discovery_inventory",
+			Params: map[string]any{"targets": []any{"127.0.0.1"}, "content_pack_version": 3},
+		})
+		if err != nil {
+			t.Fatalf("inventory: %v", err)
+		}
+		var out InventoryResponse
+		if err := json.Unmarshal(resp.Result, &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.Targets[0]
+	}
+
+	if r := run(); r.Status != StatusOK {
+		t.Fatalf("first contact: status = %s (%s), want ok", r.Status, r.Error)
+	}
+	data, err := os.ReadFile(kh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasPrefix(string(data), fmt.Sprintf("[127.0.0.1]:%d ssh-ed25519 ", srv.port())) {
+		t.Fatalf("known_hosts = %q, want the host's ed25519 key", data)
+	}
+	if r := run(); r.Status != StatusOK {
+		t.Fatalf("second run against the learned key: status = %s (%s)", r.Status, r.Error)
+	}
+	if n := strings.Count(string(mustRead(t, kh)), "\n"); n != 1 {
+		t.Errorf("known_hosts has %d lines, want 1", n)
+	}
+
+	// Replace the recorded key: the host now looks like an impostor.
+	pub, _, _ := ed25519.GenerateKey(nil)
+	other, _ := ssh.NewPublicKey(pub)
+	addr := fmt.Sprintf("127.0.0.1:%d", srv.port())
+	if err := os.WriteFile(kh, []byte(knownhosts.Line([]string{addr}, other)+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if r := run(); r.Status == StatusOK {
+		t.Fatal("inventory ran against a host whose key changed")
+	}
+}
+
+func TestConfigure_HostKeyPolicy(t *testing.T) {
+	creds := map[string]string{"username": "nudgebee-ro", "password": "x"}
+	if err := New(slog.New(slog.DiscardHandler)).Configure(map[string]any{"host_key_policy": "accept-new"}, creds); err == nil {
+		t.Error("accept-new accepted without known_hosts_file")
+	}
+	if err := New(slog.New(slog.DiscardHandler)).Configure(map[string]any{"host_key_policy": "maybe"}, map[string]string{}); err == nil {
+		t.Error("invalid host_key_policy accepted")
+	}
+
+	// accept-new creates the file it learns into.
+	kh := filepath.Join(t.TempDir(), "known_hosts")
+	if err := New(slog.New(slog.DiscardHandler)).Configure(map[string]any{
+		"known_hosts_file": kh, "host_key_policy": "accept-new",
+	}, creds); err != nil {
+		t.Fatalf("configure: %v", err)
+	}
+	if _, err := os.Stat(kh); err != nil {
+		t.Errorf("known_hosts_file not created: %v", err)
+	}
+}
+
+func mustRead(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b
+}
+
 // A pack cached while running unsigned must not survive a reconfigure that
 // adds a pack key: from then on every pack has to verify.
 func TestConfigure_AddingPackKeyDropsUnverifiedCache(t *testing.T) {

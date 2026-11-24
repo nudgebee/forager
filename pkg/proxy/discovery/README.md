@@ -144,7 +144,8 @@ nudgebee-forager sweep --cidr 10.0.1.0/24 --ports 22
 
 nudgebee-forager inventory --cidr 10.0.1.0/24 --targets 10.0.1.5 \
   --user nudgebee-ro --key ~/.ssh/id_ed25519 \
-  --pack ./pack.yaml
+  --pack ./pack.yaml \
+  --known-hosts ./known_hosts --host-key-policy accept-new
 
 # Or require a signed pack:
 nudgebee-forager pack keygen                      # prints a keypair
@@ -180,8 +181,14 @@ and no target list of its own.
 | `ldap` | — | Directory connection: `host`, `port`, `tls`/`start_tls`, `base_dn`, `page_size`. Absent host disables `discovery_ldap`. |
 | `pack_public_key` | — | Optional. When set (here or as the `pack_public_key` credential), every pack must carry a valid signature from it. When empty, packs load unsigned: still parsed and validated (positive version, kind, collectors, declared version = requested = file name), and a warning is logged once. |
 | `pack_dir` | — | Directory holding packs, named `linux-inventory-v<N>.yaml`. Required to run inventory. |
-| `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified and unknown/changed keys are refused. |
+| `known_hosts_file` | — | OpenSSH known_hosts path. When set, host keys are verified: a changed key is always refused, an unknown host is refused under `strict`. Re-read when it changes, so added keys need no restart. |
+| `host_key_policy` | `strict` | `accept-new` records the key of a host `known_hosts_file` has no entry for (trust on first use; the file is created 0600 if missing) and still refuses a changed key. Requires `known_hosts_file`. |
 | `ssh_access` | false | Also expose in-scope hosts for ad-hoc commands (see below). |
+
+With `known_hosts_file` set, the forager asks each host for the key types the
+file holds for it (`HostKeyAlgorithms`). Without that, x/crypto prefers ECDSA,
+and a file holding only the ed25519 key OpenSSH records would be refused as a
+mismatch.
 
 Credentials arrive through `pkg/secrets`, local or cloud-push, and never
 appear in logs or responses: `username` plus `private_key` or `password` for
@@ -195,7 +202,8 @@ registers a sibling `ssh-proxy` datasource, `<id>:ssh` named `<name>-ssh`, in
 dynamic mode:
 - It uses the same credentials.
 - `allowed_hosts` is set to `allowed_cidrs`.
-- It verifies host keys against the same `known_hosts_file`.
+- It verifies host keys against the same `known_hosts_file`, under the same
+  `host_key_policy`.
 
 The server registers the sibling like any other ssh datasource, so
 `ssh_command` can target any in-scope host by passing `params.host`. The discovery datasource itself is unchanged.
@@ -204,7 +212,9 @@ The flag widens what the credentials were granted for, from pack commands to
 arbitrary commands. For that reason the sibling is refused, and an error is
 logged, unless all of the following hold:
 - `signing_public_key` is configured, so unsigned commands are rejected.
-- `known_hosts_file` is set. The trust-on-first-use tradeoff above is
+- `known_hosts_file` is set, so host keys are recorded and enforced. With
+  `host_key_policy: accept-new` the first contact is trusted and every later
+  one is checked against it; without a file nothing is ever checked, which is
   acceptable for inventory but not for a shell.
 - `allowed_cidrs` is non-empty. An unrestricted scope is never exposed.
 
@@ -224,7 +234,10 @@ a binary whose job is running signed content against production hosts.
   finds hosts nobody has catalogued, so their keys are unknown on first
   contact and change when a VM is re-imaged — strict verification by default
   would break the one thing this module exists to do. Customers who can
-  supply host keys should set `known_hosts_file` and get real verification.
+  supply host keys should set `known_hosts_file` and get real verification;
+  others can set `host_key_policy: accept-new` to trust first contact and
+  catch later changes. A re-imaged VM then needs its old line removed from
+  `known_hosts_file`.
   Recording keys on the server-side asset record and pinning on later runs is
   the fix that removes the tradeoff, and belongs with that work.
 - IPv6 sweeps are unsupported: enumerating a v6 prefix by address is not

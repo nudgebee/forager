@@ -120,6 +120,7 @@ an SSH login on the target, and a content pack. The pack is verified when
 | `--port` | `22` | SSH port |
 | `--concurrency` | `25` | Hosts inventoried in parallel |
 | `--known-hosts` | | known_hosts file; without it host keys are not verified |
+| `--host-key-policy` | `strict` | `accept-new` records unknown hosts' keys in `--known-hosts` (created if missing) and still refuses changed ones |
 | `-v` | | Log progress to stderr |
 
 `--cidr` is required here too. It bounds what can be contacted, so a mistyped
