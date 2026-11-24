@@ -92,6 +92,9 @@ func TestParseProbe_Refusals(t *testing.T) {
 		"unsupported method": map[string]any{"path": "/x", "method": "DELETE"},
 		"body on a GET":      map[string]any{"path": "/x", "body": "{}"},
 		"oversized body":     map[string]any{"path": "/x", "method": "POST", "body": strings.Repeat("x", maxProbeBody+1)},
+		"body not JSON":      map[string]any{"path": "/x", "method": "POST", "body": `{"query":"fetch logs"`},
+		"body not JSON, json type": map[string]any{"path": "/x", "method": "POST", "body": "fetch logs",
+			"headers": map[string]any{"Content-Type": "application/json; charset=utf-8"}},
 	} {
 		if _, err := parseProbe(raw); err == nil {
 			t.Errorf("%s: expected an error", name)
@@ -99,6 +102,12 @@ func TestParseProbe_Refusals(t *testing.T) {
 	}
 	if p, err := parseProbe(nil); err != nil || p != nil {
 		t.Fatalf("absent probe: %v %v", p, err)
+	}
+
+	// A body sent as another content type is not checked as JSON.
+	if _, err := parseProbe(map[string]any{"path": "/x", "method": "POST", "body": "fetch logs",
+		"headers": map[string]any{"Content-Type": "text/plain"}}); err != nil {
+		t.Fatalf("text/plain body refused: %v", err)
 	}
 }
 
