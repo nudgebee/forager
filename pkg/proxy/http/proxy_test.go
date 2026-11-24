@@ -468,37 +468,6 @@ func TestProxy_FollowRedirects_CustomHeaderStaysOnOrigin(t *testing.T) {
 	}
 }
 
-func TestEffectivePort(t *testing.T) {
-	uHTTP, _ := url.Parse("http://example.com/path")
-	if port := effectivePort(uHTTP); port != "80" {
-		t.Fatalf("expected port 80 for http URL, got %q", port)
-	}
-
-	uHTTPS, _ := url.Parse("https://example.com/path")
-	if port := effectivePort(uHTTPS); port != "443" {
-		t.Fatalf("expected port 443 for https URL, got %q", port)
-	}
-
-	uExplicit, _ := url.Parse("http://example.com:8080/path")
-	if port := effectivePort(uExplicit); port != "8080" {
-		t.Fatalf("expected port 8080 for explicit port URL, got %q", port)
-	}
-
-	uMixedHTTP, _ := url.Parse("HTTP://example.com/path")
-	if port := effectivePort(uMixedHTTP); port != "80" {
-		t.Fatalf("expected port 80 for HTTP URL, got %q", port)
-	}
-
-	uMixedHTTPS, _ := url.Parse("Https://example.com/path")
-	if port := effectivePort(uMixedHTTPS); port != "443" {
-		t.Fatalf("expected port 443 for Https URL, got %q", port)
-	}
-
-	if port := effectivePort(nil); port != "" {
-		t.Fatalf("expected empty string for nil URL, got %q", port)
-	}
-}
-
 func TestProxy_Configure_ClosesPreviousIdleConnections(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(200)

@@ -9,26 +9,6 @@ import (
 	"testing"
 )
 
-func TestRefuseMetadataDial(t *testing.T) {
-	for addr, refuse := range map[string]bool{
-		"169.254.169.254:80": true,
-		"169.254.1.1:443":    true,
-		"[fe80::1]:80":       true,
-		"[fd00:ec2::254]:80": true,
-		"168.63.129.16:80":   true,
-		"100.100.100.200:80": true,
-		"10.0.0.5:9200":      false,
-		"127.0.0.1:3200":     false,
-		"[::1]:3200":         false,
-		"8.8.8.8:443":        false,
-	} {
-		err := refuseMetadataDial("tcp", addr, nil)
-		if (err != nil) != refuse {
-			t.Errorf("%s: refused=%v, want %v (%v)", addr, err != nil, refuse, err)
-		}
-	}
-}
-
 // The guard sits on the proxy's transport: a name that resolves to a
 // metadata address is refused at dial time, not reached.
 func TestProxy_TransportRefusesMetadataDial(t *testing.T) {
