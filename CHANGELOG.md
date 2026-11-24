@@ -19,6 +19,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `pack_public_key` as missing. `inventory --pack-key` is optional to match.
 
 ### Added
+- `install.sh` and `install-macos.sh` set up VM discovery on a new install: the primary
+  interface's subnet (narrowed to the host's /24 when wider than /22), an ed25519 key for
+  the agent, the example content pack, and a `discovery` datasource with
+  `host_key_policy: accept-new` (`ssh_access` only when `NB_SIGNING_PUBLIC_KEY` is set).
+  They print the key and the `ssh-copy-id` command for each VM. Upgrades leave the config
+  alone. Settings: `NB_DISCOVERY=false`, `NB_DISCOVERY_CIDR` (at most a /22),
+  `NB_SSH_USER`, `NB_DISCOVERY_NAME`, `NB_PACK_URL`; `NB_PREFIX` and `NB_CONFIG_ONLY` for
+  testing the config generation without root.
 - `host_key_policy` for the discovery and ssh proxies (and the `ssh_access` sibling):
   `strict` (default, as before) or `accept-new`, which records the key of a host
   `known_hosts_file` / `known_hosts` has no entry for (creating the file 0600 if missing)

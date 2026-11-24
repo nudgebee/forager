@@ -1,10 +1,22 @@
 package main
 
 import (
+	"context"
+	"crypto/ed25519"
+	"encoding/base64"
+	"encoding/pem"
+	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
+
+	"nudgebee/forager/pkg/config"
+	"nudgebee/forager/pkg/proxy"
 )
 
 // Credentials may name a file instead of inlining key material, so a private
@@ -156,5 +168,84 @@ func TestResolveKeyFiles_PassesThroughUnchanged(t *testing.T) {
 		if got[k] != v {
 			t.Errorf("credentials[%q] = %q, want %q", k, got[k], v)
 		}
+	}
+}
+
+// The install scripts write a discovery datasource into forager.yaml. This is
+// that block, field for field (deploy/install.sh write_discovery_config): if
+// it stops loading, a fresh install silently gets no discovery.
+func TestConfigureDatasource_InstallScriptDiscoveryBlock(t *testing.T) {
+	dir := t.TempDir()
+	keyPath := filepath.Join(dir, "id_ed25519")
+	_, priv, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	block, err := ssh.MarshalPrivateKey(priv, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(keyPath, pem.EncodeToMemory(block), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	signingPub, _, err := ed25519.GenerateKey(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	yaml := fmt.Sprintf(`relay_url: wss://relay.example/register
+access_key: k
+access_secret: s
+data_dir: %[1]s
+signing_public_key: "%[3]s"
+
+datasources:
+  - type: discovery
+    name: "local-network"
+    allowed_hosts:
+      - "10.0.1.0/24"
+    credential_source: local
+    credentials:
+      username: "ubuntu"
+      private_key_file: "%[2]s"
+    discovery:
+      pack_dir: "%[1]s/packs"
+      known_hosts_file: "%[1]s/known_hosts"
+      host_key_policy: accept-new
+      ssh_access: true
+`, dir, keyPath, base64.StdEncoding.EncodeToString(signingPub))
+	cfgPath := filepath.Join(dir, "forager.yaml")
+	if err := os.WriteFile(cfgPath, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(cfgPath)
+	if err != nil {
+		t.Fatalf("loading config: %v", err)
+	}
+	registry := proxy.NewRegistry()
+	defer registry.CloseAll()
+	logger := slog.New(slog.DiscardHandler)
+	for _, ds := range cfg.Datasources {
+		configureDatasource(logger, registry, nil, true, ds)
+	}
+
+	p, ok := registry.Get("local:local-network")
+	if !ok {
+		t.Fatalf("discovery datasource not registered; registry = %v", registry.All())
+	}
+	meta, err := p.(proxy.MetadataCollector).CollectMetadata(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions, _ := meta["actions"].([]string)
+	if !slices.Contains(actions, "discovery_inventory") {
+		t.Errorf("actions = %v, want discovery_inventory with ssh credentials and no pack key", actions)
+	}
+	if _, ok := registry.Get("local:local-network:ssh"); !ok {
+		t.Errorf("ssh_access sibling not registered; registry = %v", registry.All())
+	}
+	if _, err := os.Stat(filepath.Join(dir, "known_hosts")); err != nil {
+		t.Errorf("accept-new did not create known_hosts_file: %v", err)
 	}
 }

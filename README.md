@@ -122,6 +122,30 @@ Installs the binary to `/usr/local/bin/nudgebee-forager`, drops config
 under `/usr/local/etc/nudgebee/`, and registers a launchd daemon at
 `/Library/LaunchDaemons/com.nudgebee.forager.plist` (requires root).
 
+### VM discovery on a new install
+
+On a new install (no config yet) both scripts also set up discovery of the
+local network:
+
+- the subnet of the primary interface is detected (narrowed to the host's
+  `/24` when it is wider than `/22`);
+- an SSH key for the agent is generated at `<config>/ssh/id_ed25519`;
+- the example content pack is downloaded to `<config>/packs/`;
+- a `discovery` datasource is written with `host_key_policy: accept-new`, so
+  host keys are learned into `<config>/known_hosts` on first contact.
+
+The script then prints the public key and the `ssh-copy-id` command to run for
+each VM. An upgrade leaves the existing config alone.
+
+| Variable | Default | |
+|---|---|---|
+| `NB_DISCOVERY` | `true` | `false` skips discovery setup |
+| `NB_DISCOVERY_CIDR` | detected | Subnet to discover; wider than `/22` is refused |
+| `NB_SSH_USER` | the sudo user, else `ubuntu` | Login user on the VMs |
+| `NB_DISCOVERY_NAME` | `local-network` | Datasource name |
+| `NB_PACK_URL` | example pack on `main` | Content pack to download (must declare `version: 2`) |
+| `NB_SIGNING_PUBLIC_KEY` | — | Also turns on `ssh_access` (ad-hoc commands on discovered hosts) |
+
 ### Windows (PowerShell, as Administrator)
 
 ```powershell
