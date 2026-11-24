@@ -115,6 +115,7 @@ Forwards JSON-RPC requests to MCP (Model Context Protocol) servers. Supports thr
 - Sessions close after 30 min idle (each use extends it) and on proxy close, via a best-effort HTTP `DELETE`
 - A `404` for a sent session (server restarted or expired it) re-initializes and retries once
 - Replies framed as SSE are unwrapped to the JSON-RPC payload
+- Redirects are followed only to the same scheme, host and port as the request that started them (the MCP `url`, or the OAuth token URL), or to that server's `https://` upgrade (same port, or 80 to 443), because every request carries the datasource's credentials; a redirect to another host or port, or a downgrade to `http://`, fails the request
 
 ### stdio transport details
 

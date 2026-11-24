@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
+	"nudgebee/forager/pkg/proxy/netguard"
 )
 
 // Proxy forwards MCP (Model Context Protocol) JSON-RPC requests to a local MCP server.
@@ -54,9 +55,43 @@ func New(logger *slog.Logger) *Proxy {
 		logger:   logger,
 		sessions: make(map[string]*mcpSession),
 		client: &http.Client{
-			Timeout: 120 * time.Second,
+			Timeout:       120 * time.Second,
+			Transport:     netguard.NewTransport(),
+			CheckRedirect: sameOriginRedirect,
 		},
 	}
+}
+
+// sameOriginRedirect follows a redirect only to the origin of the request that
+// started the chain (the MCP URL, or the OAuth token URL), or to its https
+// upgrade. Every request carries the datasource's credentials, and Go keeps
+// custom headers such as X-API-Key on a redirect to another host.
+func sameOriginRedirect(req *http.Request, via []*http.Request) error {
+	if len(via) >= 10 {
+		return fmt.Errorf("stopped after 10 redirects")
+	}
+	if origin := via[0].URL; !redirectAllowed(req.URL, origin) {
+		return fmt.Errorf("redirect from %s to another origin %s refused", origin.Redacted(), req.URL.Redacted())
+	}
+	return nil
+}
+
+// redirectAllowed reports whether a redirect to target keeps the credentials on
+// origin's server: the same host and port, and either the same scheme or an
+// http -> https upgrade (on the same port, or from 80 to 443). A downgrade to
+// http, another host or another port is refused.
+func redirectAllowed(target, origin *url.URL) bool {
+	if !strings.EqualFold(strings.TrimSuffix(target.Hostname(), "."), strings.TrimSuffix(origin.Hostname(), ".")) {
+		return false
+	}
+	tp, op := netguard.EffectivePort(target), netguard.EffectivePort(origin)
+	switch {
+	case strings.EqualFold(target.Scheme, origin.Scheme):
+		return tp == op
+	case strings.EqualFold(origin.Scheme, "http") && strings.EqualFold(target.Scheme, "https"):
+		return tp == op || (op == "80" && tp == "443")
+	}
+	return false
 }
 
 func (p *Proxy) Type() string { return "mcp-proxy" }
@@ -82,6 +117,18 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		}
 		if p.url == "" {
 			return fmt.Errorf("url is required for MCP %s transport", p.transport)
+		}
+		for _, f := range []struct{ name, raw string }{{"url", p.url}, {"oauth_token_url", creds["oauth_token_url"]}} {
+			if f.raw == "" {
+				continue
+			}
+			u, err := url.Parse(f.raw)
+			if err != nil {
+				return fmt.Errorf("invalid MCP %s: %w", f.name, err)
+			}
+			if err := netguard.RefuseMetadataHost(u.Hostname()); err != nil {
+				return fmt.Errorf("invalid MCP %s: %w", f.name, err)
+			}
 		}
 		p.sessionMu.Lock()
 		if p.stopSweep == nil && !p.closed {

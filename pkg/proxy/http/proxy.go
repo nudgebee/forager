@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"nudgebee/forager/pkg/proxy"
+	"nudgebee/forager/pkg/proxy/netguard"
 )
 
 // Proxy is a generic HTTP reverse proxy for any HTTP-based datasource.
@@ -81,7 +82,7 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 	if baseParsed.Hostname() == "" {
 		return fmt.Errorf("base_url must specify a host")
 	}
-	if err := refuseMetadataHost(baseParsed.Hostname()); err != nil {
+	if err := netguard.RefuseMetadataHost(baseParsed.Hostname()); err != nil {
 		return fmt.Errorf("invalid base_url: %w", err)
 	}
 
@@ -145,8 +146,8 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 			if len(via) >= 10 {
 				return fmt.Errorf("stopped after 10 redirects")
 			}
-			reqPort := effectivePort(req.URL)
-			basePort := effectivePort(baseParsed)
+			reqPort := netguard.EffectivePort(req.URL)
+			basePort := netguard.EffectivePort(baseParsed)
 			reqHost := strings.TrimSuffix(req.URL.Hostname(), ".")
 			baseHost := strings.TrimSuffix(baseParsed.Hostname(), ".")
 			if !strings.EqualFold(req.URL.Scheme, baseParsed.Scheme) || !strings.EqualFold(reqHost, baseHost) || reqPort != basePort {
@@ -156,36 +157,15 @@ func (p *Proxy) Configure(config map[string]any, creds map[string]string) error 
 		}
 	}
 
-	var transport *http.Transport
-	if defaultTransport, ok := http.DefaultTransport.(*http.Transport); ok {
-		transport = defaultTransport.Clone()
-	} else {
-		transport = &http.Transport{
-			Proxy:                 http.ProxyFromEnvironment,
-			ForceAttemptHTTP2:     true,
-			MaxIdleConns:          100,
-			IdleConnTimeout:       90 * time.Second,
-			TLSHandshakeTimeout:   10 * time.Second,
-			ExpectContinueTimeout: 1 * time.Second,
-		}
-	}
+	// Every connection is checked on its resolved address: never a cloud
+	// instance-metadata endpoint, whatever base_url says.
+	transport := netguard.NewTransport()
 	if transport.TLSClientConfig == nil {
 		transport.TLSClientConfig = &tls.Config{}
 	} else {
 		transport.TLSClientConfig = transport.TLSClientConfig.Clone()
 	}
 	transport.TLSClientConfig.InsecureSkipVerify = skipVerify // nolint:gosec
-	// Every connection is checked on its resolved address: never a cloud
-	// instance-metadata endpoint, whatever base_url says.
-	transport.DialContext = (&net.Dialer{
-		Timeout:   30 * time.Second,
-		KeepAlive: 30 * time.Second,
-		Control:   refuseMetadataDial,
-	}).DialContext
-	// HTTPS must dial through DialContext too: a DialTLSContext (or legacy
-	// DialTLS) cloned from the default transport would bypass the guard.
-	transport.DialTLSContext = nil
-	transport.DialTLS = nil //nolint:staticcheck // cleared on purpose, see above
 	transport.TLSClientConfig.ServerName = baseParsed.Hostname()
 	if err := applyTLSMaterial(transport.TLSClientConfig, creds); err != nil {
 		return err
@@ -573,24 +553,6 @@ func (p *Proxy) injectAuthWith(req *http.Request, authType string, creds map[str
 				}
 			}
 		}
-	}
-}
-
-func effectivePort(u *url.URL) string {
-	if u == nil {
-		return ""
-	}
-	port := u.Port()
-	if port != "" {
-		return port
-	}
-	switch strings.ToLower(u.Scheme) {
-	case "https":
-		return "443"
-	case "http":
-		return "80"
-	default:
-		return ""
 	}
 }
 

@@ -227,7 +227,7 @@ token without running a query.
 
 ### Cloud metadata endpoints
 
-The HTTP proxy refuses to connect to link-local addresses (`169.254.0.0/16`,
+The HTTP and MCP proxies refuse to connect to link-local addresses (`169.254.0.0/16`,
 `fe80::/10`), AWS's `fd00:ec2::254`, Azure's `168.63.129.16` and Alibaba
 Cloud's `100.100.100.200`, checked on the resolved address of every
 connection. The forager's own cloud credentials are served from those
@@ -237,7 +237,8 @@ When `HTTP_PROXY`/`HTTPS_PROXY` is set, the outbound proxy resolves the target
 and the forager only sees the proxy's address. A `base_url` that names a
 metadata address or `metadata.google.internal` is still refused when the
 datasource is configured, but a name that only resolves to one is not: block
-those addresses on the outbound proxy too. The MCP proxy is not covered yet.
+those addresses on the outbound proxy too. For the MCP proxy the same check
+covers its `url` and `oauth_token_url`.
 
 ### Config sync acknowledgements
 
