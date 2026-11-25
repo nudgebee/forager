@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"math"
 	"math/rand/v2"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -163,7 +165,11 @@ func (c *Client) Run(ctx context.Context) error {
 		c.connectedAt = time.Time{}
 		err := c.connectAndServe(ctx)
 		if err != nil {
-			c.logger.Warn("websocket session ended", "err", err)
+			if isExpectedDisconnect(err) {
+				c.logger.Warn("websocket session ended", "err", err)
+			} else {
+				c.logger.Error("websocket session ended", "err", err)
+			}
 		}
 		// A session that held for a while starts the backoff over.
 		if !c.connectedAt.IsZero() && time.Since(c.connectedAt) >= maxReconnectDelay {
@@ -179,6 +185,25 @@ func (c *Client) Run(ctx context.Context) error {
 		case <-time.After(wait):
 		}
 	}
+}
+
+// isExpectedDisconnect returns true if the error indicates a routine connection drop
+// or close that Client.Run will safely reconnect from.
+func isExpectedDisconnect(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, io.EOF) || errors.Is(err, net.ErrClosed) || errors.Is(err, context.Canceled) {
+		return true
+	}
+	var closeErr *websocket.CloseError
+	if errors.As(err, &closeErr) {
+		switch closeErr.Code {
+		case websocket.CloseNormalClosure, websocket.CloseGoingAway, websocket.CloseAbnormalClosure:
+			return true
+		}
+	}
+	return false
 }
 
 // reconnectWait is how long to wait before reconnect number attempt
