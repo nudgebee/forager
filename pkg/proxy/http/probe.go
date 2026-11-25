@@ -74,11 +74,19 @@ func parseProbe(raw any) (*probeSpec, error) {
 	if len(p.Body) > maxProbeBody {
 		return nil, fmt.Errorf("probe.body is %d bytes, more than %d", len(p.Body), maxProbeBody)
 	}
-	for name := range p.Headers {
+	contentType := ""
+	for name, v := range p.Headers {
 		switch strings.ToLower(name) {
 		case "authorization", "proxy-authorization", "host", "cookie":
 			return nil, fmt.Errorf("probe.headers may not set %s", name)
+		case "content-type":
+			contentType = v
 		}
+	}
+	// The body is sent as JSON unless headers say otherwise, so a typo in a
+	// provider's body fails the configure here instead of every probe later.
+	if p.Body != "" && (contentType == "" || strings.Contains(strings.ToLower(contentType), "json")) && !json.Valid([]byte(p.Body)) {
+		return nil, fmt.Errorf("probe.body is not valid JSON")
 	}
 	return &p, nil
 }

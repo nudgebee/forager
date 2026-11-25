@@ -223,7 +223,13 @@ without a probe keeps the previous checks.
 A probe is a GET unless it sets `method: POST` and a fixed `body` (at most
 4 KiB, sent as `application/json` unless its `headers` set a content type).
 Dynatrace uses this: its check is a DQL `query:verify`, which validates the
-token without running a query.
+token without running a query. A JSON body (the default content type) must be
+valid JSON, or the datasource is refused at configure time.
+
+The probe runs on every health report (every `health_check_interval_min`), not
+only before a save. A POST probe must therefore target an endpoint with no side
+effects: a validate or verify call, never one that writes data or runs billed
+work.
 
 ### Cloud metadata endpoints
 
