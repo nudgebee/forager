@@ -68,12 +68,12 @@ func runProcessesCollector(t *testing.T, fakePS string) string {
 
 func TestPackV3ProcessesDropsEverythingButAllowedFlags(t *testing.T) {
 	got := runProcessesCollector(t, `cat <<'OUT'
-java            /usr/bin/java -Dpassword=hunter2 -XX:-UseBASE64Intrinsics -XX:+UseG1GC -XX:UseAVX=2 -XX:MaxHeapSize=4g -jar app.jar --token=abc123
+java            /usr/bin/java -Dpassword=hunter2 -XX:-UseBASE64Intrinsics -XX:+UseG1GC -XX:UseAVX=2 -XX:MaxHeapSize=4g -XX:MaxRAMPercentage=70.0 -jar app.jar --token=abc123
 java            java -XX:OnError=curl_http://u:s3cret@host -XX:HeapDumpPath=/home/alice/dump -XX:Flags=/etc/jvm
 mysql           mysql -ps3cret
 OUT
 `)
-	want := "java -XX:-UseBASE64Intrinsics -XX:+UseG1GC -XX:UseAVX=2 -XX:MaxHeapSize=4g\njava\nmysql\n"
+	want := "java -XX:-UseBASE64Intrinsics -XX:+UseG1GC -XX:UseAVX=2 -XX:MaxHeapSize=4g -XX:MaxRAMPercentage=70.0\njava\nmysql\n"
 	if got != want {
 		t.Errorf("output = %q, want %q", got, want)
 	}

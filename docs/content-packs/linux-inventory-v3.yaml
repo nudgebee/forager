@@ -136,7 +136,7 @@ collectors:
   # stops long command lines being cut before their flags are seen.
   - id: processes
     cmd: |
-      cat /proc/1/cmdline >/dev/null 2>&1 || echo '#restricted'; { ps -eww -o comm=,args= 2>/dev/null || { p=$(ps -o comm,args 2>/dev/null) && printf '%s\n' "$p" | sed 1d; } || echo '#unavailable'; } | awk '/^#(unavailable)$/{print; next} ++n>2000{print "#truncated"; exit} {o=$1; for(i=2;i<=NF;i++) if ($i ~ /^-XX:([+-][A-Za-z0-9]+|[A-Za-z0-9]+=[0-9]+[kKmMgG]?)$/) o=o" "$i; print o}'
+      cat /proc/1/cmdline >/dev/null 2>&1 || echo '#restricted'; { ps -eww -o comm=,args= 2>/dev/null || { p=$(ps -o comm,args 2>/dev/null) && printf '%s\n' "$p" | sed 1d; } || echo '#unavailable'; } | awk '/^#(unavailable)$/{print; next} ++n>2000{print "#truncated"; exit} {o=$1; for(i=2;i<=NF;i++) if ($i ~ /^-XX:([+-][A-Za-z0-9]+|[A-Za-z0-9]+=[0-9]+(\.[0-9]+)?[kKmMgG]?)$/) o=o" "$i; print o}'
 
 # Signature covers this document with the signature line removed, base64
 # Ed25519. Produced by the publish pipeline; this example is unsigned and will
