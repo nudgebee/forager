@@ -1,0 +1,144 @@
+# linux-inventory v3: v2 (linux-inventory-example.yaml) plus the host facts the
+# server needs to decide whether a CVE applies to a host (CPU architecture, CPU
+# feature flags, running processes). See that file for the pack format.
+
+version: 3
+kind: inventory
+
+collectors:
+  # --- identity: the merge keys the server reconciles assets on -------------
+  - id: machine-id
+    cmd: cat /etc/machine-id 2>/dev/null || cat /var/lib/dbus/machine-id 2>/dev/null
+
+  # Readable by root on most distros; absent or empty otherwise. The server
+  # falls back to machine-id, so failure here is not fatal.
+  - id: smbios-uuid
+    cmd: cat /sys/class/dmi/id/product_uuid 2>/dev/null
+
+  - id: hostname
+    cmd: hostname -f 2>/dev/null || hostname
+
+  - id: net-links
+    cmd: ip -o link 2>/dev/null
+
+  # --- os ------------------------------------------------------------------
+  - id: os-release
+    cmd: cat /etc/os-release
+
+  - id: kernel
+    cmd: uname -r -m
+
+  # --- packages ------------------------------------------------------------
+  # Version strings are kept verbatim, including epoch and release suffix:
+  # backport-aware CVE matching (epic 2) resolves against vendor advisories,
+  # where "5.14.0-362.8.1.el9_3" and "5.14.0" are entirely different answers.
+  #
+  # Three fields below exist solely for that matching and are easy to mistake
+  # for noise, so: vendor advisories are published against the SOURCE package,
+  # not the installed binary one. A host with openssl-libs installed is patched
+  # by an advisory filed against openssl, and without SOURCERPM the two never
+  # meet. Measured on a live RHEL 9 host: 51 findings with it, 0 without —
+  # not fewer findings, none at all. The same applies to deb (libssl3 ->
+  # openssl) via source:Package.
+  - id: pkgs-rpm
+    when: os_family == "rhel" || os_family == "suse"
+    # EPOCHNUM, not EPOCH: EPOCH renders "(none)" when a package has no epoch,
+    # which every consumer then has to special-case. EPOCHNUM renders 0.
+    #
+    # MODULARITYLABEL identifies the AppStream module stream on RHEL 8+
+    # ("postgresql:12:8040020210708095149:9f9e2e7e"). Fixes apply only within
+    # the stream the host actually runs, so without it a postgresql:12 host is
+    # told to install fixes shipped in the 13/15/16 streams: 127 findings
+    # instead of the correct 35.
+    #
+    # The --querytags guard is not defensive padding. rpm before 4.14 does not
+    # know that tag, and on an unknown tag rpm prints "error: incorrect format:
+    # unknown tag" and emits NOTHING AT ALL — while still exiting 0. Naming the
+    # tag unconditionally therefore returns an empty package list for every
+    # RHEL/CentOS 7 host, and does it silently, which is far worse than the gap
+    # it was added to close. Verified on centos:7 (rpm 4.11.3) and ubi8 (4.14.3).
+    # Exit status cannot be used to detect this, so the tag list is consulted
+    # first; the else-branch keeps the empty field so both branches emit the
+    # same eight-column shape and the server parser needs one format, not two.
+    cmd: 'if rpm --querytags 2>/dev/null | grep -q MODULARITYLABEL; then rpm -qa --qf ''%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t%{MODULARITYLABEL}\t%{INSTALLTIME}\n''; else rpm -qa --qf ''%{NAME}\t%{EPOCHNUM}\t%{VERSION}\t%{RELEASE}\t%{ARCH}\t%{SOURCERPM}\t\t%{INSTALLTIME}\n''; fi'
+
+  - id: pkgs-dpkg
+    when: os_family == "debian"
+    # source:Package is populated for every package, matching the binary name
+    # when they do not differ (bash -> bash) and differing where it matters
+    # (libssl3 -> openssl, libc6 -> glibc).
+    cmd: dpkg-query -W -f '${Package}\t${Version}\t${Architecture}\t${db:Status-Status}\t${source:Package}\t${source:Version}\n'
+
+  - id: pkgs-apk
+    when: os_family == "alpine"
+    # The installed database rather than `apk info -v`, which prints only
+    # name-version. Alpine's secdb is keyed on the origin package, and origin
+    # is carried in the database's "o:" field — unavailable from apk info at
+    # any verbosity.
+    cmd: cat /lib/apk/db/installed 2>/dev/null
+
+  # --- patch channel binding ----------------------------------------------
+  # Collected in phase 0 because a lapsed subscription or dead repo means the
+  # host cannot be patched at all — that belongs in the coverage report now,
+  # not as a surprise when patching ships.
+  - id: sub-rhsm
+    when: os_id == "rhel"
+    cmd: subscription-manager status 2>/dev/null; subscription-manager identity 2>/dev/null
+
+  - id: sub-pro
+    when: os_id == "ubuntu"
+    cmd: pro status --format json 2>/dev/null
+
+  - id: sub-scc
+    when: os_family == "suse"
+    cmd: SUSEConnect --status-text 2>/dev/null
+
+  - id: repos-rpm
+    when: os_family == "rhel"
+    cmd: dnf repolist 2>/dev/null || yum repolist -q 2>/dev/null
+
+  - id: repos-apt
+    when: os_family == "debian"
+    cmd: cat /etc/apt/sources.list /etc/apt/sources.list.d/*.list 2>/dev/null
+
+  - id: repos-apk
+    when: os_family == "alpine"
+    cmd: cat /etc/apk/repositories 2>/dev/null
+
+  # --- reboot pending ------------------------------------------------------
+  - id: reboot-debian
+    when: os_family == "debian"
+    cmd: test -f /var/run/reboot-required && echo yes || echo no
+
+  - id: reboot-rhel
+    when: os_family == "rhel"
+    cmd: dnf needs-restarting -r >/dev/null 2>&1; echo "rc=$?"
+
+  # --- host facts for CVE applicability --------------------------------------
+  # A line starting with "#", or empty output, means the fact is unknown. The
+  # server must never read it as "none".
+  - id: cpu-arch
+    cmd: uname -m
+
+  # x86 labels the line "flags", ARM labels it "Features".
+  - id: cpu-flags
+    cmd: grep -m1 -E '^(flags|Features)' /proc/cpuinfo
+
+  # Process name plus boolean and numeric JVM -XX: flags only. Full command
+  # lines can carry secrets (-Dpassword=..., -XX:OnError=<url>), so everything
+  # else is dropped on the host and never leaves it.
+  #
+  #   #restricted   /proc hides other users' processes (hidepid)
+  #   #unavailable  no usable ps
+  #   #truncated    more than 2000 processes
+  #
+  # "ps -eww" is procps; the fallback is for busybox, which rejects it. -ww
+  # stops long command lines being cut before their flags are seen.
+  - id: processes
+    cmd: |
+      cat /proc/1/cmdline >/dev/null 2>&1 || echo '#restricted'; { ps -eww -o comm=,args= 2>/dev/null || { p=$(ps -o comm,args 2>/dev/null) && printf '%s\n' "$p" | sed 1d; } || echo '#unavailable'; } | awk '/^#(unavailable)$/{print; next} ++n>2000{print "#truncated"; exit} {o=$1; for(i=2;i<=NF;i++) if ($i ~ /^-XX:([+-][A-Za-z0-9]+|[A-Za-z0-9]+=[0-9]+[kKmMgG]?)$/) o=o" "$i; print o}'
+
+# Signature covers this document with the signature line removed, base64
+# Ed25519. Produced by the publish pipeline; this example is unsigned and will
+# be rejected by the forager, which is the intended behaviour for a sample.
+signature: ""

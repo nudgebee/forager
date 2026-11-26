@@ -20,6 +20,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Content pack `linux-inventory-v3.yaml`: v2 plus `cpu-arch`, `cpu-flags` and `processes`
+  (process names and boolean or numeric JVM `-XX:` flags, filtered on the host). It is a
+  release asset; installers still fetch v2, so sign it and place it in `pack_dir` to use it.
 - Datasource metadata is reported again after a config push, not only when the agent
   connects, so the server sees a pushed discovery datasource's scope (and sweeps it)
   without waiting for a reconnect.

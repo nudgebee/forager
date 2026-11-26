@@ -284,6 +284,8 @@ jobs:
           cp deploy/install.ps1 dist/install.ps1
           # Default inventory pack, fetched by the installers from the same release.
           cp docs/content-packs/linux-inventory-example.yaml dist/linux-inventory-v2.yaml
+          # Published for operators to sign and roll out; installers still fetch v2.
+          cp docs/content-packs/linux-inventory-v3.yaml dist/linux-inventory-v3.yaml
 
       - uses: sigstore/cosign-installer@6f9f17788090df1f26f669e9d70d6ae9567deba6 # v4.1.2
 
