@@ -224,6 +224,10 @@ See `docs/content-packs/linux-inventory-example.yaml` for a documented
 example. Guard facts are `os_family`, `os_id`, `os_major`, `arch`; guards
 support `==`/`!=` against a quoted literal, joined by `&&`/`||`.
 
+`docs/content-packs/linux-inventory-v3.yaml` adds `cpu-arch`, `cpu-flags` and
+`processes` to it. In their output a line starting with `#` (`#restricted`,
+`#unavailable`, `#truncated`), or no output at all, means the fact is unknown.
+
 The guard language is deliberately minimal and must stay that way. It is not
 an expression evaluator: anything richer becomes a sandbox-escape surface in
 a binary whose job is running signed content against production hosts.
