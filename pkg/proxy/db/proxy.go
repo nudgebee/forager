@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	_ "github.com/ClickHouse/clickhouse-go/v2"
 	_ "github.com/go-sql-driver/mysql"
@@ -513,7 +514,9 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 	}
 
 	columns := make([]map[string]any, len(colTypes))
+	typeNames := make([]string, len(colTypes))
 	for i, ct := range colTypes {
+		typeNames[i] = ct.DatabaseTypeName()
 		nullable, _ := ct.Nullable()
 		columns[i] = map[string]any{
 			"name":     ct.Name(),
@@ -540,6 +543,7 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 		}
 		row := make([]any, len(scanBuf))
 		copy(row, scanBuf)
+		textifyRow(row, typeNames)
 		resultRows = append(resultRows, row)
 		rowCount++
 	}
@@ -573,6 +577,34 @@ func (p *Proxy) handleQuery(ctx context.Context, pool *sql.DB, req *proxy.Action
 // read-only, so they are refused rather than run read-write.
 func supportsReadOnlyTx(dbType string) bool {
 	return dbType == "postgresql" || dbType == "mysql"
+}
+
+// binaryTypeMarkers are fragments of a database type name that hold bytes, not
+// text. Their values stay []byte, which encoding/json writes as base64.
+var binaryTypeMarkers = []string{"BINARY", "BLOB", "BIT", "BYTEA", "IMAGE", "GEOMETRY", "GEOGRAPHY", "UNIQUEIDENTIFIER", "ROWVERSION"}
+
+// textifyRow turns the []byte values of text columns into strings. The MySQL
+// driver returns every text, decimal and date value as []byte when scanned into
+// an any, and encoding/json would encode each as base64; pgx and go-mssqldb
+// already return strings. A value that is not valid UTF-8 stays as bytes.
+func textifyRow(row []any, typeNames []string) {
+	for i, v := range row {
+		b, ok := v.([]byte)
+		if !ok || i >= len(typeNames) || !utf8.Valid(b) {
+			continue
+		}
+		name := strings.ToUpper(typeNames[i])
+		binary := false
+		for _, m := range binaryTypeMarkers {
+			if strings.Contains(name, m) {
+				binary = true
+				break
+			}
+		}
+		if !binary {
+			row[i] = string(b)
+		}
+	}
 }
 
 func (p *Proxy) handleExecute(ctx context.Context, pool *sql.DB, req *proxy.ActionRequest) (*proxy.ActionResponse, error) {
